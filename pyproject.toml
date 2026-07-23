@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "para-audio-id"
+version = "0.1.0"
+description = "Parametric audio identification with MuQ and a fixed-width decoder."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "audiomentations>=0.38",
+  "lightning>=2.2",
+  "librosa>=0.10",
+  "numpy>=1.24,<2",
+  "PyYAML>=6",
+  "soundfile>=0.12",
+  "torch>=2.1",
+  "torchaudio>=2.1",
+  "tqdm>=4.66",
+  "wandb>=0.16",
+  "muq @ git+https://github.com/tencent-ailab/MuQ.git",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.4", "ruff>=0.5"]
+
+[tool.setuptools.packages.find]
+include = ["para_audio_id*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

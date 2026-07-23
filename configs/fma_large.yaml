@@ -1,0 +1,88 @@
+model:
+  muq_name: OpenMuQ/MuQ-large-msd-iter
+  sample_rate: 24000
+  encoder_dim: 1024
+  quantile_norm: 0.95
+  decoder:
+    model_dim: 512
+    layers: 6
+    heads: 8
+    feedforward_dim: 2048
+    dropout: 0.1
+
+data:
+  audio_root: /gpfs/scratch/acw723/fma_large
+  catalogue: data/fma_large_100k.jsonl
+  runtime_bad_files: data/runtime_bad_files.jsonl
+  query_duration: 5.0
+  samples_per_epoch: 100000
+  clean_probability: 0.25
+  augmentation:
+    pitch_shift:
+      enabled: false
+      probability: 0.0
+      semitones: [-2.0, 2.0]
+    time_stretch:
+      enabled: false
+      probability: 0.0
+      rate: [0.92, 1.08]
+    resampling:
+      enabled: false
+      probability: 0.0
+      factor: [0.5, 2.0]
+    background:
+      enabled: true
+      probability: 1.0
+      root: /gpfs/scratch/acw723/neural-music-fp-dataset/degradation/bg_noise/train
+      snr_db: [0.0, 10.0]
+    room_ir:
+      enabled: true
+      probability: 1.0
+      root: /gpfs/scratch/acw723/neural-music-fp-dataset/degradation/room_ir/train
+      pre_gain: [0.1, 1.0]
+    microphone_ir:
+      enabled: true
+      probability: 1.0
+      root: /gpfs/scratch/acw723/neural-music-fp-dataset/degradation/microphone_ir/train
+      pre_gain: [0.1, 1.0]
+
+train:
+  seed: 1337
+  log_dir: logs/fma-large
+  run_id:
+  max_steps: 100000
+  batch_size: 16
+  phase1_fraction: 0.1
+  muq_unfreeze_fraction: 0.25
+  decoder_lr: 1.0e-4
+  muq_lr: 1.0e-5
+  warmup_steps: 2000
+  weight_decay: 0.01
+  gradient_clip_val: 1.0
+  gradient_checkpointing: true
+  wandb:
+    enabled: false
+    project: para-audio-id
+    entity:
+    name:
+    mode: offline
+
+evaluation:
+  positions: [0.1, 0.5, 0.9]
+
+dataloader:
+  num_workers: 8
+  persistent_workers: true
+  prefetch_factor: 2
+
+trainer:
+  accelerator: gpu
+  devices: 4
+  strategy: ddp
+  precision: bf16-mixed
+  accumulate_grad_batches: 4
+  log_every_n_steps: 25
+  val_check_interval: 1000
+  limit_val_batches: 100
+  checkpoint_every_n_steps: 1000
+  save_top_k: 1

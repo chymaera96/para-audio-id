@@ -4,7 +4,7 @@ import argparse
 import json
 import os
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -159,6 +159,22 @@ def duration_label(value: float, boundaries: tuple[float, ...]) -> str:
     return str(next((index for index, edge in enumerate(boundaries) if value < edge), len(boundaries)))
 
 
+def merge_rare_numeric_labels(labels: list[str], minimum: int = 2) -> list[str]:
+    """Merge undersized ordered duration bins into their nearest populated neighbor."""
+    merged = list(labels)
+    while True:
+        counts = Counter(merged)
+        rare = [label for label, count in counts.items() if count < minimum]
+        if not rare:
+            return merged
+        label = min(rare, key=int)
+        candidates = [candidate for candidate in counts if candidate != label]
+        if not candidates:
+            return merged
+        replacement = min(candidates, key=lambda candidate: (abs(int(candidate) - int(label)), int(candidate)))
+        merged = [replacement if value == label else value for value in merged]
+
+
 def collect_mit(raw_root: Path) -> list[Source]:
     paths = audio_files(raw_root / "mit")
     labels = {
@@ -213,11 +229,12 @@ def collect_openair(raw_root: Path) -> list[Source]:
         room: duration_label(value, (3, 5, 5.5, 7, 16)) for room, value in minimum.items()
     }
     room_names = sorted(rooms)
+    stratify_labels = merge_rare_numeric_labels([labels[room] for room in room_names])
     _, test_items = train_test_split(
         room_names,
         test_size=0.25,
         random_state=27,
-        stratify=[labels[room] for room in room_names],
+        stratify=stratify_labels,
     )
     test_rooms = set(test_items)
     sources = []

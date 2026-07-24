@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -282,8 +283,15 @@ def collect_aachen(raw_root: Path) -> list[Source]:
 
 
 def microphone_name(path: Path) -> str | None:
+    # The Surrey archive can nest multiple related models below a shared parent
+    # directory. Match the actual IR filename before consulting directory names
+    # so, for example, RodeNT2A files are not also classified as RodeK2.
+    filename_matches = [name for name in MICROPHONES if path.name.startswith(name)]
+    if filename_matches:
+        return max(filename_matches, key=len)
     joined = "/".join(path.parts)
-    return next((name for name in MICROPHONES if name in joined), None)
+    path_matches = [name for name in MICROPHONES if name in joined]
+    return max(path_matches, key=len) if path_matches else None
 
 
 def incident_angle(path: Path) -> int | None:
@@ -343,6 +351,62 @@ def collect_sources(raw_root: Path) -> list[Source]:
     if missing:
         raise RuntimeError(f"Source preparation produced empty required groups: {missing}")
     return sources
+
+
+def source_digest(source: Source) -> str:
+    audio, sample_rate = read_input(source.path)
+    if source.channel is None:
+        selected = audio.mean(axis=1, dtype=np.float32)
+    else:
+        selected = audio[:, source.channel]
+    canonical = np.ascontiguousarray(selected, dtype="<f4")
+    digest = hashlib.sha256()
+    digest.update(str(sample_rate).encode())
+    digest.update(str(canonical.shape).encode())
+    digest.update(canonical.tobytes())
+    return digest.hexdigest()
+
+
+def deduplicate_ir_sources(sources: list[Source]) -> tuple[list[Source], list[dict]]:
+    """Remove exact room/microphone duplicates and prevent cross-split leakage."""
+    passthrough = [source for source in sources if source.dataset == "bg_noise"]
+    ir_sources = [source for source in sources if source.dataset != "bg_noise"]
+    groups: dict[str, list[Source]] = defaultdict(list)
+    for source in tqdm(ir_sources, desc="hashing selected IRs"):
+        groups[source_digest(source)].append(source)
+
+    retained: list[Source] = []
+    duplicate_rows: list[dict] = []
+    for digest, group in groups.items():
+        # Preserve held-out integrity if identical content was assigned to both
+        # sides: retain a test copy and exclude every matching training copy.
+        keeper = min(
+            group,
+            key=lambda source: (
+                0 if source.split == "test" else 1,
+                source.collection,
+                source.relative.as_posix(),
+            ),
+        )
+        retained.append(keeper)
+        for duplicate in group:
+            if duplicate == keeper:
+                continue
+            duplicate_rows.append(
+                {
+                    "sha256": digest,
+                    "kept_source": str(keeper.path),
+                    "kept_output": (
+                        Path(keeper.dataset) / keeper.split / keeper.relative
+                    ).as_posix(),
+                    "removed_source": str(duplicate.path),
+                    "removed_output": (
+                        Path(duplicate.dataset) / duplicate.split / duplicate.relative
+                    ).as_posix(),
+                    "cross_split": duplicate.split != keeper.split,
+                }
+            )
+    return passthrough + retained, duplicate_rows
 
 
 def valid_output(path: Path, sample_rate: int) -> bool:
@@ -474,6 +538,7 @@ def prepare(
         if strict_counts:
             raise RuntimeError(message)
         warnings.warn(message, stacklevel=2)
+    sources, duplicate_rows = deduplicate_ir_sources(sources)
     tasks = [
         (
             source,
@@ -494,6 +559,7 @@ def prepare(
                 failures.append(failure)
     write_jsonl([asdict(row) for row in conversions], output_root / "manifest.jsonl")
     write_jsonl(failures, output_root / "bad_files.jsonl")
+    write_jsonl(duplicate_rows, output_root / "source_duplicates.jsonl")
     summary = {}
     for dataset in ("bg_noise", "room_ir", "microphone_ir"):
         summary[dataset] = {}
@@ -523,6 +589,10 @@ def prepare(
                 "sample_rate": sample_rate,
                 "selection_seed": 27,
                 "source_count_mismatches": mismatches,
+                "exact_ir_duplicates_removed": len(duplicate_rows),
+                "cross_split_duplicates_removed": sum(
+                    row["cross_split"] for row in duplicate_rows
+                ),
                 "datasets": summary,
             },
             indent=2,

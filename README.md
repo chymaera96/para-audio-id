@@ -39,7 +39,9 @@ extracted originals default to
 goes to the parallel `degradation_24k` tree used by the training config. Optional
 positional arguments are `WORK_ROOT OUTPUT_ROOT WORKERS`. Reruns resume downloads
 and skip valid compiled outputs. Set `SKIP_DOWNLOAD=1` to recompile already
-extracted sources without contacting providers.
+extracted sources without contacting providers. Exact room/microphone waveform
+duplicates are removed before conversion; `source_duplicates.jsonl` records every
+removed source and flags any duplicate that crossed the train/test boundary.
 
 The JSONL catalogue uses paths relative to the audio root. Its adjacent metadata
 file records the selection and code seeds. Decode failures discovered later by

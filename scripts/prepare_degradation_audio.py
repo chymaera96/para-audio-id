@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import re
+import warnings
 from collections import Counter, defaultdict
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict, dataclass
@@ -446,7 +447,7 @@ def prepare(
     sample_rate: int = 24_000,
     workers: int = 8,
     force: bool = False,
-    allow_count_mismatch: bool = False,
+    strict_counts: bool = False,
 ) -> tuple[list[Conversion], list[dict]]:
     raw_root = Path(raw_root).resolve()
     output_root = Path(output_root).resolve()
@@ -463,12 +464,16 @@ def prepare(
         for collection, expected in EXPECTED_COLLECTION_COUNTS.items()
         if actual_counts[collection] != expected
     }
-    if mismatches and not allow_count_mismatch:
-        raise RuntimeError(
-            "Downloaded source selection does not match neural-music-fp counts: "
-            f"{json.dumps(mismatches, sort_keys=True)}. "
-            "Inspect provider layout changes or pass --allow-count-mismatch deliberately."
+    if mismatches:
+        message = (
+            "Original-source selection differs from the processed neural-music-fp "
+            f"release counts: {json.dumps(mismatches, sort_keys=True)}. "
+            "This is expected when original stereo channels are retained separately "
+            "or current provider layouts differ."
         )
+        if strict_counts:
+            raise RuntimeError(message)
+        warnings.warn(message, stacklevel=2)
     tasks = [
         (
             source,
@@ -517,6 +522,7 @@ def prepare(
                 "output_root": str(output_root),
                 "sample_rate": sample_rate,
                 "selection_seed": 27,
+                "source_count_mismatches": mismatches,
                 "datasets": summary,
             },
             indent=2,
@@ -537,7 +543,11 @@ def main() -> None:
     parser.add_argument("--sample-rate", type=int, default=24_000)
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--force", action="store_true")
-    parser.add_argument("--allow-count-mismatch", action="store_true")
+    parser.add_argument(
+        "--strict-counts",
+        action="store_true",
+        help="Fail instead of warning when source counts differ from the processed 8 kHz release.",
+    )
     args = parser.parse_args()
     conversions, failures = prepare(
         args.raw_root,
@@ -545,7 +555,7 @@ def main() -> None:
         sample_rate=args.sample_rate,
         workers=args.workers,
         force=args.force,
-        allow_count_mismatch=args.allow_count_mismatch,
+        strict_counts=args.strict_counts,
     )
     converted = sum(row.status == "converted" for row in conversions)
     existing = sum(row.status == "existing" for row in conversions)

@@ -23,6 +23,24 @@ python prepare_catalogue.py \
   --bad-files data/catalogue_bad_files.jsonl
 ```
 
+Download the original-resolution degradation datasets and compile them as mono
+24 kHz WAV files:
+
+```bash
+./prepare-datasets.sh
+```
+
+The script downloads TUT Acoustic Scenes 2016, MIT Survey, OpenAIR, Aachen AIR
+v1.4, and the Surrey microphone IR collection from their individual official
+sources. It applies the `neural-music-fp` selection and split rules, separates
+stereo IR channels, and resamples selected files to 24 kHz. Downloads and
+extracted originals default to
+`/gpfs/scratch/acw723/neural-music-fp-dataset/degradation_sources`; compiled data
+goes to the parallel `degradation_24k` tree used by the training config. Optional
+positional arguments are `WORK_ROOT OUTPUT_ROOT WORKERS`. Reruns resume downloads
+and skip valid compiled outputs. Set `SKIP_DOWNLOAD=1` to recompile already
+extracted sources without contacting providers.
+
 The JSONL catalogue uses paths relative to the audio root. Its adjacent metadata
 file records the selection and code seeds. Decode failures discovered later by
 DataLoader workers are appended under a file lock to

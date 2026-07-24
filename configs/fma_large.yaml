@@ -11,7 +11,7 @@ model:
     dropout: 0.1
 
 data:
-  audio_root: /gpfs/scratch/acw723/fma_large
+  audio_root: /gpfs/scratch/acw723/fma_data/fma_large
   catalogue: data/fma_large_100k.jsonl
   runtime_bad_files: data/runtime_bad_files.jsonl
   query_duration: 5.0
@@ -33,17 +33,17 @@ data:
     background:
       enabled: true
       probability: 1.0
-      root: /gpfs/scratch/acw723/neural-music-fp-dataset/degradation/bg_noise/train
+      root: /gpfs/scratch/acw723/audio-degradation-data/bg_noise/train
       snr_db: [0.0, 10.0]
     room_ir:
       enabled: true
       probability: 1.0
-      root: /gpfs/scratch/acw723/neural-music-fp-dataset/degradation/room_ir/train
+      root: /gpfs/scratch/acw723/audio-degradation-data/room_ir/train
       pre_gain: [0.1, 1.0]
     microphone_ir:
       enabled: true
       probability: 1.0
-      root: /gpfs/scratch/acw723/neural-music-fp-dataset/degradation/microphone_ir/train
+      root: /gpfs/scratch/acw723/audio-degradation-data/microphone_ir/train
       pre_gain: [0.1, 1.0]
 
 train:

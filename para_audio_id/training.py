@@ -203,10 +203,13 @@ def build_logger(cfg: dict, directory: Path):
     wandb = cfg["train"]["wandb"]
     if not wandb.get("enabled", False):
         return False
+    run_id = cfg["train"].get("run_id")
     return WandbLogger(
         project=wandb.get("project", "para-audio-id"),
         entity=wandb.get("entity"),
-        name=wandb.get("name") or cfg["train"].get("run_id"),
+        name=wandb.get("name") or run_id,
+        version=run_id,
+        resume="allow" if run_id else None,
         save_dir=str(directory),
         mode=wandb.get("mode", "offline"),
         config=cfg,

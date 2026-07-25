@@ -131,8 +131,16 @@ class ParametricIdentifierModule(pl.LightningModule):
         trainable = sum(
             parameter.numel() for parameter in self.network.parameters() if parameter.requires_grad
         )
-        self.log("model/total_parameters", float(total), sync_dist=False)
-        self.log("model/trainable_parameters", float(trainable), sync_dist=False)
+        # Lightning does not permit self.log() from on_fit_start. These are
+        # one-time metadata metrics, so send them directly through the logger.
+        if self.trainer.is_global_zero and self.logger is not None:
+            self.logger.log_metrics(
+                {
+                    "model/total_parameters": float(total),
+                    "model/trainable_parameters": float(trainable),
+                },
+                step=self.global_step,
+            )
 
     def on_train_epoch_end(self) -> None:
         if torch.cuda.is_available():

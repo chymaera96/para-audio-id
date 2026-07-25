@@ -49,6 +49,7 @@ data:
 train:
   seed: 1337
   log_dir: logs/fma-large
+  checkpoint_dir: /gpfs/scratch/acw723/para-audio-id/checkpoints
   run_id:
   max_steps: 100000
   batch_size: 16
@@ -84,5 +85,5 @@ trainer:
   log_every_n_steps: 25
   val_check_interval: 1000
   limit_val_batches: 100
-  checkpoint_every_n_steps: 1000
+  checkpoint_every_n_epochs: 5
   save_top_k: 1

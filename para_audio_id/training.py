@@ -194,6 +194,11 @@ def output_dir(cfg: dict) -> Path:
     return base / cfg["train"]["run_id"] if cfg["train"].get("run_id") else base
 
 
+def checkpoint_dir(cfg: dict) -> Path:
+    base = Path(cfg["train"].get("checkpoint_dir") or output_dir(cfg) / "checkpoints")
+    return base / cfg["train"]["run_id"] if cfg["train"].get("run_id") else base
+
+
 def build_logger(cfg: dict, directory: Path):
     wandb = cfg["train"]["wandb"]
     if not wandb.get("enabled", False):
@@ -216,11 +221,12 @@ def train(cfg: dict, *, checkpoint: str | Path | None = None) -> None:
     logger = build_logger(cfg, directory)
     callbacks: list[pl.Callback] = [
         ModelCheckpoint(
-            dirpath=directory / "checkpoints",
+            dirpath=checkpoint_dir(cfg),
             filename="step-{step}",
             save_last=True,
             save_top_k=1,
-            every_n_train_steps=int(cfg["trainer"]["checkpoint_every_n_steps"]),
+            every_n_epochs=int(cfg["trainer"]["checkpoint_every_n_epochs"]),
+            save_on_train_epoch_end=True,
         )
     ]
     if logger:

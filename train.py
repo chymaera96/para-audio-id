@@ -4,7 +4,7 @@ import argparse
 from pathlib import Path
 
 from para_audio_id.config import load_config, with_overrides
-from para_audio_id.training import output_dir, train
+from para_audio_id.training import checkpoint_dir, train
 
 
 def main() -> None:
@@ -29,7 +29,7 @@ def main() -> None:
     )
     checkpoint = args.ckpt_path
     if args.resume and checkpoint is None:
-        checkpoint = output_dir(cfg) / "checkpoints" / "last.ckpt"
+        checkpoint = checkpoint_dir(cfg) / "last.ckpt"
     if checkpoint is not None and not checkpoint.exists():
         raise FileNotFoundError(checkpoint)
     train(cfg, checkpoint=checkpoint)

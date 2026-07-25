@@ -33,17 +33,17 @@ data:
     background:
       enabled: true
       probability: 1.0
-      root: /gpfs/scratch/acw723/audio-degradation-data/bg_noise/train
+      root: /gpfs/scratch/acw723/audio-degradation-data/degradation_24k/bg_noise/train
       snr_db: [0.0, 10.0]
     room_ir:
       enabled: true
       probability: 1.0
-      root: /gpfs/scratch/acw723/audio-degradation-data/room_ir/train
+      root: /gpfs/scratch/acw723/audio-degradation-data/degradation_24k/room_ir/train
       pre_gain: [0.1, 1.0]
     microphone_ir:
       enabled: true
       probability: 1.0
-      root: /gpfs/scratch/acw723/audio-degradation-data/microphone_ir/train
+      root: /gpfs/scratch/acw723/audio-degradation-data/degradation_24k/microphone_ir/train
       pre_gain: [0.1, 1.0]
 
 train:

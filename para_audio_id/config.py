@@ -19,7 +19,13 @@ def save_config(config: dict[str, Any], path: str | Path) -> None:
         yaml.safe_dump(config, handle, sort_keys=False)
 
 
-def with_overrides(config: dict[str, Any], *, run_id: str | None, wandb_online: bool) -> dict:
+def with_overrides(
+    config: dict[str, Any],
+    *,
+    run_id: str | None,
+    wandb_online: bool,
+    devices: int | None = None,
+) -> dict:
     cfg = deepcopy(config)
     wandb = cfg.setdefault("train", {}).setdefault("wandb", {})
     if wandb_online:
@@ -28,4 +34,9 @@ def with_overrides(config: dict[str, Any], *, run_id: str | None, wandb_online: 
     if run_id:
         cfg["train"]["run_id"] = run_id
         wandb["name"] = run_id
+    if devices is not None:
+        if devices < 1:
+            raise ValueError(f"devices must be positive, got {devices}")
+        cfg.setdefault("trainer", {})["devices"] = devices
+        cfg["trainer"]["strategy"] = "auto"
     return cfg

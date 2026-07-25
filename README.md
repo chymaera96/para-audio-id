@@ -60,11 +60,13 @@ actual GPFS locations before training.
 python train.py configs/fma_large.yaml --run-id first-100k
 python train.py configs/fma_large.yaml --run-id first-100k --resume
 python train.py configs/fma_large.yaml --run-id first-100k --wandb-online
+python train.py configs/fma_large.yaml --run-id first-100k --devices 1
 ```
 
 Configuration is the source of truth. `--run-id` overrides both the output
-subdirectory and W&B run name; `--wandb-online` enables online logging. The same
-functions can be imported:
+subdirectory and W&B run name; `--wandb-online` enables online logging;
+`--devices` overrides the GPU count and lets Lightning select single-device or
+distributed execution automatically. The same functions can be imported:
 
 ```python
 from para_audio_id.config import load_config

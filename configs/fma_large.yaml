@@ -52,7 +52,7 @@ train:
   checkpoint_dir: /gpfs/scratch/acw723/para-audio-id/checkpoints
   run_id:
   max_steps: 100000
-  batch_size: 16
+  batch_size: 64
   phase1_fraction: 0.1
   muq_unfreeze_fraction: 0.25
   decoder_lr: 1.0e-4

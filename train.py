@@ -3,21 +3,16 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from para_audio_id.audio_lm.training import checkpoint_dir, train
 from para_audio_id.config import load_config, with_overrides
-from para_audio_id.training import checkpoint_dir, train
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train the parametric audio identifier.")
+    parser = argparse.ArgumentParser(description="Train the discrete-audio causal LM.")
     parser.add_argument("config", type=Path)
     parser.add_argument("--wandb-online", action="store_true")
     parser.add_argument("--run-id")
-    parser.add_argument(
-        "--devices",
-        type=int,
-        default=None,
-        help="Number of GPUs. Overrides trainer.devices and uses Lightning's automatic strategy.",
-    )
+    parser.add_argument("--devices", type=int, default=None)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--ckpt-path", type=Path)
     args = parser.parse_args()

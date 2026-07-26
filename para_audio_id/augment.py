@@ -104,8 +104,7 @@ class WaveformAugmenter:
         for name, files in (("room_ir", self.room_ir), ("microphone_ir", self.microphone_ir)):
             section = self.cfg[name]
             if self._maybe(section):
-                gain = float(self.rng.uniform(*section.get("pre_gain", [1.0, 1.0])))
-                output = convolve_ir(output * gain, self._asset(files))
+                output = convolve_ir(output, self._asset(files))
                 applied[name] = True
         target = len(audio)
         if len(output) < target:

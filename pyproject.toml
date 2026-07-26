@@ -32,3 +32,8 @@ include = ["para_audio_id*"]
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+
+[tool.pytest.ini_options]
+markers = [
+  "integration: requires external model weights and the full runtime environment",
+]

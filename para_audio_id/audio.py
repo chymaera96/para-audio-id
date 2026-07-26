@@ -72,12 +72,19 @@ class BadFileRegistry:
             return paths
 
     def contains(self, relative_path: str) -> bool:
+        self.refresh()
+        return relative_path in self._bad
+
+    def refresh(self) -> None:
         if self.path.exists():
             mtime_ns = self.path.stat().st_mtime_ns
             if mtime_ns != self._mtime_ns:
                 self._bad.update(self._read())
                 self._mtime_ns = mtime_ns
-        return relative_path in self._bad
+
+    def paths(self) -> set[str]:
+        self.refresh()
+        return set(self._bad)
 
     def add(self, relative_path: str, exc: BaseException) -> None:
         if relative_path in self._bad:

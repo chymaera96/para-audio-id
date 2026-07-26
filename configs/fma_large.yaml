@@ -8,15 +8,15 @@ model:
     layers: 6
     heads: 8
     feedforward_dim: 2048
-    dropout: 0.1
+    dropout: 0.0
 
 data:
   audio_root: /gpfs/scratch/acw723/fma_data/fma_large
   catalogue: data/fma_large_100k.jsonl
   runtime_bad_files: data/runtime_bad_files.jsonl
   query_duration: 5.0
-  samples_per_epoch: 100000
-  clean_probability: 0.25
+  segment_stride: 5.0
+  clean_probability: 1.0
   augmentation:
     pitch_shift:
       enabled: false
@@ -31,20 +31,18 @@ data:
       probability: 0.0
       factor: [0.5, 2.0]
     background:
-      enabled: true
-      probability: 1.0
+      enabled: false
+      probability: 0.0
       root: /gpfs/scratch/acw723/audio-degradation-data/degradation_24k/bg_noise/train
       snr_db: [0.0, 10.0]
     room_ir:
-      enabled: true
-      probability: 1.0
+      enabled: false
+      probability: 0.0
       root: /gpfs/scratch/acw723/audio-degradation-data/degradation_24k/room_ir/train
-      pre_gain: [0.1, 1.0]
     microphone_ir:
-      enabled: true
-      probability: 1.0
+      enabled: false
+      probability: 0.0
       root: /gpfs/scratch/acw723/audio-degradation-data/degradation_24k/microphone_ir/train
-      pre_gain: [0.1, 1.0]
 
 train:
   seed: 1337
@@ -52,13 +50,14 @@ train:
   checkpoint_dir: /gpfs/scratch/acw723/para-audio-id/checkpoints
   run_id:
   max_steps: 100000
-  batch_size: 64
-  phase1_fraction: 0.1
+  songs_per_batch: 8
+  views_per_song: 8
+  phase1_exposures: 2
   muq_unfreeze_fraction: 0.25
   decoder_lr: 1.0e-4
   muq_lr: 1.0e-5
   warmup_steps: 2000
-  weight_decay: 0.01
+  weight_decay: 0.0
   gradient_clip_val: 1.0
   gradient_checkpointing: true
   wandb:
@@ -70,6 +69,10 @@ train:
 
 evaluation:
   positions: [0.1, 0.5, 0.9]
+  probe_tracks: 512
+  probe_batch_size: 16
+  greedy_every_n_exposures: 1
+  beam_every_n_exposures: 5
 
 dataloader:
   num_workers: 8

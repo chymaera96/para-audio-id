@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 
 import torch
@@ -9,20 +10,34 @@ from .codes import BOS_TOKEN, CODE_LENGTH, VOCAB_SIZE, teacher_forcing_inputs, t
 
 
 class MuQEncoder(nn.Module):
-    def __init__(self, model_name: str):
+    def __init__(self, model_name: str, encoder_dim: int = 1024):
         super().__init__()
         try:
             from muq import MuQ
         except ImportError as exc:
             raise ImportError("Install the project with its `muq` dependency to use MuQEncoder") from exc
         self.model = MuQ.from_pretrained(model_name)
+        self.encoder_dim = encoder_dim
         self._upper_blocks: list[nn.Module] = []
+        self._fully_frozen = False
 
     def forward(self, audio: torch.Tensor) -> torch.Tensor:
-        if audio.ndim == 2:
-            audio = audio.unsqueeze(1)
-        output = self.model(audio, output_hidden_states=True)
-        return output.last_hidden_state
+        if audio.ndim != 2:
+            raise ValueError(f"Expected MuQ input [batch, time], got {tuple(audio.shape)}")
+        context = torch.no_grad() if self._fully_frozen else nullcontext()
+        with context:
+            output = self.model(audio, output_hidden_states=True)
+        hidden = output.last_hidden_state
+        if hidden.ndim != 3 or hidden.shape[0] != audio.shape[0]:
+            raise ValueError(
+                "Expected MuQ output [batch, sequence, hidden], "
+                f"got {tuple(hidden.shape)}"
+            )
+        if hidden.shape[-1] != self.encoder_dim:
+            raise ValueError(
+                f"Expected MuQ hidden size {self.encoder_dim}, got {hidden.shape[-1]}"
+            )
+        return hidden
 
     def transformer_blocks(self) -> list[nn.Module]:
         candidates: list[nn.ModuleList] = []
@@ -35,14 +50,36 @@ class MuQEncoder(nn.Module):
 
     def freeze_all(self) -> None:
         self.model.requires_grad_(False)
+        self._upper_blocks = []
+        self._fully_frozen = True
+        self.model.eval()
 
     def unfreeze_upper_fraction(self, fraction: float = 0.25) -> list[nn.Module]:
+        if not 0 < fraction <= 1:
+            raise ValueError(f"Unfreeze fraction must be in (0, 1], got {fraction}")
         blocks = self.transformer_blocks()
         count = max(1, round(len(blocks) * fraction))
         self._upper_blocks = blocks[-count:]
         for block in self._upper_blocks:
             block.requires_grad_(True)
+        self._fully_frozen = False
+        self.model.eval()
+        for block in self._upper_blocks:
+            block.train(self.training)
         return self._upper_blocks
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        # Frozen MuQ components must never acquire train-mode stochasticity.
+        self.model.eval()
+        if not self._fully_frozen:
+            for block in self._upper_blocks:
+                block.train(mode)
+        return self
+
+    @property
+    def fully_frozen(self) -> bool:
+        return self._fully_frozen
 
 
 class DigitDecoder(nn.Module):
@@ -93,7 +130,9 @@ class ParametricAudioIdentifier(nn.Module):
     def __init__(self, cfg: dict, encoder: nn.Module | None = None):
         super().__init__()
         model_cfg = cfg["model"]
-        self.muq = encoder or MuQEncoder(model_cfg["muq_name"])
+        self.muq = encoder or MuQEncoder(
+            model_cfg["muq_name"], encoder_dim=int(model_cfg["encoder_dim"])
+        )
         decoder_cfg = model_cfg["decoder"]
         self.digit_decoder = DigitDecoder(
             encoder_dim=int(model_cfg["encoder_dim"]),

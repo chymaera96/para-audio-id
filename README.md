@@ -51,10 +51,14 @@ future runs load and ignore them immediately.
 
 ## Training
 
-[`configs/fma_large.yaml`](configs/fma_large.yaml) defaults to 5-second, 24 kHz
-queries. Its only enabled degradations are background-noise mixing, room-IR
-convolution, and microphone-IR convolution. Set those three asset roots to the
-actual GPFS locations before training.
+[`configs/fma_large.yaml`](configs/fma_large.yaml) defaults to clean 5-second,
+24 kHz queries for the initial memorisation run. All augmentation families are
+disabled and their probabilities are zero, so their asset roots are not accessed.
+
+Training uses a deterministic inventory of non-overlapping five-second windows,
+plus a duration-anchored tail window when needed. Each exposure presents every
+valid catalogue identity once in global batches of eight songs and eight canonical
+views per song. On DDP, the global identity count is divided across ranks.
 
 ```bash
 python train.py configs/fma_large.yaml --run-id first-100k
@@ -75,9 +79,17 @@ from para_audio_id.training import train
 train(load_config("configs/fma_large.yaml"))
 ```
 
-Phase 1 freezes MuQ for the configured first fraction of optimizer steps. Phase 2
-unfreezes its upper quarter at a 10x lower learning rate. Checkpoints include the
-resolved preprocessing settings and complete code mapping.
+Phase 1 keeps MuQ frozen and in evaluation mode for two complete catalogue
+exposures. At the start of exposure three, phase 2 unfreezes only its upper quarter
+at a 10x lower learning rate. The decoder has no dropout or weight decay for this
+memorisation run.
+
+Teacher-forced training and validation metrics are named explicitly. A fixed
+512-track clean probe reports greedy exact accuracy every exposure and beam
+Top-1/5/10 every five exposures and at the phase transition. Checkpoints are saved
+every five exposures under
+`/gpfs/scratch/acw723/para-audio-id/checkpoints/<run-id>/` and include the complete
+code mapping, segment policy, exposure state, and fixed probe.
 
 ## Evaluation and inference
 
@@ -85,9 +97,8 @@ Clean and degraded evaluation use deterministic 10%, 50%, and 90% positions in
 every catalogue recording:
 
 ```bash
-python evaluate.py logs/fma-large/first-100k/checkpoints/last.ckpt clean.json
-python evaluate.py logs/fma-large/first-100k/checkpoints/last.ckpt degraded.json --degraded
-python identify.py logs/fma-large/first-100k/checkpoints/last.ckpt query.wav
+python evaluate.py /gpfs/scratch/acw723/para-audio-id/checkpoints/first-100k/last.ckpt clean.json
+python identify.py /gpfs/scratch/acw723/para-audio-id/checkpoints/first-100k/last.ckpt query.wav
 ```
 
 Evaluation reports greedy Top-1, beam Top-1/5/10, beam reciprocal rank,
@@ -100,4 +111,11 @@ the model, preprocessing configuration, and small code metadata.
 ```bash
 pytest
 ruff check .
+```
+
+The real-checkpoint MuQ shape and backward smoke test is opt-in because it loads
+the full model:
+
+```bash
+RUN_MUQ_INTEGRATION=1 pytest -m integration tests/test_muq_integration.py
 ```

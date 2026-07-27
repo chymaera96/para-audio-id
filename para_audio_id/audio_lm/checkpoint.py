@@ -26,6 +26,7 @@ def validate_checkpoint_metadata(
         "model_config",
         "code_mapping_fingerprint",
         "validation_probe",
+        "training_track_ids",
     }
     missing = sorted(required - checkpoint.keys())
     if missing:

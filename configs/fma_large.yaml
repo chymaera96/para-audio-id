@@ -25,7 +25,7 @@ data:
   token_root: /gpfs/scratch/acw723/para-audio-id/audio_lm_tokens
   segment_duration: 5.0
   segments_per_track: 6
-  max_training_tracks: 1000
+  max_training_tracks: 10000
   shard_documents: 10000
   extraction_batch_size: 32
 

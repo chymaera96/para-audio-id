@@ -10,6 +10,7 @@ from para_audio_id.audio_lm.checkpoint import (
     validate_checkpoint_metadata,
 )
 from para_audio_id.audio_lm.dataset import collate_causal_documents
+from para_audio_id.audio_lm.evaluation import select_checkpoint_cohort
 from para_audio_id.audio_lm.generation import beam_generate, greedy_generate
 from para_audio_id.audio_lm.losses import causal_audio_id_losses
 from para_audio_id.audio_lm.model import AudioCausalLM
@@ -97,6 +98,7 @@ def test_checkpoint_identity_and_inference_loader_need_no_token_store(tmp_path):
         "model_config": cfg["model"],
         "code_mapping_fingerprint": "mapping",
         "validation_probe": ["track"],
+        "training_track_ids": ["track"],
     }
     validate_checkpoint_metadata(metadata, tokenizer_fingerprint="fingerprint")
     with pytest.raises(ValueError, match="architecture"):
@@ -114,3 +116,17 @@ def test_checkpoint_identity_and_inference_loader_need_no_token_store(tmp_path):
         torch.equal(left, right)
         for left, right in zip(model.parameters(), loaded.parameters(), strict=True)
     )
+
+
+def test_checkpoint_training_cohort_selection_is_exact():
+    checkpoint = {
+        "validation_probe": ["probe"],
+        "training_track_ids": ["track-2", "track-1"],
+    }
+    assert select_checkpoint_cohort(
+        checkpoint, cohort="training", expected_tracks=2
+    ) == ["track-2", "track-1"]
+    with pytest.raises(ValueError, match="Expected exactly 1000"):
+        select_checkpoint_cohort(
+            checkpoint, cohort="training", expected_tracks=1000
+        )

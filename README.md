@@ -104,7 +104,7 @@ loss = (
 Audio and identifier losses are also logged separately for diagnosis, but neither
 is optimized as a separately normalized objective and there is no objective
 schedule.
-The current experiment samples a seeded 1,000-track subset from all tracks with
+The current experiment samples a seeded 10,000-track subset from all tracks with
 six complete cached segments. The exact selected track IDs are saved as
 `training_tracks.json` beside the run configuration and embedded in checkpoints;
 the full token cache is reused without re-tokenization. Identifier digit targets
@@ -177,6 +177,24 @@ python identify.py \
 
 The five-digit exact random baseline is `1e-5`. A functioning pipeline is not
 evidence that catalogue acquisition succeeded.
+
+To evaluate the exact 1,000-track training cohort from the preceding run on
+shifted clean excerpts at 2.5, 12.5, and 22.5 seconds, with all five identifier
+digits generated autoregressively and no teacher-forced scoring:
+
+```bash
+python evaluate.py \
+  /gpfs/scratch/acw723/para-audio-id/audio-lm-checkpoints/tc-1k-id20-20k/last.ckpt \
+  evaluation-1k-shifted-greedy.json \
+  --cohort training \
+  --expected-tracks 1000 \
+  --greedy-only
+```
+
+The expected-track guard prevents accidentally running this test against the
+10,000-track checkpoint. The output records the checkpoint cohort, shifted
+positions, evaluated/skipped track counts, protocol validity, per-query generated
+codes, and free-running greedy exact accuracy.
 
 ## Tests
 

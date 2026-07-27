@@ -19,7 +19,7 @@ def test_primary_config_is_audio_lm_and_matches_logical_batch():
     assert physical_documents * cfg["trainer"]["accumulate_grad_batches"] == 64
     assert cfg["train"]["deterministic"]
     assert cfg["train"]["id_digit_weight"] == 20.0
-    assert cfg["data"]["max_training_tracks"] == 1000
+    assert cfg["data"]["max_training_tracks"] == 10_000
     assert cfg["train"]["max_steps"] == 20_000
     assert cfg["train"]["warmup_steps"] == 200
     assert cfg["train"]["evaluation_interval"] == 500

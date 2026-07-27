@@ -88,6 +88,19 @@ def test_sampler_is_deterministic_across_resume(tmp_path):
     assert len([index for batch in first for index in batch]) == len(dataset)
 
 
+def test_training_track_subset_is_seeded_and_complete(tmp_path):
+    store = make_store(tmp_path, tracks=10)
+    first = AudioTokenDataset(store, max_tracks=4, subset_seed=17)
+    repeated = AudioTokenDataset(store, max_tracks=4, subset_seed=17)
+    different = AudioTokenDataset(store, max_tracks=4, subset_seed=18)
+    assert first.track_ids == repeated.track_ids
+    assert first.track_ids != different.track_ids
+    assert len(first.track_ids) == 4
+    assert len(first) == 4 * 6
+    assert first.complete_track_count == 10
+    assert len(first.excluded_by_subset) == 6
+
+
 def test_causal_document_masks_and_no_first_digit_leakage(tmp_path):
     dataset = AudioTokenDataset(make_store(tmp_path, tracks=1))
     example = dataset[0]

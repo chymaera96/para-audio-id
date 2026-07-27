@@ -78,7 +78,11 @@ def test_one_step_training_smoke(tmp_path):
             "attn_pdrop": 0.0,
             "tie_word_embeddings": True,
         },
-        "data": {"token_root": str(token_root), "segments_per_track": 6},
+        "data": {
+            "token_root": str(token_root),
+            "segments_per_track": 6,
+            "max_training_tracks": 4,
+        },
         "train": {
             "seed": 7,
             "deterministic": True,
@@ -92,8 +96,9 @@ def test_one_step_training_smoke(tmp_path):
             "learning_rate": 3e-4,
             "betas": [0.9, 0.95],
             "weight_decay": 0.0,
-            "warmup_fraction": 0.02,
-            "id_digit_weight": 5.0,
+            "warmup_steps": 1,
+            "evaluation_interval": 2,
+            "id_digit_weight": 20.0,
             "gradient_clip_norm": 1.0,
             "wandb": {"enabled": False},
         },
@@ -101,7 +106,6 @@ def test_one_step_training_smoke(tmp_path):
             "probe_tracks": 2,
             "probe_batch_size": 2,
             "generation_probe_tracks": 1,
-            "generation_every_n_passes": 100,
             "beam_width": 10,
         },
         "dataloader": {

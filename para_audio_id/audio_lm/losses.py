@@ -24,7 +24,7 @@ def causal_audio_id_losses(
     id_target_mask: torch.Tensor,
     boundary_target_mask: torch.Tensor,
     *,
-    id_digit_weight: float = 5.0,
+    id_digit_weight: float = 20.0,
 ) -> dict[str, torch.Tensor]:
     if id_digit_weight <= 0:
         raise ValueError("id_digit_weight must be positive")

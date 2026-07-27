@@ -13,7 +13,14 @@ from .vocabulary import AudioLMVocabulary
 
 
 class AudioTokenDataset(Dataset):
-    def __init__(self, store: TokenStoreIndex, *, expected_segments_per_track: int = 6):
+    def __init__(
+        self,
+        store: TokenStoreIndex,
+        *,
+        expected_segments_per_track: int = 6,
+        max_tracks: int | None = None,
+        subset_seed: int = 0,
+    ):
         self.store = store
         available: dict[str, list] = defaultdict(list)
         for record in store.records:
@@ -24,8 +31,24 @@ class AudioTokenDataset(Dataset):
             if len(records) == expected_segments_per_track
         }
         self.dropped_incomplete_tracks = sorted(set(available) - complete_tracks)
+        self.complete_track_count = len(complete_tracks)
+        if max_tracks is not None:
+            if max_tracks < 1:
+                raise ValueError("max_tracks must be positive when provided")
+            if max_tracks > len(complete_tracks):
+                raise ValueError(
+                    f"Requested {max_tracks} training tracks, but only "
+                    f"{len(complete_tracks)} have complete token sets"
+                )
+            candidates = np.asarray(sorted(complete_tracks), dtype=object)
+            generator = np.random.default_rng(subset_seed)
+            selected = generator.choice(candidates, size=max_tracks, replace=False)
+            selected_tracks = {str(track_id) for track_id in selected}
+        else:
+            selected_tracks = complete_tracks
+        self.excluded_by_subset = sorted(complete_tracks - selected_tracks)
         self.records = [
-            record for record in store.records if record.track_id in complete_tracks
+            record for record in store.records if record.track_id in selected_tracks
         ]
         self.by_track: dict[str, list[int]] = defaultdict(list)
         for index, record in enumerate(self.records):
@@ -61,6 +84,7 @@ class CataloguePassBatchSampler(Sampler[list[int]]):
         catalogue_pass: int = 0,
         world_size: int = 1,
         rank: int = 0,
+        batch_count_multiple: int = 1,
     ):
         if tracks_per_microbatch < 1 or segments_per_track < 1:
             raise ValueError("Batch dimensions must be positive")
@@ -68,6 +92,8 @@ class CataloguePassBatchSampler(Sampler[list[int]]):
             raise ValueError("Invalid distributed rank")
         if tracks_per_microbatch % world_size:
             raise ValueError("tracks_per_microbatch must divide evenly across ranks")
+        if batch_count_multiple < 1:
+            raise ValueError("batch_count_multiple must be positive")
         lengths = {len(indices) for indices in dataset.by_track.values()}
         if any(length % segments_per_track for length in lengths):
             raise ValueError(
@@ -80,18 +106,22 @@ class CataloguePassBatchSampler(Sampler[list[int]]):
         self.catalogue_pass = catalogue_pass
         self.world_size = world_size
         self.rank = rank
+        self.batch_count_multiple = batch_count_multiple
         self.rounds = max(length // segments_per_track for length in lengths)
 
     def set_epoch(self, catalogue_pass: int) -> None:
         self.catalogue_pass = catalogue_pass
 
     def __len__(self) -> int:
-        return self.rounds * math.ceil(
+        batches = self.rounds * math.ceil(
             len(self.dataset.track_ids) / self.tracks_per_microbatch
         )
+        return math.ceil(batches / self.batch_count_multiple) * self.batch_count_multiple
 
     def __iter__(self) -> Iterator[list[int]]:
         local_tracks = self.tracks_per_microbatch // self.world_size
+        first_batches: list[list[int]] = []
+        yielded = 0
         for segment_round in range(self.rounds):
             track_ids = np.asarray(self.dataset.track_ids, dtype=object)
             rng = np.random.default_rng(
@@ -111,7 +141,12 @@ class CataloguePassBatchSampler(Sampler[list[int]]):
                     indices = self.dataset.by_track[str(track_id)]
                     start = segment_round * self.segments_per_track
                     batch.extend(indices[start : start + self.segments_per_track])
+                if len(first_batches) < self.batch_count_multiple:
+                    first_batches.append(batch)
+                yielded += 1
                 yield batch
+        for index in range(len(self) - yielded):
+            yield first_batches[index % len(first_batches)]
 
 
 def collate_causal_documents(

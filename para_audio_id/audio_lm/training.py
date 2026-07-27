@@ -31,6 +31,36 @@ from .tokenizer import TokenizerSpec
 from .vocabulary import AudioLMVocabulary
 
 
+class ResumableDataLoader(DataLoader):
+    """DataLoader that restores its delivered-batch position within a pass."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._batches_yielded = 0
+        self._resume_batches = 0
+
+    def __iter__(self):
+        iterator = super().__iter__()
+        skip = self._resume_batches
+        self._resume_batches = 0
+        self._batches_yielded = 0
+        for _ in range(skip):
+            next(iterator)
+            self._batches_yielded += 1
+        for batch in iterator:
+            self._batches_yielded += 1
+            yield batch
+
+    def state_dict(self) -> dict:
+        return {"batches_yielded": self._batches_yielded}
+
+    def load_state_dict(self, state_dict: dict) -> None:
+        batches = int(state_dict["batches_yielded"])
+        if not 0 <= batches <= len(self):
+            raise ValueError(f"Invalid resumed DataLoader batch position {batches}")
+        self._resume_batches = batches
+
+
 def seed_worker(worker_id: int) -> None:
     seed = torch.initial_seed() % (2**32)
     random.seed(seed)
@@ -60,6 +90,12 @@ class AudioLMDataModule(pl.LightningDataModule):
         self.dataset = AudioTokenDataset(
             store,
             expected_segments_per_track=int(self.cfg["data"]["segments_per_track"]),
+            max_tracks=(
+                int(self.cfg["data"]["max_training_tracks"])
+                if self.cfg["data"].get("max_training_tracks") is not None
+                else None
+            ),
+            subset_seed=int(self.cfg["train"]["seed"]),
         )
         if not self.dataset.track_ids:
             raise RuntimeError("No tracks have a complete canonical token set")
@@ -120,9 +156,12 @@ class AudioLMDataModule(pl.LightningDataModule):
             catalogue_pass=int(self.trainer.current_epoch),
             world_size=int(self.trainer.world_size),
             rank=int(self.trainer.global_rank),
+            batch_count_multiple=int(
+                self.cfg["trainer"]["accumulate_grad_batches"]
+            ),
         )
         self.batch_sampler = sampler
-        return DataLoader(
+        return ResumableDataLoader(
             self.dataset,
             batch_sampler=sampler,
             collate_fn=self._collate(),
@@ -151,6 +190,7 @@ class AudioLMModule(pl.LightningModule):
         tokenizer_spec: TokenizerSpec,
         code_mapping_fingerprint: str,
         validation_probe: list[str],
+        training_track_ids: list[str],
     ):
         super().__init__()
         self.cfg = cfg
@@ -158,6 +198,7 @@ class AudioLMModule(pl.LightningModule):
         self.tokenizer_spec = tokenizer_spec
         self.code_mapping_fingerprint = code_mapping_fingerprint
         self.validation_probe = validation_probe
+        self.training_track_ids = training_track_ids
         self.model = AudioCausalLM(cfg, vocabulary)
         self.documents_consumed = 0
         self.tokens_consumed = 0
@@ -239,6 +280,15 @@ class AudioLMModule(pl.LightningModule):
                     "data/incomplete_tracks": float(
                         len(self.trainer.datamodule.dataset.dropped_incomplete_tracks)
                     ),
+                    "data/available_complete_tracks": float(
+                        self.trainer.datamodule.dataset.complete_track_count
+                    ),
+                    "data/subset_excluded_tracks": float(
+                        len(self.trainer.datamodule.dataset.excluded_by_subset)
+                    ),
+                    "train/id_digit_weight": float(
+                        self.cfg["train"]["id_digit_weight"]
+                    ),
                 },
                 step=self.global_step,
             )
@@ -261,10 +311,6 @@ class AudioLMModule(pl.LightningModule):
             float((self.tokens_consumed - self.session_tokens_start) / elapsed),
             sync_dist=False,
         )
-        interval = int(self.cfg["evaluation"]["generation_every_n_passes"])
-        completed = int(self.current_epoch) + 1
-        if completed % interval == 0:
-            self._generation_probe()
         if torch.cuda.is_available():
             self.log(
                 "system/peak_gpu_memory_bytes",
@@ -272,6 +318,9 @@ class AudioLMModule(pl.LightningModule):
                 sync_dist=False,
             )
             torch.cuda.reset_peak_memory_stats(self.device)
+
+    def on_validation_epoch_end(self) -> None:
+        self._generation_probe()
 
     def _generation_probe(self) -> None:
         if not self.trainer.is_global_zero or self.trainer.sanity_checking:
@@ -356,6 +405,7 @@ class AudioLMModule(pl.LightningModule):
                 "model_config": self.cfg["model"],
                 "code_mapping_fingerprint": self.code_mapping_fingerprint,
                 "validation_probe": self.validation_probe,
+                "training_track_ids": self.training_track_ids,
                 "documents_consumed": self.documents_consumed,
                 "tokens_consumed": self.tokens_consumed,
                 "python_rng_state": random.getstate(),
@@ -383,6 +433,8 @@ class AudioLMModule(pl.LightningModule):
             raise ValueError("Resume checkpoint code mapping does not match")
         if checkpoint.get("validation_probe") != self.validation_probe:
             raise ValueError("Resume checkpoint validation probe does not match")
+        if checkpoint.get("training_track_ids") != self.training_track_ids:
+            raise ValueError("Resume checkpoint training-track subset does not match")
         self.documents_consumed = int(checkpoint.get("documents_consumed", 0))
         self.tokens_consumed = int(checkpoint.get("tokens_consumed", 0))
         random.setstate(checkpoint["python_rng_state"])
@@ -409,7 +461,9 @@ class AudioLMModule(pl.LightningModule):
             weight_decay=float(train_cfg["weight_decay"]),
         )
         max_steps = int(train_cfg["max_steps"])
-        warmup_steps = max(1, round(max_steps * float(train_cfg["warmup_fraction"])))
+        warmup_steps = int(train_cfg["warmup_steps"])
+        if not 0 < warmup_steps < max_steps:
+            raise ValueError("warmup_steps must be between zero and max_steps")
 
         def schedule(step: int) -> float:
             if step < warmup_steps:
@@ -466,39 +520,59 @@ def train(cfg: dict, *, checkpoint: str | Path | None = None) -> None:
     save_config(cfg, directory / "config.yaml")
     datamodule = AudioLMDataModule(cfg)
     datamodule.setup("fit")
+    (directory / "training_tracks.json").write_text(
+        json.dumps(datamodule.dataset.track_ids, indent=2) + "\n"
+    )
     module = AudioLMModule(
         cfg,
         datamodule.vocabulary,
         datamodule.tokenizer_spec,
         datamodule.code_mapping_fingerprint,
         datamodule.probe_track_ids,
+        datamodule.dataset.track_ids,
     )
     logger = build_logger(cfg, directory)
     callbacks: list[pl.Callback] = [
         ModelCheckpoint(
             dirpath=checkpoint_dir(cfg),
-            filename="pass-{epoch}-step-{step}",
+            filename="step-{step}",
             save_last=True,
             save_top_k=-1,
-            every_n_epochs=1,
-            save_on_train_epoch_end=True,
+            every_n_train_steps=int(cfg["train"]["evaluation_interval"]),
+            save_on_train_epoch_end=False,
+            auto_insert_metric_name=False,
         )
     ]
     if logger:
         callbacks.append(LearningRateMonitor("step"))
+    accumulation = int(cfg["trainer"]["accumulate_grad_batches"])
+    display_sampler = CataloguePassBatchSampler(
+        datamodule.dataset,
+        tracks_per_microbatch=int(cfg["train"]["tracks_per_microbatch"]),
+        segments_per_track=int(cfg["train"]["segments_per_track"]),
+        seed=seed,
+        batch_count_multiple=accumulation,
+    )
+    optimizer_steps_per_pass = len(display_sampler) // accumulation
+    display_max_epochs = math.ceil(
+        int(cfg["train"]["max_steps"]) / optimizer_steps_per_pass
+    )
+    evaluation_batches = int(cfg["train"]["evaluation_interval"]) * accumulation
     trainer = pl.Trainer(
         accelerator=cfg["trainer"]["accelerator"],
         devices=cfg["trainer"]["devices"],
         strategy=cfg["trainer"]["strategy"],
+        max_epochs=display_max_epochs,
         max_steps=int(cfg["train"]["max_steps"]),
         precision=cfg["trainer"]["precision"],
-        accumulate_grad_batches=int(cfg["trainer"]["accumulate_grad_batches"]),
+        accumulate_grad_batches=accumulation,
         gradient_clip_val=float(cfg["train"]["gradient_clip_norm"]),
         logger=logger,
         callbacks=callbacks,
         default_root_dir=directory,
         log_every_n_steps=int(cfg["trainer"]["log_every_n_steps"]),
-        val_check_interval=1.0,
+        val_check_interval=evaluation_batches,
+        check_val_every_n_epoch=None,
         deterministic=bool(cfg["train"]["deterministic"]),
         use_distributed_sampler=False,
     )

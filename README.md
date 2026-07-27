@@ -91,21 +91,30 @@ and `[EOS]`.
 
 Training jointly predicts the complete document from the first optimizer step.
 It uses one token-level causal mean, with every identifier digit assigned a fixed
-weight of 5:
+weight of 20:
 
 ```text
 loss = (
   sum(audio token losses)
-  + 5 * sum(identifier digit losses)
+  + 20 * sum(identifier digit losses)
   + sum([ID] and [EOS] losses)
-) / (number of audio tokens + 5 * number of digits + 2)
+) / (number of audio tokens + 20 * number of digits + 2)
 ```
 
 Audio and identifier losses are also logged separately for diagnosis, but neither
 is optimized as a separately normalized objective and there is no objective
 schedule.
+The current experiment samples a seeded 1,000-track subset from all tracks with
+six complete cached segments. The exact selected track IDs are saved as
+`training_tracks.json` beside the run configuration and embedded in checkpoints;
+the full token cache is reused without re-tokenization. Identifier digit targets
+have a fixed loss weight of 20 for this run.
 The single-GPU logical batch is 32 tracks × 2 segments: a physical microbatch of
 four tracks × two segments with eight gradient-accumulation steps.
+Training stops after 20,000 optimizer steps, warms up for exactly 200 optimizer
+steps, and runs validation, greedy/beam probes, and checkpointing every 500
+optimizer steps. Catalogue passes still reshuffle the cached observations, but
+they do not control stopping, evaluation, or checkpoint cadence.
 
 ```bash
 python train.py configs/fma_large.yaml \

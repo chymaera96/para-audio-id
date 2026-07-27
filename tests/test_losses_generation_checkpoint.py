@@ -55,7 +55,7 @@ def test_single_weighted_causal_loss():
         batch["audio_target_mask"],
         batch["id_target_mask"],
         batch["boundary_target_mask"],
-        id_digit_weight=5.0,
+        id_digit_weight=20.0,
     )
     token_losses = F.cross_entropy(
         logits[:, :-1].transpose(1, 2),
@@ -64,11 +64,11 @@ def test_single_weighted_causal_loss():
     )
     weights = (
         batch["audio_target_mask"].float()
-        + 5.0 * batch["id_target_mask"].float()
+        + 20.0 * batch["id_target_mask"].float()
         + batch["boundary_target_mask"].float()
     )
     assert torch.allclose(results["loss"], (token_losses * weights).sum() / weights.sum())
-    separately_normalized = results["audio_loss"] + 5.0 * results["id_loss"]
+    separately_normalized = results["audio_loss"] + 20.0 * results["id_loss"]
     assert not torch.allclose(results["loss"], separately_normalized)
 
 

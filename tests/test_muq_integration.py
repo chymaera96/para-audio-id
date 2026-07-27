@@ -61,7 +61,7 @@ def test_real_muq_rvq_probe():
         batch["audio_target_mask"].to(tokenizer.device),
         batch["id_target_mask"].to(tokenizer.device),
         batch["boundary_target_mask"].to(tokenizer.device),
-        id_digit_weight=5.0,
+        id_digit_weight=20.0,
     )
     losses["loss"].backward()
     generated = greedy_generate(

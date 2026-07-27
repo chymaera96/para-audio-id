@@ -1,3 +1,4 @@
+import hashlib
 import json
 
 import numpy as np
@@ -9,7 +10,6 @@ from para_audio_id.audio_lm.vocabulary import AudioLMVocabulary
 
 
 def test_one_step_training_smoke(tmp_path):
-    token_root = tmp_path / "tokens"
     spec = TokenizerSpec(
         architecture="muq_mel_rvq",
         model_name="dummy",
@@ -25,46 +25,78 @@ def test_one_step_training_smoke(tmp_path):
         preprocessing_version=1,
     )
     vocabulary = AudioLMVocabulary()
-    token_root.mkdir()
-    (token_root / "tokenizer_spec.json").write_text(
-        json.dumps(
-            {
-                "tokenizer": spec.to_dict(),
-                "fingerprint": spec.fingerprint,
-                "vocabulary": vocabulary.to_dict(),
-            }
-        )
-    )
-    records = []
-    parts = []
-    offset = 0
-    for track in range(4):
-        for segment in range(6):
-            tokens = np.array([segment, 1024 + segment], dtype=np.uint16)
-            parts.append(tokens)
-            records.append(
-                TokenRecord(
-                    document_index=len(records),
-                    track_id=f"track-{track}",
-                    code=f"{track:05d}",
-                    source_path=f"{track}.mp3",
-                    segment_start=segment * 5.0,
-                    segment_duration=5.0,
-                    status="ok",
-                    token_offset=offset,
-                    token_count=2,
-                    frames=1,
-                )
+    track_ids = [f"track-{track}" for track in range(4)]
+    code_fingerprint = hashlib.sha256(
+        "\n".join(
+            f"{track_id}:{index:05d}" for index, track_id in enumerate(track_ids)
+        ).encode()
+    ).hexdigest()
+
+    def make_store(name, starts, role, view_type):
+        token_root = tmp_path / name
+        token_root.mkdir()
+        (token_root / "tokenizer_spec.json").write_text(
+            json.dumps(
+                {
+                    "tokenizer": spec.to_dict(),
+                    "fingerprint": spec.fingerprint,
+                    "vocabulary": vocabulary.to_dict(),
+                    "corpus_role": role,
+                    "view_policy_fingerprint": f"{role}-fingerprint",
+                    "track_ids": track_ids,
+                    "code_mapping_fingerprint": code_fingerprint,
+                }
             )
-            offset += 2
-    write_shard(
-        token_root,
-        0,
-        records=records,
-        tokens=np.concatenate(parts),
-        tokenizer_spec=spec.to_dict(),
-        tokenizer_fingerprint=spec.fingerprint,
+        )
+        records = []
+        parts = []
+        offset = 0
+        for track in range(4):
+            for start in starts:
+                tokens = np.array([int(start) % 1024, 1024 + int(start) % 1024], dtype=np.uint16)
+                parts.append(tokens)
+                records.append(
+                    TokenRecord(
+                        document_index=len(records),
+                        track_id=f"track-{track}",
+                        code=f"{track:05d}",
+                        source_path=f"{track}.mp3",
+                        segment_start=float(start),
+                        segment_duration=5.0,
+                        status="ok",
+                        token_offset=offset,
+                        token_count=2,
+                        frames=1,
+                        view_type=view_type,
+                        corpus_role=role,
+                    )
+                )
+                offset += 2
+        write_shard(
+            token_root,
+            0,
+            records=records,
+            tokens=np.concatenate(parts),
+            tokenizer_spec=spec.to_dict(),
+            tokenizer_fingerprint=spec.fingerprint,
+            corpus_role=role,
+        )
+        return token_root
+
+    canonical_starts = [0, 5, 10, 15, 20, 25]
+    shifted_starts = [1, 2, 3, 4]
+    heldout_starts = [2.5, 7.5]
+    canonical_root = make_store(
+        "canonical", canonical_starts, "canonical_training", "canonical"
     )
+    shifted_root = make_store(
+        "shifted", shifted_starts, "shifted_training", "shifted"
+    )
+    heldout_root = make_store(
+        "heldout", heldout_starts, "heldout_evaluation", "heldout"
+    )
+    manifest = tmp_path / "training_tracks.json"
+    manifest.write_text(json.dumps(track_ids))
     cfg = {
         "architecture": "audio_lm_v1",
         "model": {
@@ -79,7 +111,14 @@ def test_one_step_training_smoke(tmp_path):
             "tie_word_embeddings": True,
         },
         "data": {
-            "token_root": str(token_root),
+            "canonical_token_root": str(canonical_root),
+            "shifted_training_token_root": str(shifted_root),
+            "heldout_evaluation_token_root": str(heldout_root),
+            "training_tracks_manifest": str(manifest),
+            "view_mode": "paired",
+            "canonical_starts": canonical_starts,
+            "shifted_training_starts": shifted_starts,
+            "shifted_evaluation_starts": heldout_starts,
             "segments_per_track": 6,
             "max_training_tracks": 4,
         },
@@ -105,8 +144,9 @@ def test_one_step_training_smoke(tmp_path):
         "evaluation": {
             "probe_tracks": 2,
             "probe_batch_size": 2,
-            "generation_probe_tracks": 1,
+            "generation_batch_size": 2,
             "beam_width": 10,
+            "beam_every_n_steps": 100,
         },
         "dataloader": {
             "num_workers": 0,

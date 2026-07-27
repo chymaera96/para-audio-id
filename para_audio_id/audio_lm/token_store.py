@@ -22,6 +22,10 @@ class TokenRecord:
     token_count: int
     frames: int
     error: str | None = None
+    view_type: str = "canonical"
+    corpus_role: str = "canonical_training"
+    source_duration: float | None = None
+    padded_samples: int = 0
 
 
 @dataclass(frozen=True)
@@ -52,6 +56,7 @@ def write_shard(
     tokens: np.ndarray,
     tokenizer_spec: dict,
     tokenizer_fingerprint: str,
+    corpus_role: str = "canonical_training",
 ) -> None:
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
@@ -83,12 +88,17 @@ def write_shard(
             "token_dtype": "uint16",
             "tokenizer": tokenizer_spec,
             "tokenizer_fingerprint": tokenizer_fingerprint,
+            "corpus_role": corpus_role,
         },
     )
 
 
 def validate_shard(
-    root: str | Path, shard_id: int, *, tokenizer_fingerprint: str
+    root: str | Path,
+    shard_id: int,
+    *,
+    tokenizer_fingerprint: str,
+    corpus_role: str | None = None,
 ) -> dict:
     root = Path(root)
     stem = f"shard-{shard_id:06d}"
@@ -104,6 +114,12 @@ def validate_shard(
         raise ValueError(f"Shard {shard_id} is not a complete audio-LM shard")
     if metadata.get("tokenizer_fingerprint") != tokenizer_fingerprint:
         raise ValueError(f"Shard {shard_id} tokenizer fingerprint does not match")
+    actual_role = metadata.get("corpus_role", "canonical_training")
+    if corpus_role is not None and actual_role != corpus_role:
+        raise ValueError(
+            f"Shard {shard_id} corpus role {actual_role!r} does not match "
+            f"{corpus_role!r}"
+        )
     tokens = np.load(token_path, mmap_mode="r", allow_pickle=False)
     if tokens.dtype != np.uint16 or tokens.ndim != 1 or len(tokens) != metadata["tokens"]:
         raise ValueError(f"Shard {shard_id} token array is inconsistent with metadata")
@@ -117,6 +133,12 @@ def validate_shard(
     if len(rows) != metadata["documents"]:
         raise ValueError(f"Shard {shard_id} index row count is inconsistent")
     for row in rows:
+        row_role = row.get("corpus_role", "canonical_training")
+        if row_role != actual_role:
+            raise ValueError(
+                f"Shard {shard_id} row corpus role {row_role!r} does not match "
+                f"metadata role {actual_role!r}"
+            )
         if row["status"] == "ok":
             end = row["token_offset"] + row["token_count"]
             if row["token_offset"] < 0 or end > len(tokens):
@@ -125,9 +147,16 @@ def validate_shard(
 
 
 class TokenStoreIndex:
-    def __init__(self, root: str | Path, *, tokenizer_fingerprint: str):
+    def __init__(
+        self,
+        root: str | Path,
+        *,
+        tokenizer_fingerprint: str,
+        corpus_role: str | None = None,
+    ):
         self.root = Path(root)
         self.tokenizer_fingerprint = tokenizer_fingerprint
+        self.corpus_role = corpus_role
         self.records: list[IndexedTokenRecord] = []
         self._arrays: dict[int, np.ndarray] = {}
         metadata_paths = sorted(self.root.glob("shard-*.meta.json"))
@@ -135,9 +164,17 @@ class TokenStoreIndex:
             raise FileNotFoundError(f"No token shards found under {self.root}")
         for metadata_path in metadata_paths:
             shard_id = int(metadata_path.name.split("-")[1].split(".")[0])
-            validate_shard(
-                self.root, shard_id, tokenizer_fingerprint=tokenizer_fingerprint
+            metadata = validate_shard(
+                self.root,
+                shard_id,
+                tokenizer_fingerprint=tokenizer_fingerprint,
+                corpus_role=corpus_role,
             )
+            actual_role = metadata.get("corpus_role", "canonical_training")
+            if self.corpus_role is None:
+                self.corpus_role = actual_role
+            elif self.corpus_role != actual_role:
+                raise ValueError("Token store mixes incompatible corpus roles")
             stem = f"shard-{shard_id:06d}"
             for line in (self.root / f"{stem}.index.jsonl").read_text().splitlines():
                 if not line:

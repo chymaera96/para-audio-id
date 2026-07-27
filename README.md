@@ -82,6 +82,33 @@ every intended document and every explicit failure.
 
 Token shards are training artifacts and are never loaded by identification.
 
+For paired-shift training, first copy the exact cohort from the completed
+canonical 10K run:
+
+```bash
+cp logs/fma-large-audio-lm/<canonical-10k-run>/training_tracks.json \
+  data/training_tracks_10k.json
+```
+
+Then prepare the two new, role-separated stores:
+
+```bash
+python prepare_paired_tokens.py configs/fma_large.yaml
+```
+
+This reuses the canonical cache and creates:
+
+```text
+/gpfs/scratch/acw723/para-audio-id/audio_lm_tokens_shifted_training_10k
+/gpfs/scratch/acw723/para-audio-id/audio_lm_tokens_heldout_evaluation_10k
+```
+
+The shifted-training store contains standalone crops at integer noncanonical
+starts. The evaluation-only store contains half-offset crops and is rejected by
+the training sampler. Both stores record their role, view policy, exact cohort,
+tokenizer fingerprint, source duration, and any zero-padding applied to short
+recordings. Preparation resumes at complete shard boundaries.
+
 ## Training
 
 The default causal LM is a randomly initialized 12-layer GPT-2-style decoder with
@@ -104,22 +131,24 @@ loss = (
 Audio and identifier losses are also logged separately for diagnosis, but neither
 is optimized as a separately normalized objective and there is no objective
 schedule.
-The current experiment samples a seeded 10,000-track subset from all tracks with
-six complete cached segments. The exact selected track IDs are saved as
-`training_tracks.json` beside the run configuration and embedded in checkpoints;
-the full token cache is reused without re-tokenization. Identifier digit targets
-have a fixed loss weight of 20 for this run.
+The current experiment reuses the exact 10,000 identities from the canonical run.
+In `paired` mode, each track contributes one canonical and one shifted document;
+their independently normalized causal losses are averaged equally. Set
+`data.view_mode: canonical_only` for the from-scratch ablation, which instead
+uses two distinct canonical views with identical batch shape and compute.
+Identifier digit targets have a fixed loss weight of 20.
 The single-GPU logical batch is 32 tracks × 2 segments: a physical microbatch of
 four tracks × two segments with eight gradient-accumulation steps.
-Training stops after 50,000 optimizer steps, warms up for exactly 200 optimizer
-steps, and runs validation, greedy/beam probes, and checkpointing every 500
-optimizer steps. Catalogue passes still reshuffle the cached observations, but
-they do not control stopping, evaluation, or checkpoint cadence.
+Training stops after 100,000 optimizer steps and warms up for exactly 200.
+Validation, rotating canonical/held-out greedy probes, and checkpointing run
+every 500 steps. Beam probes run every 2,500 steps and at the final step.
+Catalogue passes reshuffle identities and advance deterministic per-track view
+permutations, but do not control stopping or checkpoint cadence.
 
 ```bash
 python train.py configs/fma_large.yaml \
   --devices 1 \
-  --run-id fma-large-audio-lm \
+  --run-id paired-10k-100k \
   --wandb-online
 ```
 
@@ -129,21 +158,21 @@ state:
 ```bash
 python train.py configs/fma_large.yaml \
   --devices 1 \
-  --run-id fma-large-audio-lm \
+  --run-id paired-10k-100k \
   --wandb-online \
   --resume
 ```
 
-Checkpoints are written after each complete catalogue pass under:
+Checkpoints are written every 500 optimizer steps under:
 
 ```text
 /gpfs/scratch/acw723/para-audio-id/audio-lm-checkpoints/<run-id>/
 ```
 
-Configuration and checkpoints are marked `architecture: audio_lm_v1`; missing or
-legacy architecture metadata is rejected. Checkpoints embed vocabulary, model
-configuration, tokenizer fingerprint, and code-mapping fingerprint, but not
-training token shards or catalogue reference features.
+Checkpoints embed the vocabulary, exact cohort, view grids, corpus fingerprint,
+tokenizer fingerprint, and code mapping. A canonical-only legacy checkpoint
+cannot initialize the paired experiment; interruption resume is accepted only
+when all paired-corpus metadata matches.
 
 PyTorch deterministic algorithms and seeded Python, NumPy, Torch, samplers, and
 workers are enabled. `deterministic_warn_only: true` reports CUDA operations for
@@ -151,20 +180,20 @@ which PyTorch cannot promise bitwise determinism instead of aborting a long run.
 
 ## Evaluation and inference
 
-Evaluation tokenizes shifted clean excerpts online at 2.5, 12.5, and 22.5 seconds:
+Post-run evaluation reads all six canonical and all five held-out cached positions:
 
 ```bash
 python evaluate.py \
-  /gpfs/scratch/acw723/para-audio-id/audio-lm-checkpoints/fma-large-audio-lm/last.ckpt \
-  evaluation.json \
-  --max-tracks 512
+  /gpfs/scratch/acw723/para-audio-id/audio-lm-checkpoints/paired-10k-100k/last.ckpt \
+  evaluation-paired-10k.json \
+  --cohort training \
+  --expected-tracks 10000
 ```
 
-It reports audio loss/perplexity, teacher-forced identifier metrics, greedy exact
-accuracy, beam Top-1/5/10, MRR, latency, model size, and peak inference memory.
-Beam generation searches model continuations only. It requires exactly five
-digit tokens after `[ID]`, followed by `[EOS]`; no catalogue-derived valid-code
-constraint is used.
+It reports greedy exact accuracy, beam Top-1/5/10, MRR, and protocol validity
+separately for canonical views, held-out views, and every individual start.
+Batched generation receives only `[BOS] audio [ID]` and produces five digits plus
+`[EOS]`; it uses no teacher forcing or catalogue-derived valid-code constraint.
 
 Identification requires only the causal-LM checkpoint, frozen MuQ weights, and
 query audio:

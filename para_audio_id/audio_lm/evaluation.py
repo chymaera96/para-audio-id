@@ -6,15 +6,23 @@ from pathlib import Path
 import time
 
 import torch
+from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 
 from ..audio import BadFileRegistry, load_audio
 from ..catalogue import load_catalogue
 from .checkpoint import load_audio_lm
-from .dataset import collate_causal_documents
-from .generation import beam_generate, greedy_generate, prompt_from_audio_tokens
+from .dataset import CachedPositionDataset, collate_causal_documents
+from .generation import (
+    batched_beam_generate,
+    batched_greedy_generate,
+    beam_generate,
+    greedy_generate,
+    prompt_from_audio_tokens,
+)
 from .losses import causal_audio_id_losses
 from .tokenizer import MuQRVQTokenizer
+from .token_store import TokenStoreIndex
 
 
 def select_checkpoint_cohort(
@@ -58,6 +66,157 @@ def _checkpoint_tokenizer(checkpoint: dict, device: str) -> MuQRVQTokenizer:
     return tokenizer
 
 
+def _generation_metrics(rows: list[dict]) -> dict:
+    count = len(rows)
+    metrics = {
+        "queries": count,
+        "greedy_top1": sum(row["greedy"] == row["code"] for row in rows) / count,
+        "invalid_code_rate": sum(not row["greedy_ended_with_eos"] for row in rows)
+        / count,
+    }
+    if rows[0]["beam"]:
+        reciprocal_rank = 0.0
+        for width in (1, 5, 10):
+            hits = 0
+            for row in rows:
+                codes = [result["code"] for result in row["beam"]]
+                hits += int(row["code"] in codes[:width])
+                if width == 10 and row["code"] in codes:
+                    reciprocal_rank += 1 / (codes.index(row["code"]) + 1)
+            metrics[f"beam_top{width}"] = hits / count
+        metrics["beam_mrr"] = reciprocal_rank / count
+    return metrics
+
+
+def _evaluate_cached_positions(
+    model,
+    vocabulary,
+    cfg: dict,
+    checkpoint: dict,
+    *,
+    output: str | Path,
+    cohort: str,
+    expected_tracks: int | None,
+    max_tracks: int | None,
+    device: str,
+    beam_width: int | None,
+) -> dict:
+    track_ids = select_checkpoint_cohort(
+        checkpoint,
+        cohort=cohort,
+        expected_tracks=expected_tracks,
+        max_tracks=max_tracks,
+    )
+    data_cfg = cfg["data"]
+    fingerprint = checkpoint["tokenizer_fingerprint"]
+    canonical = TokenStoreIndex(
+        data_cfg["canonical_token_root"],
+        tokenizer_fingerprint=fingerprint,
+        corpus_role="canonical_training",
+    )
+    heldout = TokenStoreIndex(
+        data_cfg["heldout_evaluation_token_root"],
+        tokenizer_fingerprint=fingerprint,
+        corpus_role="heldout_evaluation",
+    )
+    dataset = CachedPositionDataset(
+        canonical, heldout, track_ids=track_ids
+    )
+    rows = []
+    started = time.perf_counter()
+    policies = (
+        ("canonical", [float(value) for value in data_cfg["canonical_starts"]]),
+        (
+            "heldout",
+            [float(value) for value in data_cfg["shifted_evaluation_starts"]],
+        ),
+    )
+    total_positions = sum(len(starts) for _, starts in policies)
+    progress = tqdm(total=total_positions, desc=f"{cohort} position groups")
+    for view_type, starts in policies:
+        for start in starts:
+            indices = dataset.indices_for(track_ids, view_type, start)
+            loader = DataLoader(
+                Subset(dataset, indices),
+                batch_size=int(cfg["evaluation"]["generation_batch_size"]),
+                shuffle=False,
+                collate_fn=lambda examples: collate_causal_documents(
+                    examples,
+                    vocabulary,
+                    int(cfg["model"]["max_position_embeddings"]),
+                ),
+            )
+            for batch in loader:
+                input_ids = batch["input_ids"].to(device)
+                columns = (input_ids == vocabulary.id_token_id).nonzero()[:, 1].unique()
+                if len(columns) != 1:
+                    raise RuntimeError("Cached evaluation prompts have unequal lengths")
+                prompts = input_ids[:, : int(columns[0]) + 1]
+                greedy = batched_greedy_generate(model, prompts, vocabulary)
+                beams = (
+                    batched_beam_generate(
+                        model, prompts, vocabulary, width=beam_width
+                    )
+                    if beam_width is not None
+                    else [[] for _ in greedy]
+                )
+                rows.extend(
+                    {
+                        "track_id": track_id,
+                        "code": code,
+                        "view_type": view_type,
+                        "start": start,
+                        "greedy": greedy_result.code,
+                        "greedy_ended_with_eos": greedy_result.ended_with_eos,
+                        "beam": [
+                            {
+                                "code": result.code,
+                                "log_probability": result.log_probability,
+                                "ended_with_eos": result.ended_with_eos,
+                            }
+                            for result in ranking
+                        ],
+                    }
+                    for track_id, code, greedy_result, ranking in zip(
+                        batch["track_id"],
+                        batch["code"],
+                        greedy,
+                        beams,
+                        strict=True,
+                    )
+                )
+            progress.update()
+    progress.close()
+    by_start = {
+        f"{view_type}:{start:g}": _generation_metrics(
+            [
+                row
+                for row in rows
+                if row["view_type"] == view_type and row["start"] == start
+            ]
+        )
+        for view_type, starts in policies
+        for start in starts
+    }
+    metrics = {
+        "cohort": cohort,
+        "selected_tracks": len(track_ids),
+        "generation_protocol": "five_autoregressive_digits_then_eos",
+        "canonical": _generation_metrics(
+            [row for row in rows if row["view_type"] == "canonical"]
+        ),
+        "heldout": _generation_metrics(
+            [row for row in rows if row["view_type"] == "heldout"]
+        ),
+        "by_start": by_start,
+        "elapsed_seconds": time.perf_counter() - started,
+    }
+    output = Path(output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps({"metrics": metrics, "queries": rows}, indent=2) + "\n")
+    return metrics
+
+
 def evaluate(
     checkpoint_path: str | Path,
     *,
@@ -70,6 +229,19 @@ def evaluate(
     generation_only: bool = False,
 ) -> dict:
     model, vocabulary, cfg, checkpoint = load_audio_lm(checkpoint_path, device)
+    if "view_mode" in cfg.get("data", {}):
+        return _evaluate_cached_positions(
+            model,
+            vocabulary,
+            cfg,
+            checkpoint,
+            output=output,
+            cohort=cohort,
+            expected_tracks=expected_tracks,
+            max_tracks=max_tracks,
+            device=device,
+            beam_width=beam_width,
+        )
     tokenizer = _checkpoint_tokenizer(checkpoint, device)
     if str(device).startswith("cuda"):
         torch.cuda.reset_peak_memory_stats()

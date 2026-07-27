@@ -10,9 +10,14 @@ from para_audio_id.audio_lm.checkpoint import (
     validate_checkpoint_metadata,
 )
 from para_audio_id.audio_lm.dataset import collate_causal_documents
-from para_audio_id.audio_lm.evaluation import select_checkpoint_cohort
-from para_audio_id.audio_lm.generation import beam_generate, greedy_generate
-from para_audio_id.audio_lm.losses import causal_audio_id_losses
+from para_audio_id.audio_lm.evaluation import _generation_metrics, select_checkpoint_cohort
+from para_audio_id.audio_lm.generation import (
+    batched_beam_generate,
+    batched_greedy_generate,
+    beam_generate,
+    greedy_generate,
+)
+from para_audio_id.audio_lm.losses import causal_audio_id_losses, causal_losses_by_view
 from para_audio_id.audio_lm.model import AudioCausalLM
 from para_audio_id.audio_lm.vocabulary import AudioLMVocabulary
 
@@ -84,6 +89,42 @@ def test_generation_emits_exactly_five_digits_then_eos():
     assert len(beam) == 10
     assert all(len(result.code) == 5 and result.code.isdecimal() for result in beam)
     assert all(result.ended_with_eos for result in beam)
+    prompts = prompt.repeat(2, 1)
+    batched_greedy = batched_greedy_generate(model, prompts, vocabulary)
+    batched_beam = batched_beam_generate(model, prompts, vocabulary, width=5)
+    assert len(batched_greedy) == 2
+    assert [len(results) for results in batched_beam] == [5, 5]
+
+
+def test_paired_loss_is_equal_mean_of_independent_view_losses():
+    vocabulary = AudioLMVocabulary()
+    examples = [
+        {
+            "audio_tokens": torch.tensor([1, 1025]),
+            "code": "12345",
+            "track_id": "track",
+            "document_index": index,
+            "view_type": view,
+        }
+        for index, view in enumerate(("canonical", "shifted"))
+    ]
+    batch = collate_causal_documents(examples, vocabulary, 32)
+    torch.manual_seed(8)
+    logits = torch.randn(2, batch["input_ids"].shape[1], vocabulary.size)
+    loss, _, per_view = causal_losses_by_view(
+        logits,
+        batch["input_ids"],
+        batch["audio_target_mask"],
+        batch["id_target_mask"],
+        batch["boundary_target_mask"],
+        batch["view_type"],
+        view_mode="paired",
+        id_digit_weight=20.0,
+    )
+    expected = 0.5 * (
+        per_view["canonical"]["loss"] + per_view["shifted"]["loss"]
+    )
+    assert torch.allclose(loss, expected)
 
 
 def test_checkpoint_identity_and_inference_loader_need_no_token_store(tmp_path):
@@ -99,6 +140,8 @@ def test_checkpoint_identity_and_inference_loader_need_no_token_store(tmp_path):
         "code_mapping_fingerprint": "mapping",
         "validation_probe": ["track"],
         "training_track_ids": ["track"],
+        "training_corpus_fingerprint": "corpus",
+        "view_policy": {"view_mode": "paired"},
     }
     validate_checkpoint_metadata(metadata, tokenizer_fingerprint="fingerprint")
     with pytest.raises(ValueError, match="architecture"):
@@ -130,3 +173,24 @@ def test_checkpoint_training_cohort_selection_is_exact():
         select_checkpoint_cohort(
             checkpoint, cohort="training", expected_tracks=1000
         )
+
+
+def test_position_generation_metrics_are_free_running():
+    rows = [
+        {
+            "code": "00001",
+            "greedy": "00001",
+            "greedy_ended_with_eos": True,
+            "beam": [{"code": "00001"}],
+        },
+        {
+            "code": "00002",
+            "greedy": "99999",
+            "greedy_ended_with_eos": True,
+            "beam": [{"code": "99999"}, {"code": "00002"}],
+        },
+    ]
+    metrics = _generation_metrics(rows)
+    assert metrics["greedy_top1"] == 0.5
+    assert metrics["beam_top1"] == 0.5
+    assert metrics["beam_top5"] == 1.0

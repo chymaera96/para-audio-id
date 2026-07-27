@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Iterator
+from dataclasses import dataclass
+import hashlib
 import math
 
 import numpy as np
@@ -68,7 +70,229 @@ class AudioTokenDataset(Dataset):
             "track_id": record.track_id,
             "segment_start": record.segment_start,
             "document_index": record.document_index,
+            "view_type": record.view_type,
         }
+
+
+@dataclass(frozen=True)
+class ViewEntry:
+    store: TokenStoreIndex
+    record_index: int
+    view_type: str
+
+
+def _stable_permutation(length: int, *, seed: int, track_id: str, view: str) -> list[int]:
+    digest = hashlib.sha256(f"{seed}:{track_id}:{view}".encode()).digest()
+    generator = np.random.default_rng(int.from_bytes(digest[:8], "big"))
+    return [int(value) for value in generator.permutation(length)]
+
+
+class PairedAudioTokenDataset(Dataset):
+    def __init__(
+        self,
+        canonical_store: TokenStoreIndex,
+        shifted_store: TokenStoreIndex | None,
+        *,
+        track_ids: list[str],
+        canonical_starts: list[float],
+        shifted_starts: list[float],
+        view_mode: str,
+    ):
+        if view_mode not in {"paired", "canonical_only"}:
+            raise ValueError(f"Unsupported view_mode {view_mode!r}")
+        if len(track_ids) != len(set(track_ids)):
+            raise ValueError("Training track IDs are not unique")
+        self.view_mode = view_mode
+        self.entries: list[ViewEntry] = []
+        self.by_track_view: dict[str, dict[str, list[int]]] = defaultdict(
+            lambda: defaultdict(list)
+        )
+        selected = set(track_ids)
+
+        def add_store(store: TokenStoreIndex, view_type: str) -> None:
+            for record_index, record in enumerate(store.records):
+                if record.track_id not in selected:
+                    continue
+                index = len(self.entries)
+                self.entries.append(ViewEntry(store, record_index, view_type))
+                self.by_track_view[record.track_id][view_type].append(index)
+
+        add_store(canonical_store, "canonical")
+        if view_mode == "paired":
+            if shifted_store is None:
+                raise ValueError("paired mode requires a shifted-training token store")
+            if shifted_store.corpus_role != "shifted_training":
+                raise ValueError("Paired training requires a shifted_training store")
+            add_store(shifted_store, "shifted")
+        expected = {
+            "canonical": [float(value) for value in canonical_starts],
+            "shifted": [float(value) for value in shifted_starts],
+        }
+        for track_id in track_ids:
+            required_views = ("canonical", "shifted") if view_mode == "paired" else ("canonical",)
+            codes = set()
+            for view_type in required_views:
+                indices = self.by_track_view[track_id][view_type]
+                indices.sort(key=lambda index: self._record(index).segment_start)
+                actual = [self._record(index).segment_start for index in indices]
+                codes.update(self._record(index).code for index in indices)
+                if actual != expected[view_type]:
+                    raise ValueError(
+                        f"Track {track_id} has {view_type} starts {actual}, "
+                        f"expected {expected[view_type]}"
+                    )
+            if len(codes) != 1:
+                raise ValueError(f"Track {track_id} has inconsistent identifiers {codes}")
+        self.track_ids = list(track_ids)
+        self.records = [self._record(index) for index in range(len(self.entries))]
+
+    def _record(self, index: int):
+        entry = self.entries[index]
+        return entry.store.records[entry.record_index]
+
+    def __len__(self) -> int:
+        return len(self.entries)
+
+    def __getitem__(self, index: int) -> dict:
+        entry = self.entries[index]
+        record = entry.store.records[entry.record_index]
+        return {
+            "audio_tokens": torch.from_numpy(entry.store.tokens(record)),
+            "code": record.code,
+            "track_id": record.track_id,
+            "segment_start": record.segment_start,
+            "document_index": record.document_index,
+            "view_type": entry.view_type,
+        }
+
+    def view_indices(self, track_id: str, view_type: str) -> list[int]:
+        return self.by_track_view[track_id][view_type]
+
+
+class CachedPositionDataset(Dataset):
+    def __init__(
+        self,
+        canonical_store: TokenStoreIndex,
+        evaluation_store: TokenStoreIndex,
+        *,
+        track_ids: list[str],
+    ):
+        if evaluation_store.corpus_role != "heldout_evaluation":
+            raise ValueError("Evaluation dataset requires a heldout_evaluation store")
+        selected = set(track_ids)
+        self.entries: list[ViewEntry] = []
+        self.by_track_start: dict[tuple[str, str, float], int] = {}
+        for store, view_type in (
+            (canonical_store, "canonical"),
+            (evaluation_store, "heldout"),
+        ):
+            for record_index, record in enumerate(store.records):
+                if record.track_id not in selected:
+                    continue
+                index = len(self.entries)
+                self.entries.append(ViewEntry(store, record_index, view_type))
+                self.by_track_start[(record.track_id, view_type, record.segment_start)] = index
+
+    def __len__(self) -> int:
+        return len(self.entries)
+
+    def __getitem__(self, index: int) -> dict:
+        entry = self.entries[index]
+        record = entry.store.records[entry.record_index]
+        return {
+            "audio_tokens": torch.from_numpy(entry.store.tokens(record)),
+            "code": record.code,
+            "track_id": record.track_id,
+            "segment_start": record.segment_start,
+            "document_index": record.document_index,
+            "view_type": entry.view_type,
+        }
+
+    def indices_for(self, track_ids: list[str], view_type: str, start: float) -> list[int]:
+        return [self.by_track_start[(track_id, view_type, start)] for track_id in track_ids]
+
+
+class PairedViewBatchSampler(Sampler[list[int]]):
+    def __init__(
+        self,
+        dataset: PairedAudioTokenDataset,
+        *,
+        tracks_per_microbatch: int,
+        seed: int,
+        catalogue_pass: int = 0,
+        world_size: int = 1,
+        rank: int = 0,
+        batch_count_multiple: int = 1,
+    ):
+        if tracks_per_microbatch < 1 or tracks_per_microbatch % world_size:
+            raise ValueError("tracks_per_microbatch must divide evenly across ranks")
+        if world_size < 1 or not 0 <= rank < world_size:
+            raise ValueError("Invalid distributed rank")
+        if batch_count_multiple < 1:
+            raise ValueError("batch_count_multiple must be positive")
+        self.dataset = dataset
+        self.tracks_per_microbatch = tracks_per_microbatch
+        self.seed = seed
+        self.catalogue_pass = catalogue_pass
+        self.world_size = world_size
+        self.rank = rank
+        self.batch_count_multiple = batch_count_multiple
+
+    def set_epoch(self, catalogue_pass: int) -> None:
+        self.catalogue_pass = catalogue_pass
+
+    def __len__(self) -> int:
+        batches = math.ceil(
+            len(self.dataset.track_ids) / self.tracks_per_microbatch
+        )
+        return math.ceil(batches / self.batch_count_multiple) * self.batch_count_multiple
+
+    def _pair(self, track_id: str) -> list[int]:
+        canonical = self.dataset.view_indices(track_id, "canonical")
+        canonical_order = _stable_permutation(
+            len(canonical), seed=self.seed, track_id=track_id, view="canonical"
+        )
+        if self.dataset.view_mode == "paired":
+            shifted = self.dataset.view_indices(track_id, "shifted")
+            shifted_order = _stable_permutation(
+                len(shifted), seed=self.seed, track_id=track_id, view="shifted"
+            )
+            return [
+                canonical[canonical_order[self.catalogue_pass % len(canonical)]],
+                shifted[shifted_order[self.catalogue_pass % len(shifted)]],
+            ]
+        offset = (2 * self.catalogue_pass) % len(canonical)
+        return [
+            canonical[canonical_order[offset]],
+            canonical[canonical_order[(offset + 1) % len(canonical)]],
+        ]
+
+    def __iter__(self) -> Iterator[list[int]]:
+        local_tracks = self.tracks_per_microbatch // self.world_size
+        track_ids = np.asarray(self.dataset.track_ids, dtype=object)
+        generator = np.random.default_rng(self.seed + self.catalogue_pass)
+        generator.shuffle(track_ids)
+        missing = (-len(track_ids)) % self.tracks_per_microbatch
+        if missing:
+            track_ids = np.concatenate((track_ids, track_ids[:missing]))
+        first_batches: list[list[int]] = []
+        yielded = 0
+        for offset in range(0, len(track_ids), self.tracks_per_microbatch):
+            global_tracks = track_ids[offset : offset + self.tracks_per_microbatch]
+            selected = global_tracks[
+                self.rank * local_tracks : (self.rank + 1) * local_tracks
+            ]
+            batch = [
+                index
+                for track_id in selected
+                for index in self._pair(str(track_id))
+            ]
+            if len(first_batches) < self.batch_count_multiple:
+                first_batches.append(batch)
+            yielded += 1
+            yield batch
+        for index in range(len(self) - yielded):
+            yield first_batches[index % len(first_batches)]
 
 
 class CataloguePassBatchSampler(Sampler[list[int]]):
@@ -209,5 +433,10 @@ def collate_causal_documents(
         "track_id": [example["track_id"] for example in examples],
         "document_index": torch.tensor(
             [example["document_index"] for example in examples], dtype=torch.long
+        ),
+        "view_type": [example.get("view_type", "canonical") for example in examples],
+        "segment_start": torch.tensor(
+            [example.get("segment_start", 0.0) for example in examples],
+            dtype=torch.float32,
         ),
     }

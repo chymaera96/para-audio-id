@@ -20,7 +20,15 @@ def test_primary_config_is_audio_lm_and_matches_logical_batch():
     assert cfg["train"]["deterministic"]
     assert cfg["train"]["id_digit_weight"] == 20.0
     assert cfg["data"]["max_training_tracks"] == 10_000
-    assert cfg["train"]["max_steps"] == 50_000
+    assert cfg["train"]["max_steps"] == 100_000
+    assert cfg["data"]["view_mode"] == "paired"
+    assert len(cfg["data"]["canonical_starts"]) == 6
+    assert len(cfg["data"]["shifted_training_starts"]) == 20
+    assert len(cfg["data"]["shifted_evaluation_starts"]) == 5
+    assert not (
+        set(cfg["data"]["shifted_training_starts"])
+        & set(cfg["data"]["shifted_evaluation_starts"])
+    )
     assert cfg["train"]["warmup_steps"] == 200
     assert cfg["train"]["evaluation_interval"] == 500
     assert not any(key.startswith("id_loss_") for key in cfg["train"])

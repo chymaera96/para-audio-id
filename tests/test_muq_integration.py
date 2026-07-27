@@ -5,7 +5,7 @@ import torch
 
 from para_audio_id.audio_lm.dataset import collate_causal_documents
 from para_audio_id.audio_lm.generation import greedy_generate, prompt_from_audio_tokens
-from para_audio_id.audio_lm.losses import causal_audio_id_losses
+from para_audio_id.audio_lm.losses import causal_losses_by_view
 from para_audio_id.audio_lm.model import AudioCausalLM
 from para_audio_id.audio_lm.tokenizer import MuQRVQTokenizer
 
@@ -46,7 +46,15 @@ def test_real_muq_rvq_probe():
                 "code": "01234",
                 "track_id": "integration",
                 "document_index": 0,
-            }
+                "view_type": "canonical",
+            },
+            {
+                "audio_tokens": audio_tokens,
+                "code": "01234",
+                "track_id": "integration",
+                "document_index": 1,
+                "view_type": "shifted",
+            },
         ],
         tokenizer.vocabulary,
         512,
@@ -55,15 +63,18 @@ def test_real_muq_rvq_probe():
         batch["input_ids"].to(tokenizer.device),
         batch["attention_mask"].to(tokenizer.device),
     )
-    losses = causal_audio_id_losses(
+    loss, _, per_view = causal_losses_by_view(
         logits,
         batch["input_ids"].to(tokenizer.device),
         batch["audio_target_mask"].to(tokenizer.device),
         batch["id_target_mask"].to(tokenizer.device),
         batch["boundary_target_mask"].to(tokenizer.device),
+        batch["view_type"],
+        view_mode="paired",
         id_digit_weight=20.0,
     )
-    losses["loss"].backward()
+    loss.backward()
+    assert set(per_view) == {"canonical", "shifted"}
     generated = greedy_generate(
         model.eval(),
         prompt_from_audio_tokens(audio_tokens.to(tokenizer.device), tokenizer.vocabulary),

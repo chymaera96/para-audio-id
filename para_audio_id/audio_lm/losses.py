@@ -64,3 +64,48 @@ def causal_audio_id_losses(
         "teacher_forced_digit_accuracy": digit_accuracy,
         "teacher_forced_exact_accuracy": exact_accuracy,
     }
+
+
+def causal_losses_by_view(
+    logits: torch.Tensor,
+    input_ids: torch.Tensor,
+    audio_target_mask: torch.Tensor,
+    id_target_mask: torch.Tensor,
+    boundary_target_mask: torch.Tensor,
+    view_types: list[str],
+    *,
+    view_mode: str,
+    id_digit_weight: float = 20.0,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor], dict[str, dict[str, torch.Tensor]]]:
+    overall = causal_audio_id_losses(
+        logits,
+        input_ids,
+        audio_target_mask,
+        id_target_mask,
+        boundary_target_mask,
+        id_digit_weight=id_digit_weight,
+    )
+    per_view = {}
+    for view_type in sorted(set(view_types)):
+        rows = torch.tensor(
+            [value == view_type for value in view_types],
+            device=logits.device,
+            dtype=torch.bool,
+        )
+        per_view[view_type] = causal_audio_id_losses(
+            logits[rows],
+            input_ids[rows],
+            audio_target_mask[rows],
+            id_target_mask[rows],
+            boundary_target_mask[rows],
+            id_digit_weight=id_digit_weight,
+        )
+    if view_mode == "paired":
+        if set(per_view) != {"canonical", "shifted"}:
+            raise ValueError("Paired loss requires canonical and shifted rows")
+        loss = 0.5 * (per_view["canonical"]["loss"] + per_view["shifted"]["loss"])
+    elif view_mode == "canonical_only":
+        loss = overall["loss"]
+    else:
+        raise ValueError(f"Unsupported view_mode {view_mode!r}")
+    return loss, overall, per_view

@@ -5,12 +5,18 @@ import pytest
 import torch
 from torch import nn
 
+from para_audio_id.audio_lm.tokenization import (
+    CatalogueDocument,
+    _load_view_document,
+    load_training_track_ids,
+)
 from para_audio_id.audio_lm.tokenizer import (
     MuQRVQTokenizer,
     flatten_time_major,
     unflatten_time_major,
 )
 from para_audio_id.audio_lm.vocabulary import AudioLMVocabulary
+from para_audio_id.catalogue import CatalogueRecord
 
 
 def test_vocabulary_ranges_and_codebook_separation():
@@ -100,3 +106,38 @@ def test_invalid_tokenizer_layout_is_rejected(monkeypatch):
     )
     with pytest.raises(RuntimeError, match="block-major"):
         tokenizer.probe(torch.zeros(1, 100))
+
+
+def test_shifted_crop_padding_is_measured_and_manifest_is_exact(
+    monkeypatch, tmp_path
+):
+    record = CatalogueRecord(
+        path="short.mp3", track_id="track", code="00000", duration=26.0
+    )
+    document = CatalogueDocument(
+        document_index=0,
+        record=record,
+        start=24.0,
+        duration=5.0,
+        view_type="shifted",
+        corpus_role="shifted_training",
+    )
+    monkeypatch.setattr(
+        "para_audio_id.audio_lm.tokenization._load_document",
+        lambda *args, **kwargs: torch.zeros(120_000).numpy(),
+    )
+    audio, padded = _load_view_document(
+        document, audio_root=tmp_path, sample_rate=24_000
+    )
+    assert len(audio) == 120_000
+    assert padded == 72_000
+
+    manifest = tmp_path / "tracks.json"
+    manifest.write_text('["track-a", "track-b"]')
+    assert load_training_track_ids(manifest, expected_count=2) == [
+        "track-a",
+        "track-b",
+    ]
+    manifest.write_text('["track-a", "track-a"]')
+    with pytest.raises(ValueError, match="unique"):
+        load_training_track_ids(manifest, expected_count=2)

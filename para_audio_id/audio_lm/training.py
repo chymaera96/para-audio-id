@@ -7,7 +7,6 @@ import math
 from pathlib import Path
 import random
 import time
-import warnings
 
 import lightning.pytorch as pl
 import numpy as np
@@ -19,15 +18,20 @@ from torch.utils.data import DataLoader, Subset
 from ..config import save_config
 from .checkpoint import ARCHITECTURE
 from .dataset import (
-    AudioTokenDataset,
-    CataloguePassBatchSampler,
+    CachedPositionDataset,
+    PairedAudioTokenDataset,
+    PairedViewBatchSampler,
     collate_causal_documents,
 )
-from .generation import beam_generate, greedy_generate
-from .losses import causal_audio_id_losses
+from .generation import (
+    batched_beam_generate,
+    batched_greedy_generate,
+)
+from .losses import causal_losses_by_view
 from .model import AudioCausalLM
 from .token_store import TokenStoreIndex
 from .tokenizer import TokenizerSpec
+from .tokenization import load_training_track_ids
 from .vocabulary import AudioLMVocabulary
 
 
@@ -75,57 +79,113 @@ class AudioLMDataModule(pl.LightningDataModule):
     def setup(self, stage: str | None = None) -> None:
         if hasattr(self, "dataset"):
             return
+        data_cfg = self.cfg["data"]
         spec_payload = json.loads(
-            (Path(self.cfg["data"]["token_root"]) / "tokenizer_spec.json").read_text()
+            (
+                Path(data_cfg["canonical_token_root"]) / "tokenizer_spec.json"
+            ).read_text()
         )
         self.tokenizer_spec = TokenizerSpec(**spec_payload["tokenizer"])
         if self.tokenizer_spec.fingerprint != spec_payload["fingerprint"]:
             raise ValueError("Token-store tokenizer specification fingerprint is invalid")
         self.vocabulary = AudioLMVocabulary.from_dict(spec_payload["vocabulary"])
         self.vocabulary.validate()
-        store = TokenStoreIndex(
-            self.cfg["data"]["token_root"],
+        canonical_store = TokenStoreIndex(
+            data_cfg["canonical_token_root"],
             tokenizer_fingerprint=self.tokenizer_spec.fingerprint,
+            corpus_role="canonical_training",
         )
-        self.dataset = AudioTokenDataset(
-            store,
-            expected_segments_per_track=int(self.cfg["data"]["segments_per_track"]),
-            max_tracks=(
-                int(self.cfg["data"]["max_training_tracks"])
-                if self.cfg["data"].get("max_training_tracks") is not None
-                else None
-            ),
-            subset_seed=int(self.cfg["train"]["seed"]),
+        self.training_track_ids = load_training_track_ids(
+            data_cfg["training_tracks_manifest"],
+            expected_count=int(data_cfg["max_training_tracks"]),
+        )
+        view_mode = data_cfg["view_mode"]
+        shifted_store = (
+            TokenStoreIndex(
+                data_cfg["shifted_training_token_root"],
+                tokenizer_fingerprint=self.tokenizer_spec.fingerprint,
+                corpus_role="shifted_training",
+            )
+            if view_mode == "paired"
+            else None
+        )
+        self.dataset = PairedAudioTokenDataset(
+            canonical_store,
+            shifted_store,
+            track_ids=self.training_track_ids,
+            canonical_starts=[float(value) for value in data_cfg["canonical_starts"]],
+            shifted_starts=[
+                float(value) for value in data_cfg["shifted_training_starts"]
+            ],
+            view_mode=view_mode,
         )
         if not self.dataset.track_ids:
             raise RuntimeError("No tracks have a complete canonical token set")
-        if self.dataset.dropped_incomplete_tracks:
-            warnings.warn(
-                f"Excluding {len(self.dataset.dropped_incomplete_tracks)} tracks with "
-                "incomplete tokenization; inspect tokenization_report.json and shard manifests",
-                stacklevel=2,
-            )
+        evaluation_store = TokenStoreIndex(
+            data_cfg["heldout_evaluation_token_root"],
+            tokenizer_fingerprint=self.tokenizer_spec.fingerprint,
+            corpus_role="heldout_evaluation",
+        )
+        self.evaluation_dataset = CachedPositionDataset(
+            canonical_store,
+            evaluation_store,
+            track_ids=self.training_track_ids,
+        )
         longest = max(record.token_count for record in self.dataset.records) + 8
         maximum = int(self.cfg["model"]["max_position_embeddings"])
         if longest > maximum:
             raise ValueError(
                 f"Cached causal document length {longest} exceeds model context {maximum}"
             )
-        mapping = {
-            record.track_id: record.code
-            for record in self.dataset.records
-        }
+        mapping = {record.track_id: record.code for record in self.dataset.records}
         encoded_mapping = "\n".join(
             f"{track_id}:{mapping[track_id]}" for track_id in sorted(mapping)
         ).encode()
         self.code_mapping_fingerprint = hashlib.sha256(encoded_mapping).hexdigest()
+        role_roots = [data_cfg["heldout_evaluation_token_root"]]
+        if shifted_store is not None:
+            role_roots.append(data_cfg["shifted_training_token_root"])
+        for root in role_roots:
+            payload = json.loads((Path(root) / "tokenizer_spec.json").read_text())
+            if payload.get("track_ids") != self.training_track_ids:
+                raise ValueError(f"View-token store {root} uses a different 10K cohort")
+            if (
+                payload.get("code_mapping_fingerprint")
+                != self.code_mapping_fingerprint
+            ):
+                raise ValueError(f"View-token store {root} uses different track codes")
+        corpus_payload = {
+            "view_mode": view_mode,
+            "track_ids": self.training_track_ids,
+            "canonical_starts": data_cfg["canonical_starts"],
+            "shifted_training_starts": data_cfg["shifted_training_starts"],
+            "shifted_evaluation_starts": data_cfg["shifted_evaluation_starts"],
+            "canonical_tokenizer": self.tokenizer_spec.fingerprint,
+            "shifted_policy": json.loads(
+                (
+                    Path(data_cfg["shifted_training_token_root"])
+                    / "tokenizer_spec.json"
+                ).read_text()
+            ).get("view_policy_fingerprint")
+            if shifted_store is not None
+            else None,
+        }
+        self.training_corpus_fingerprint = hashlib.sha256(
+            json.dumps(corpus_payload, sort_keys=True).encode()
+        ).hexdigest()
         probe_count = min(int(self.cfg["evaluation"]["probe_tracks"]), len(self.dataset.track_ids))
         generator = np.random.default_rng(int(self.cfg["train"]["seed"]) + 919)
         selected = generator.choice(self.dataset.track_ids, size=probe_count, replace=False)
         self.probe_track_ids = [str(track_id) for track_id in selected]
-        self.probe_indices = [
-            self.dataset.by_track[track_id][0] for track_id in self.probe_track_ids
-        ]
+        self.probe_indices = []
+        for track_id in self.probe_track_ids:
+            self.probe_indices.append(
+                self.dataset.view_indices(track_id, "canonical")[0]
+            )
+            if view_mode == "paired":
+                self.probe_indices.append(
+                    self.dataset.view_indices(track_id, "shifted")[0]
+                )
 
     def _common_loader_args(self) -> dict:
         workers = int(self.cfg["dataloader"]["num_workers"])
@@ -148,10 +208,9 @@ class AudioLMDataModule(pl.LightningDataModule):
         )
 
     def train_dataloader(self) -> DataLoader:
-        sampler = CataloguePassBatchSampler(
+        sampler = PairedViewBatchSampler(
             self.dataset,
             tracks_per_microbatch=int(self.cfg["train"]["tracks_per_microbatch"]),
-            segments_per_track=int(self.cfg["train"]["segments_per_track"]),
             seed=int(self.cfg["train"]["seed"]),
             catalogue_pass=int(self.trainer.current_epoch),
             world_size=int(self.trainer.world_size),
@@ -177,6 +236,22 @@ class AudioLMDataModule(pl.LightningDataModule):
             **self._common_loader_args(),
         )
 
+    def generation_dataloader(
+        self, *, canonical_start: float, heldout_start: float
+    ) -> DataLoader:
+        indices = self.evaluation_dataset.indices_for(
+            self.probe_track_ids, "canonical", canonical_start
+        ) + self.evaluation_dataset.indices_for(
+            self.probe_track_ids, "heldout", heldout_start
+        )
+        return DataLoader(
+            Subset(self.evaluation_dataset, indices),
+            batch_size=int(self.cfg["evaluation"]["generation_batch_size"]),
+            shuffle=False,
+            collate_fn=self._collate(),
+            **self._common_loader_args(),
+        )
+
     def set_catalogue_pass(self, catalogue_pass: int) -> None:
         if hasattr(self, "batch_sampler"):
             self.batch_sampler.set_epoch(catalogue_pass)
@@ -191,6 +266,7 @@ class AudioLMModule(pl.LightningModule):
         code_mapping_fingerprint: str,
         validation_probe: list[str],
         training_track_ids: list[str],
+        training_corpus_fingerprint: str,
     ):
         super().__init__()
         self.cfg = cfg
@@ -199,6 +275,7 @@ class AudioLMModule(pl.LightningModule):
         self.code_mapping_fingerprint = code_mapping_fingerprint
         self.validation_probe = validation_probe
         self.training_track_ids = training_track_ids
+        self.training_corpus_fingerprint = training_corpus_fingerprint
         self.model = AudioCausalLM(cfg, vocabulary)
         self.documents_consumed = 0
         self.tokens_consumed = 0
@@ -210,15 +287,17 @@ class AudioLMModule(pl.LightningModule):
     def _step(self, batch: dict, prefix: str) -> torch.Tensor:
         batch_size = int(batch["input_ids"].shape[0])
         logits = self.model(batch["input_ids"], batch["attention_mask"])
-        metrics = causal_audio_id_losses(
+        loss, overall_metrics, per_view = causal_losses_by_view(
             logits,
             batch["input_ids"],
             batch["audio_target_mask"],
             batch["id_target_mask"],
             batch["boundary_target_mask"],
+            batch["view_type"],
+            view_mode=self.cfg["data"]["view_mode"],
             id_digit_weight=float(self.cfg["train"]["id_digit_weight"]),
         )
-        for name, value in metrics.items():
+        for name, value in overall_metrics.items():
             if name == "loss":
                 continue
             self.log(
@@ -230,9 +309,20 @@ class AudioLMModule(pl.LightningModule):
                 sync_dist=True,
                 batch_size=batch_size,
             )
+        for view_type, metrics in per_view.items():
+            view_batch_size = batch["view_type"].count(view_type)
+            for name, value in metrics.items():
+                self.log(
+                    f"{prefix}/{view_type}/{name}",
+                    value,
+                    on_step=prefix == "train",
+                    on_epoch=True,
+                    sync_dist=True,
+                    batch_size=view_batch_size,
+                )
         self.log(
             f"{prefix}/loss",
-            metrics["loss"],
+            loss,
             on_step=prefix == "train",
             on_epoch=True,
             sync_dist=True,
@@ -245,7 +335,7 @@ class AudioLMModule(pl.LightningModule):
             self.tokens_consumed += int(batch["attention_mask"].sum()) * int(
                 self.trainer.world_size
             )
-        return metrics["loss"]
+        return loss
 
     def training_step(self, batch: dict, batch_idx: int) -> torch.Tensor:
         self.log(
@@ -277,15 +367,7 @@ class AudioLMModule(pl.LightningModule):
                     "data/complete_tracks": float(
                         len(self.trainer.datamodule.dataset.track_ids)
                     ),
-                    "data/incomplete_tracks": float(
-                        len(self.trainer.datamodule.dataset.dropped_incomplete_tracks)
-                    ),
-                    "data/available_complete_tracks": float(
-                        self.trainer.datamodule.dataset.complete_track_count
-                    ),
-                    "data/subset_excluded_tracks": float(
-                        len(self.trainer.datamodule.dataset.excluded_by_subset)
-                    ),
+                    "data/view_mode": self.cfg["data"]["view_mode"],
                     "train/id_digit_weight": float(
                         self.cfg["train"]["id_digit_weight"]
                     ),
@@ -325,56 +407,91 @@ class AudioLMModule(pl.LightningModule):
     def _generation_probe(self) -> None:
         if not self.trainer.is_global_zero or self.trainer.sanity_checking:
             return
+        interval = int(self.cfg["train"]["evaluation_interval"])
+        event = max(0, int(self.global_step) // interval - 1)
+        canonical_starts = [
+            float(value) for value in self.cfg["data"]["canonical_starts"]
+        ]
+        heldout_starts = [
+            float(value) for value in self.cfg["data"]["shifted_evaluation_starts"]
+        ]
+        canonical_start = canonical_starts[event % len(canonical_starts)]
+        heldout_start = heldout_starts[event % len(heldout_starts)]
+        beam_interval = int(self.cfg["evaluation"]["beam_every_n_steps"])
+        run_beam = (
+            int(self.global_step) % beam_interval == 0
+            or int(self.global_step) >= int(self.cfg["train"]["max_steps"])
+        )
         was_training = self.model.training
         self.model.eval()
-        targets = []
-        greedy_codes = []
-        rankings = []
-        maximum = int(self.cfg["evaluation"]["generation_probe_tracks"])
+        rows = []
         with torch.inference_mode():
-            for batch in self.trainer.datamodule.val_dataloader():
-                for row, target in zip(batch["input_ids"], batch["code"], strict=True):
-                    id_positions = (row == self.vocabulary.id_token_id).nonzero()
-                    if len(id_positions) != 1:
-                        raise RuntimeError("Probe document does not contain exactly one ID boundary")
-                    prompt = row[: int(id_positions[0]) + 1].to(self.device)
-                    greedy_codes.append(
-                        greedy_generate(self.model, prompt, self.vocabulary).code
+            loader = self.trainer.datamodule.generation_dataloader(
+                canonical_start=canonical_start,
+                heldout_start=heldout_start,
+            )
+            for batch in loader:
+                input_ids = batch["input_ids"].to(self.device)
+                id_columns = (input_ids == self.vocabulary.id_token_id).nonzero()
+                unique_columns = id_columns[:, 1].unique()
+                if len(unique_columns) != 1:
+                    raise RuntimeError("Generation batch has inconsistent ID boundaries")
+                prompts = input_ids[:, : int(unique_columns[0]) + 1]
+                greedy = batched_greedy_generate(
+                    self.model, prompts, self.vocabulary
+                )
+                rankings = (
+                    batched_beam_generate(
+                        self.model,
+                        prompts,
+                        self.vocabulary,
+                        width=int(self.cfg["evaluation"]["beam_width"]),
                     )
-                    rankings.append(
-                        beam_generate(
-                            self.model,
-                            prompt,
-                            self.vocabulary,
-                            width=int(self.cfg["evaluation"]["beam_width"]),
-                        )
+                    if run_beam
+                    else [[] for _ in greedy]
+                )
+                rows.extend(
+                    {
+                        "target": target,
+                        "view_type": view_type,
+                        "start": float(start),
+                        "greedy": result,
+                        "beam": ranking,
+                    }
+                    for target, view_type, start, result, ranking in zip(
+                        batch["code"],
+                        batch["view_type"],
+                        batch["segment_start"],
+                        greedy,
+                        rankings,
+                        strict=True,
                     )
-                    targets.append(target)
-                    if len(targets) >= maximum:
-                        break
-                if len(targets) >= maximum:
-                    break
+                )
         if was_training:
             self.model.train()
-        count = max(1, len(targets))
-        metrics = {
-            "probe/greedy_top1": sum(
-                predicted == target
-                for predicted, target in zip(greedy_codes, targets, strict=True)
-            )
-            / count,
-            "probe/invalid_code_rate": 0.0,
-        }
-        reciprocal_rank = 0.0
-        for width in (1, 5, 10):
-            hits = 0
-            for target, ranking in zip(targets, rankings, strict=True):
-                codes = [result.code for result in ranking]
-                hits += int(target in codes[:width])
-                if width == 10 and target in codes:
-                    reciprocal_rank += 1 / (codes.index(target) + 1)
-            metrics[f"probe/beam_top{width}"] = hits / count
-        metrics["probe/beam_mrr"] = reciprocal_rank / count
+        metrics = {}
+        for view_type in ("canonical", "heldout"):
+            selected = [row for row in rows if row["view_type"] == view_type]
+            start = selected[0]["start"]
+            prefix = f"probe/{view_type}/start_{start:g}"
+            count = len(selected)
+            metrics[f"{prefix}/greedy_top1"] = sum(
+                row["greedy"].code == row["target"] for row in selected
+            ) / count
+            metrics[f"{prefix}/invalid_code_rate"] = sum(
+                not row["greedy"].ended_with_eos for row in selected
+            ) / count
+            if run_beam:
+                reciprocal_rank = 0.0
+                for width in (1, 5, 10):
+                    hits = 0
+                    for row in selected:
+                        codes = [result.code for result in row["beam"]]
+                        hits += int(row["target"] in codes[:width])
+                        if width == 10 and row["target"] in codes:
+                            reciprocal_rank += 1 / (codes.index(row["target"]) + 1)
+                    metrics[f"{prefix}/beam_top{width}"] = hits / count
+                metrics[f"{prefix}/beam_mrr"] = reciprocal_rank / count
         if self.logger is not None:
             self.logger.log_metrics(metrics, step=self.global_step)
 
@@ -406,6 +523,17 @@ class AudioLMModule(pl.LightningModule):
                 "code_mapping_fingerprint": self.code_mapping_fingerprint,
                 "validation_probe": self.validation_probe,
                 "training_track_ids": self.training_track_ids,
+                "training_corpus_fingerprint": self.training_corpus_fingerprint,
+                "view_policy": {
+                    "view_mode": self.cfg["data"]["view_mode"],
+                    "canonical_starts": self.cfg["data"]["canonical_starts"],
+                    "shifted_training_starts": self.cfg["data"][
+                        "shifted_training_starts"
+                    ],
+                    "shifted_evaluation_starts": self.cfg["data"][
+                        "shifted_evaluation_starts"
+                    ],
+                },
                 "documents_consumed": self.documents_consumed,
                 "tokens_consumed": self.tokens_consumed,
                 "python_rng_state": random.getstate(),
@@ -435,6 +563,13 @@ class AudioLMModule(pl.LightningModule):
             raise ValueError("Resume checkpoint validation probe does not match")
         if checkpoint.get("training_track_ids") != self.training_track_ids:
             raise ValueError("Resume checkpoint training-track subset does not match")
+        if (
+            checkpoint.get("training_corpus_fingerprint")
+            != self.training_corpus_fingerprint
+        ):
+            raise ValueError(
+                "Resume checkpoint paired-view corpus fingerprint does not match"
+            )
         self.documents_consumed = int(checkpoint.get("documents_consumed", 0))
         self.tokens_consumed = int(checkpoint.get("tokens_consumed", 0))
         random.setstate(checkpoint["python_rng_state"])
@@ -530,6 +665,7 @@ def train(cfg: dict, *, checkpoint: str | Path | None = None) -> None:
         datamodule.code_mapping_fingerprint,
         datamodule.probe_track_ids,
         datamodule.dataset.track_ids,
+        datamodule.training_corpus_fingerprint,
     )
     logger = build_logger(cfg, directory)
     callbacks: list[pl.Callback] = [
@@ -546,10 +682,9 @@ def train(cfg: dict, *, checkpoint: str | Path | None = None) -> None:
     if logger:
         callbacks.append(LearningRateMonitor("step"))
     accumulation = int(cfg["trainer"]["accumulate_grad_batches"])
-    display_sampler = CataloguePassBatchSampler(
+    display_sampler = PairedViewBatchSampler(
         datamodule.dataset,
         tracks_per_microbatch=int(cfg["train"]["tracks_per_microbatch"]),
-        segments_per_track=int(cfg["train"]["segments_per_track"]),
         seed=seed,
         batch_count_multiple=accumulation,
     )

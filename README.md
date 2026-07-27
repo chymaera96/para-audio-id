@@ -111,7 +111,7 @@ the full token cache is reused without re-tokenization. Identifier digit targets
 have a fixed loss weight of 20 for this run.
 The single-GPU logical batch is 32 tracks × 2 segments: a physical microbatch of
 four tracks × two segments with eight gradient-accumulation steps.
-Training stops after 20,000 optimizer steps, warms up for exactly 200 optimizer
+Training stops after 50,000 optimizer steps, warms up for exactly 200 optimizer
 steps, and runs validation, greedy/beam probes, and checkpointing every 500
 optimizer steps. Catalogue passes still reshuffle the cached observations, but
 they do not control stopping, evaluation, or checkpoint cadence.

@@ -80,6 +80,57 @@ class DummyMuQ(nn.Module):
         return cls()
 
 
+class DummyFrontend(nn.Module):
+    def forward(self, waveform):
+        batch = waveform.shape[0]
+        return torch.arange(27, dtype=torch.float32).reshape(1, 3, 9).expand(
+            batch, -1, -1
+        )
+
+
+class DummyRVQ(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.n_codebooks = 8
+        self.codebook_size = 1024
+        quantizer = nn.Module()
+        quantizer.in_proj = nn.Conv1d(6, 2, kernel_size=1)
+        self.quantizers = nn.ModuleList([quantizer])
+        self.last_input_shape = None
+
+    def forward(self, features):
+        self.last_input_shape = tuple(features.shape)
+        self.quantizers[0].in_proj(features)
+        codes = torch.zeros(
+            features.shape[0], self.n_codebooks, features.shape[-1], dtype=torch.long
+        )
+        return features, codes
+
+
+class DummyLightweightInner(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.preprocessor_melspec_2048 = DummyFrontend()
+        self.stat = {
+            "melspec_2048_mean": [0.0, 0.0, 0.0],
+            "melspec_2048_std": [1.0, 1.0, 1.0],
+        }
+        self.n_fold = 2
+        self.rvq = DummyRVQ()
+
+
+class DummyLightweightMuQ(nn.Module):
+    config = SimpleNamespace(use_rvq_target=True, label_rate=50)
+
+    def __init__(self):
+        super().__init__()
+        self.model = DummyLightweightInner()
+
+    @classmethod
+    def from_pretrained(cls, model_name, **kwargs):
+        return cls()
+
+
 def test_muq_probe_verifies_layout_and_determinism(monkeypatch):
     monkeypatch.setitem(sys.modules, "muq", SimpleNamespace(MuQ=DummyMuQ))
     monkeypatch.setattr(
@@ -91,6 +142,21 @@ def test_muq_probe_verifies_layout_and_determinism(monkeypatch):
     assert report["raw_shape"] == [1, 2, 3]
     assert report["serialized_tokens_per_example"] == 6
     assert report["deterministic"]
+
+
+def test_lightweight_muq_feeds_channel_first_folded_mel_to_rvq(monkeypatch):
+    monkeypatch.setitem(sys.modules, "muq", SimpleNamespace(MuQ=DummyLightweightMuQ))
+    tokenizer = MuQRVQTokenizer(
+        "dummy",
+        revision="0" * 40,
+        selected_codebooks=2,
+        device="cpu",
+        lightweight=True,
+    )
+    rvq = tokenizer._rvq
+    codes = tokenizer.raw_codes(torch.zeros(1, 100))
+    assert rvq.last_input_shape == (1, 6, 4)
+    assert codes.shape == (1, 2, 4)
 
 
 def test_invalid_tokenizer_layout_is_rejected(monkeypatch):

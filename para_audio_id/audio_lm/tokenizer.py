@@ -171,7 +171,19 @@ class MuQRVQTokenizer:
                 .permute(0, 2, 3, 1)
                 .reshape(batch, frames, self._n_fold * bands)
             )
-            result = self._rvq(folded)
+            # MuQ's rearrange() produces [B, T, n_fold * mel_bands], but
+            # ResidualVectorQuantize is Conv1d-based and get_rvq_codes() feeds it
+            # [B, n_fold * mel_bands, T].
+            rvq_input = folded.transpose(1, 2).contiguous()
+            expected_channels = int(
+                self._rvq.quantizers[0].in_proj.weight.shape[1]
+            )
+            if rvq_input.shape[1] != expected_channels:
+                raise RuntimeError(
+                    "Lightweight MuQ feature width does not match RVQ input channels: "
+                    f"{rvq_input.shape[1]} != {expected_channels}"
+                )
+            result = self._rvq(rvq_input)
             if not isinstance(result, tuple) or len(result) < 2:
                 raise RuntimeError("MuQ RVQ returned an unexpected output")
             direct = result[1].long()

@@ -2,14 +2,17 @@ import hashlib
 import json
 
 import numpy as np
+import soundfile as sf
+import torch
 
+from para_audio_id.audio_lm.noise import NoiseSchedule
 from para_audio_id.audio_lm.token_store import TokenRecord, write_shard
 from para_audio_id.audio_lm.tokenizer import TokenizerSpec
 from para_audio_id.audio_lm.training import train
 from para_audio_id.audio_lm.vocabulary import AudioLMVocabulary
 
 
-def test_one_step_training_smoke(tmp_path):
+def test_one_step_training_smoke(tmp_path, monkeypatch):
     spec = TokenizerSpec(
         architecture="muq_mel_rvq",
         model_name="dummy",
@@ -26,6 +29,23 @@ def test_one_step_training_smoke(tmp_path):
     )
     vocabulary = AudioLMVocabulary()
     track_ids = [f"track-{track}" for track in range(4)]
+    audio_root = tmp_path / "audio"
+    audio_root.mkdir()
+    waveform = np.sin(
+        2 * np.pi * 220 * np.arange(30 * 8_000, dtype=np.float32) / 8_000
+    )
+    for track in range(4):
+        sf.write(audio_root / f"{track}.wav", waveform, 8_000)
+    noise_train = tmp_path / "noise_train"
+    noise_validation = tmp_path / "noise_validation"
+    noise_train.mkdir()
+    noise_validation.mkdir()
+    sf.write(noise_train / "train.wav", waveform[: 5 * 8_000], 8_000)
+    sf.write(
+        noise_validation / "validation.wav",
+        waveform[5 * 8_000 : 10 * 8_000],
+        8_000,
+    )
     code_fingerprint = hashlib.sha256(
         "\n".join(
             f"{track_id}:{index:05d}" for index, track_id in enumerate(track_ids)
@@ -60,7 +80,7 @@ def test_one_step_training_smoke(tmp_path):
                         document_index=len(records),
                         track_id=f"track-{track}",
                         code=f"{track:05d}",
-                        source_path=f"{track}.mp3",
+                        source_path=f"{track}.wav",
                         segment_start=float(start),
                         segment_duration=5.0,
                         status="ok",
@@ -97,8 +117,38 @@ def test_one_step_training_smoke(tmp_path):
     )
     manifest = tmp_path / "training_tracks.json"
     manifest.write_text(json.dumps(track_ids))
+
+    class FakeOnlineTokenizer:
+        def __init__(self, *args, **kwargs):
+            self.spec = spec
+
+        def tokenize(self, waveform):
+            return torch.tensor(
+                [[3, 1027]], device=waveform.device, dtype=torch.long
+            ).repeat(waveform.shape[0], 1)
+
+    monkeypatch.setattr(
+        "para_audio_id.audio_lm.training.MuQRVQTokenizer",
+        FakeOnlineTokenizer,
+    )
+    def forced_schedule(step):
+        return NoiseSchedule(1.0, 0.0, 30.0)
+    monkeypatch.setattr(
+        "para_audio_id.audio_lm.dataset.background_noise_schedule",
+        forced_schedule,
+    )
+    monkeypatch.setattr(
+        "para_audio_id.audio_lm.training.background_noise_schedule",
+        forced_schedule,
+    )
     cfg = {
         "architecture": "audio_lm_v1",
+        "tokenizer": {
+            "model_name": "dummy",
+            "revision": "resolved",
+            "selected_codebooks": 2,
+            "sample_rate": 24_000,
+        },
         "model": {
             "architecture": "gpt2",
             "num_layers": 1,
@@ -111,6 +161,7 @@ def test_one_step_training_smoke(tmp_path):
             "tie_word_embeddings": True,
         },
         "data": {
+            "audio_root": str(audio_root),
             "canonical_token_root": str(canonical_root),
             "shifted_training_token_root": str(shifted_root),
             "heldout_evaluation_token_root": str(heldout_root),
@@ -121,6 +172,12 @@ def test_one_step_training_smoke(tmp_path):
             "shifted_evaluation_starts": heldout_starts,
             "segments_per_track": 6,
             "max_training_tracks": 4,
+            "segment_duration": 5.0,
+            "background_noise": {
+                "training_root": str(noise_train),
+                "validation_root": str(noise_validation),
+                "preflight_examples_per_view": 0,
+            },
         },
         "train": {
             "seed": 7,
@@ -137,16 +194,18 @@ def test_one_step_training_smoke(tmp_path):
             "weight_decay": 0.0,
             "warmup_steps": 1,
             "evaluation_interval": 2,
+            "checkpoint_interval": 2,
             "id_digit_weight": 20.0,
             "gradient_clip_norm": 1.0,
             "wandb": {"enabled": False},
         },
         "evaluation": {
-            "probe_tracks": 2,
+            "online_monitor_enabled": False,
+            "monitor_tracks": 2,
             "probe_batch_size": 2,
             "generation_batch_size": 2,
             "beam_width": 10,
-            "beam_every_n_steps": 100,
+            "noise_snr_db": [0, 5, 10, 20, 30],
         },
         "dataloader": {
             "num_workers": 0,

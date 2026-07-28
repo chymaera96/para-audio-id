@@ -5,11 +5,19 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 import hashlib
 import math
+from pathlib import Path
 
 import numpy as np
 import torch
 from torch.utils.data import Dataset, Sampler
 
+from ..audio import load_audio
+from .noise import (
+    BackgroundNoiseAssets,
+    background_noise_schedule,
+    deterministic_noise_parameters,
+    stable_uint64,
+)
 from .token_store import TokenStoreIndex
 from .vocabulary import AudioLMVocabulary
 
@@ -153,17 +161,27 @@ class PairedAudioTokenDataset(Dataset):
     def __len__(self) -> int:
         return len(self.entries)
 
-    def __getitem__(self, index: int) -> dict:
+    def __getitem__(self, index: int | tuple[int, int, int]) -> dict:
+        optimizer_step = None
+        batch_idx = None
+        if isinstance(index, tuple):
+            index, optimizer_step, batch_idx = index
         entry = self.entries[index]
         record = entry.store.records[entry.record_index]
-        return {
+        result = {
             "audio_tokens": torch.from_numpy(entry.store.tokens(record)),
             "code": record.code,
             "track_id": record.track_id,
+            "source_path": record.source_path,
+            "segment_duration": record.segment_duration,
             "segment_start": record.segment_start,
             "document_index": record.document_index,
             "view_type": entry.view_type,
         }
+        if optimizer_step is not None:
+            result["optimizer_step"] = int(optimizer_step)
+            result["batch_idx"] = int(batch_idx)
+        return result
 
     def view_indices(self, track_id: str, view_type: str) -> list[int]:
         return self.by_track_view[track_id][view_type]
@@ -176,16 +194,20 @@ class CachedPositionDataset(Dataset):
         evaluation_store: TokenStoreIndex,
         *,
         track_ids: list[str],
+        shifted_store: TokenStoreIndex | None = None,
     ):
         if evaluation_store.corpus_role != "heldout_evaluation":
             raise ValueError("Evaluation dataset requires a heldout_evaluation store")
+        if shifted_store is not None and shifted_store.corpus_role != "shifted_training":
+            raise ValueError("Shifted evaluation views require a shifted_training store")
         selected = set(track_ids)
         self.entries: list[ViewEntry] = []
         self.by_track_start: dict[tuple[str, str, float], int] = {}
-        for store, view_type in (
-            (canonical_store, "canonical"),
-            (evaluation_store, "heldout"),
-        ):
+        stores = [(canonical_store, "canonical")]
+        if shifted_store is not None:
+            stores.append((shifted_store, "shifted"))
+        stores.append((evaluation_store, "heldout"))
+        for store, view_type in stores:
             for record_index, record in enumerate(store.records):
                 if record.track_id not in selected:
                     continue
@@ -203,6 +225,8 @@ class CachedPositionDataset(Dataset):
             "audio_tokens": torch.from_numpy(entry.store.tokens(record)),
             "code": record.code,
             "track_id": record.track_id,
+            "source_path": record.source_path,
+            "segment_duration": record.segment_duration,
             "segment_start": record.segment_start,
             "document_index": record.document_index,
             "view_type": entry.view_type,
@@ -257,10 +281,15 @@ class PairedViewBatchSampler(Sampler[list[int]]):
             shifted_order = _stable_permutation(
                 len(shifted), seed=self.seed, track_id=track_id, view="shifted"
             )
-            return [
+            pair = [
                 canonical[canonical_order[self.catalogue_pass % len(canonical)]],
                 shifted[shifted_order[self.catalogue_pass % len(shifted)]],
             ]
+            if stable_uint64(
+                self.seed, self.catalogue_pass, track_id, "anchor"
+            ) % 2:
+                pair.reverse()
+            return pair
         offset = (2 * self.catalogue_pass) % len(canonical)
         return [
             canonical[canonical_order[offset]],
@@ -289,10 +318,23 @@ class PairedViewBatchSampler(Sampler[list[int]]):
             ]
             if len(first_batches) < self.batch_count_multiple:
                 first_batches.append(batch)
+            optimizer_step = (
+                self.catalogue_pass * len(self) + yielded
+            ) // self.batch_count_multiple
+            decorated = [
+                (index, optimizer_step, yielded) for index in batch
+            ]
             yielded += 1
-            yield batch
+            yield decorated
         for index in range(len(self) - yielded):
-            yield first_batches[index % len(first_batches)]
+            batch_idx = yielded + index
+            optimizer_step = (
+                self.catalogue_pass * len(self) + batch_idx
+            ) // self.batch_count_multiple
+            yield [
+                (item, optimizer_step, batch_idx)
+                for item in first_batches[index % len(first_batches)]
+            ]
 
 
 class CataloguePassBatchSampler(Sampler[list[int]]):
@@ -431,6 +473,11 @@ def collate_causal_documents(
         "boundary_target_mask": boundary_mask,
         "code": [example["code"] for example in examples],
         "track_id": [example["track_id"] for example in examples],
+        "source_path": [example.get("source_path") for example in examples],
+        "segment_duration": torch.tensor(
+            [example.get("segment_duration", 0.0) for example in examples],
+            dtype=torch.float32,
+        ),
         "document_index": torch.tensor(
             [example["document_index"] for example in examples], dtype=torch.long
         ),
@@ -440,3 +487,152 @@ def collate_causal_documents(
             dtype=torch.float32,
         ),
     }
+
+
+class OnlinePairCollator:
+    def __init__(
+        self,
+        *,
+        vocabulary: AudioLMVocabulary,
+        max_positions: int,
+        audio_root: str | Path,
+        sample_rate: int,
+        segment_duration: float,
+        noise_assets: BackgroundNoiseAssets,
+        seed: int,
+    ):
+        self.vocabulary = vocabulary
+        self.max_positions = int(max_positions)
+        self.audio_root = Path(audio_root)
+        self.sample_rate = int(sample_rate)
+        self.segment_duration = float(segment_duration)
+        self.noise_assets = noise_assets
+        self.seed = int(seed)
+
+    def __call__(self, examples: list[dict]) -> dict:
+        if len(examples) % 2:
+            raise ValueError("Paired training batches must contain an even row count")
+        anchors = []
+        noises = []
+        keys = []
+        loaded_pairs = []
+        pair_roles = []
+        optimizer_steps = {example.get("optimizer_step") for example in examples}
+        batch_indices = {example.get("batch_idx") for example in examples}
+        if len(optimizer_steps) != 1 or len(batch_indices) != 1:
+            raise ValueError("Online batch has inconsistent sampler progress")
+        optimizer_step = optimizer_steps.pop()
+        batch_idx = batch_indices.pop()
+        if optimizer_step is None or batch_idx is None:
+            raise ValueError("Online batch is missing sampler progress")
+        for offset in range(0, len(examples), 2):
+            anchor, secondary = examples[offset : offset + 2]
+            if anchor["track_id"] != secondary["track_id"]:
+                raise ValueError("Adjacent paired rows must have the same identity")
+            key = stable_uint64(
+                self.seed,
+                anchor["track_id"],
+                anchor["view_type"],
+                anchor["segment_start"],
+                secondary["view_type"],
+                secondary["segment_start"],
+            )
+            keys.append(key)
+            pair_roles.extend(("anchor", "secondary"))
+        schedule = background_noise_schedule(int(optimizer_step))
+        selected, _ = deterministic_noise_parameters(
+            keys,
+            probability=schedule.probability,
+            snr_min_db=schedule.snr_min_db,
+            snr_max_db=schedule.snr_max_db,
+            seed=self.seed,
+            step=int(optimizer_step),
+            batch_idx=int(batch_idx),
+        )
+        expected = round(self.sample_rate * self.segment_duration)
+        for pair, keep in enumerate(selected):
+            if not keep:
+                continue
+            anchor = examples[pair * 2]
+            audio = load_audio(
+                self.audio_root / anchor["source_path"],
+                sample_rate=self.sample_rate,
+                start=float(anchor["segment_start"]),
+                duration=self.segment_duration,
+                pad=True,
+            )
+            if len(audio) != expected or not np.isfinite(audio).all():
+                raise ValueError("Online anchor waveform is invalid")
+            anchors.append(audio)
+            noises.append(self.noise_assets.load_training(keys[pair]))
+            loaded_pairs.append(pair)
+        empty = np.empty((0, expected), dtype=np.float32)
+        batch = collate_causal_documents(
+            examples, self.vocabulary, self.max_positions
+        )
+        batch.update(
+            {
+                "anchor_waveforms": torch.from_numpy(
+                    np.stack(anchors) if anchors else empty
+                ),
+                "noise_waveforms": torch.from_numpy(
+                    np.stack(noises) if noises else empty
+                ),
+                "augmentation_keys": keys,
+                "loaded_pair_indices": loaded_pairs,
+                "planned_optimizer_step": int(optimizer_step),
+                "planned_batch_idx": int(batch_idx),
+                "pair_role": pair_roles,
+            }
+        )
+        return batch
+
+
+class NoiseEvaluationCollator:
+    def __init__(
+        self,
+        *,
+        vocabulary: AudioLMVocabulary,
+        max_positions: int,
+        audio_root: str | Path,
+        sample_rate: int,
+        segment_duration: float,
+        noise_assets: BackgroundNoiseAssets,
+        seed: int,
+    ):
+        self.vocabulary = vocabulary
+        self.max_positions = int(max_positions)
+        self.audio_root = Path(audio_root)
+        self.sample_rate = int(sample_rate)
+        self.segment_duration = float(segment_duration)
+        self.noise_assets = noise_assets
+        self.seed = int(seed)
+
+    def __call__(self, examples: list[dict]) -> dict:
+        clean = []
+        noise = []
+        for example in examples:
+            waveform = load_audio(
+                self.audio_root / example["source_path"],
+                sample_rate=self.sample_rate,
+                start=float(example["segment_start"]),
+                duration=self.segment_duration,
+                pad=True,
+            )
+            expected = round(self.sample_rate * self.segment_duration)
+            if len(waveform) != expected or not np.isfinite(waveform).all():
+                raise ValueError("Monitoring waveform is invalid")
+            key = stable_uint64(
+                self.seed,
+                example["track_id"],
+                example["view_type"],
+                example["segment_start"],
+            )
+            clean.append(waveform)
+            noise.append(self.noise_assets.load_validation(key))
+        batch = collate_causal_documents(
+            examples, self.vocabulary, self.max_positions
+        )
+        batch["clean_waveforms"] = torch.from_numpy(np.stack(clean))
+        batch["noise_waveforms"] = torch.from_numpy(np.stack(noise))
+        return batch

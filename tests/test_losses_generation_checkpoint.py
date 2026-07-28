@@ -157,6 +157,39 @@ def test_paired_loss_is_equal_mean_of_independent_view_losses():
     assert torch.allclose(loss, expected)
 
 
+def test_anchor_secondary_loss_is_equal_mean_after_noisy_replacement():
+    vocabulary = AudioLMVocabulary()
+    examples = [
+        {
+            "audio_tokens": torch.tensor([1, 1025]),
+            "code": "12345",
+            "track_id": "track",
+            "document_index": index,
+            "view_type": view,
+        }
+        for index, view in enumerate(("canonical", "noisy"))
+    ]
+    batch = collate_causal_documents(examples, vocabulary, 32)
+    torch.manual_seed(9)
+    logits = torch.randn(2, batch["input_ids"].shape[1], vocabulary.size)
+    loss, _, per_role = causal_losses_by_view(
+        logits,
+        batch["input_ids"],
+        batch["audio_target_mask"],
+        batch["id_target_mask"],
+        batch["boundary_target_mask"],
+        ["anchor", "secondary"],
+        view_mode="paired_roles",
+        id_digit_weight=20.0,
+    )
+    assert torch.allclose(
+        loss,
+        0.5 * (
+            per_role["anchor"]["loss"] + per_role["secondary"]["loss"]
+        ),
+    )
+
+
 def test_checkpoint_identity_and_inference_loader_need_no_token_store(tmp_path):
     vocabulary = AudioLMVocabulary()
     cfg = tiny_config()

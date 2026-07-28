@@ -131,24 +131,37 @@ loss = (
 Audio and identifier losses are also logged separately for diagnosis, but neither
 is optimized as a separately normalized objective and there is no objective
 schedule.
-The current experiment reuses the exact 10,000 identities from the canonical run.
-In `paired` mode, each track contributes one canonical and one shifted document;
-their independently normalized causal losses are averaged equally. Set
-`data.view_mode: canonical_only` for the from-scratch ablation, which instead
-uses two distinct canonical views with identical batch shape and compute.
-Identifier digit targets have a fixed loss weight of 20.
+The current experiment reuses the exact 10,000 identities and cached canonical
+and shifted tokens. Each track contributes a clean anchor plus a second view.
+The second view is initially the other cached clean excerpt and is progressively
+replaced by an online background-noise version of the anchor:
+
+| Optimizer steps | Noise probability | SNR |
+| ---: | ---: | ---: |
+| 0–20K | 0 | disabled |
+| 20–25K | 0 → 0.25 | 20–30 dB |
+| 25–35K | 0.25 → 0.50 | 10–30 dB |
+| 35–45K | 0.50 → 0.75 | 0–30 dB |
+| 45–60K | 0.75 | 0–30 dB |
+
+Clean documents always use the existing token shards. Noisy waveforms are mixed
+at the requested RMS SNR and passed through a frozen, component-only MuQ Mel-RVQ
+tokenizer once per microbatch. Only background noise is enabled.
+Anchor and second-view causal losses are independently normalized and averaged
+equally. Identifier digit targets retain their fixed weight of 20.
 The single-GPU logical batch is 32 tracks × 2 segments: a physical microbatch of
 four tracks × two segments with eight gradient-accumulation steps.
-Training stops after 100,000 optimizer steps and warms up for exactly 200.
-Validation, rotating canonical/held-out greedy probes, and checkpointing run
-every 500 steps. Beam probes run every 2,500 steps and at the final step.
+Training stops after 60,000 optimizer steps and warms up for exactly 200 before
+cosine decay. Checkpoints are saved every 500 steps. A fixed 100-track clean and
+held-out-noise greedy/beam monitor runs at step zero, every 2,500 steps, and at
+the final step over canonical, integer-shifted, and held-out half-shifted views.
 Catalogue passes reshuffle identities and advance deterministic per-track view
 permutations, but do not control stopping or checkpoint cadence.
 
 ```bash
 python train.py configs/fma_large.yaml \
   --devices 1 \
-  --run-id paired-10k-100k \
+  --run-id noise-curriculum-10k-60k \
   --wandb-online
 ```
 
@@ -158,7 +171,7 @@ state:
 ```bash
 python train.py configs/fma_large.yaml \
   --devices 1 \
-  --run-id paired-10k-100k \
+  --run-id noise-curriculum-10k-60k \
   --wandb-online \
   --resume
 ```
@@ -169,10 +182,10 @@ Checkpoints are written every 500 optimizer steps under:
 /gpfs/scratch/acw723/para-audio-id/audio-lm-checkpoints/<run-id>/
 ```
 
-Checkpoints embed the vocabulary, exact cohort, view grids, corpus fingerprint,
-tokenizer fingerprint, and code mapping. A canonical-only legacy checkpoint
-cannot initialize the paired experiment; interruption resume is accepted only
-when all paired-corpus metadata matches.
+Checkpoints embed the vocabulary, exact cohort, view grids, monitor recipes,
+noise-manifest fingerprints, corpus and tokenizer fingerprints, and code
+mapping. Interruption resume is accepted only when all training-protocol and
+asset metadata match.
 
 PyTorch deterministic algorithms and seeded Python, NumPy, Torch, samplers, and
 workers are enabled. `deterministic_warn_only: true` reports CUDA operations for

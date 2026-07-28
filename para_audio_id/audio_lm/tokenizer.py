@@ -75,6 +75,7 @@ class MuQRVQTokenizer:
         selected_codebooks: int = 2,
         sample_rate: int = 24_000,
         device: str | torch.device = "cuda",
+        lightweight: bool = False,
     ):
         try:
             from muq import MuQ
@@ -87,16 +88,17 @@ class MuQRVQTokenizer:
             else HfApi().model_info(model_name, revision=revision).sha
         )
         kwargs: dict[str, Any] = {"revision": resolved_revision}
-        self.model = MuQ.from_pretrained(model_name, **kwargs).to(device).eval()
+        loaded_model = MuQ.from_pretrained(model_name, **kwargs)
         self.device = torch.device(device)
         self.model_name = model_name
         self.revision = resolved_revision
         self.selected_codebooks = selected_codebooks
         self.sample_rate = sample_rate
-        config = self.model.config
+        config = loaded_model.config
         if not bool(getattr(config, "use_rvq_target", False)):
             raise RuntimeError("Loaded MuQ checkpoint does not enable Mel-RVQ targets")
-        rvq = getattr(self.model.model, "rvq", None)
+        inner = loaded_model.model
+        rvq = getattr(inner, "rvq", None)
         if rvq is None or not hasattr(rvq, "n_codebooks"):
             raise RuntimeError("Loaded MuQ checkpoint has no accessible residual quantizer")
         self.available_codebooks = int(rvq.n_codebooks)
@@ -125,12 +127,59 @@ class MuQRVQTokenizer:
             serialization="time_major_codebook_interleaved",
             preprocessing_version=1,
         )
+        self.lightweight = bool(lightweight)
+        if self.lightweight:
+            self.model = None
+            self._frontend = inner.preprocessor_melspec_2048.to(self.device)
+            self._feature_mean = torch.as_tensor(
+                inner.stat["melspec_2048_mean"],
+                device=self.device,
+                dtype=torch.float32,
+            )
+            self._feature_std = torch.as_tensor(
+                inner.stat["melspec_2048_std"],
+                device=self.device,
+                dtype=torch.float32,
+            )
+            if self._feature_mean.ndim == 1:
+                self._feature_mean = self._feature_mean.view(1, -1, 1)
+            if self._feature_std.ndim == 1:
+                self._feature_std = self._feature_std.view(1, -1, 1)
+            self._n_fold = int(inner.n_fold)
+            self._rvq = rvq.to(self.device).eval()
+            del inner
+            del loaded_model
+        else:
+            self.model = loaded_model.to(self.device).eval()
 
     @torch.inference_mode()
     def raw_codes(self, waveform: torch.Tensor, *, verify_public_layout: bool = False) -> torch.Tensor:
         if waveform.ndim != 2:
             raise ValueError(f"Expected [batch, time] waveform, got {tuple(waveform.shape)}")
         waveform = waveform.to(self.device, dtype=torch.float32)
+        if self.lightweight:
+            mel = self._frontend(waveform.float())[..., :-1]
+            mel = (mel - self._feature_mean) / self._feature_std
+            batch, bands, samples = mel.shape
+            if samples % self._n_fold:
+                raise RuntimeError(
+                    f"Mel frame count {samples} is not divisible by {self._n_fold}"
+                )
+            frames = samples // self._n_fold
+            folded = (
+                mel.reshape(batch, bands, frames, self._n_fold)
+                .permute(0, 2, 3, 1)
+                .reshape(batch, frames, self._n_fold * bands)
+            )
+            result = self._rvq(folded)
+            if not isinstance(result, tuple) or len(result) < 2:
+                raise RuntimeError("MuQ RVQ returned an unexpected output")
+            direct = result[1].long()
+            if direct.ndim != 3:
+                raise RuntimeError(
+                    f"Expected direct RVQ codes [B, Q, T], got {tuple(direct.shape)}"
+                )
+            return direct[:, : self.selected_codebooks, :]
         inner = self.model.model
         features = inner.preprocessing(waveform, features=inner.features)
         features = inner.normalize(features)

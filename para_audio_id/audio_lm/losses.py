@@ -100,10 +100,16 @@ def causal_losses_by_view(
             boundary_target_mask[rows],
             id_digit_weight=id_digit_weight,
         )
-    if view_mode == "paired":
-        if set(per_view) != {"canonical", "shifted"}:
-            raise ValueError("Paired loss requires canonical and shifted rows")
-        loss = 0.5 * (per_view["canonical"]["loss"] + per_view["shifted"]["loss"])
+    if view_mode in {"paired", "paired_roles"}:
+        expected = (
+            {"canonical", "shifted"}
+            if view_mode == "paired"
+            else {"anchor", "secondary"}
+        )
+        if set(per_view) != expected:
+            raise ValueError(f"{view_mode} loss requires {sorted(expected)} rows")
+        left, right = sorted(expected)
+        loss = 0.5 * (per_view[left]["loss"] + per_view[right]["loss"])
     elif view_mode == "canonical_only":
         loss = overall["loss"]
     else:

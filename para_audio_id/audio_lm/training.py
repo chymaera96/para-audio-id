@@ -674,6 +674,7 @@ class AudioLMModule(pl.LightningModule):
         self.model.eval()
         clean_rows = []
         noisy_rows = []
+        skipped_noisy_rows = 0
         snr_values = [
             float(value) for value in self.cfg["evaluation"]["noise_snr_db"]
         ]
@@ -728,14 +729,13 @@ class AudioLMModule(pl.LightningModule):
                 mixed, valid = mix_background_noise(
                     repeated_clean, repeated_noise, repeated_snr
                 )
-                if not valid.all():
-                    raise RuntimeError(
-                        "Deterministic validation recipe contains silent audio"
-                    )
+                skipped_noisy_rows += int((~valid).sum().item())
+                if not valid.any():
+                    continue
                 if self.device.type == "cuda":
                     torch.cuda.synchronize(self.device)
                 token_started = time.perf_counter()
-                noisy_tokens = self.online_tokenizer.tokenize(mixed)
+                noisy_tokens = self.online_tokenizer.tokenize(mixed[valid])
                 if self.device.type == "cuda":
                     torch.cuda.synchronize(self.device)
                 tokenization_seconds += time.perf_counter() - token_started
@@ -759,8 +759,26 @@ class AudioLMModule(pl.LightningModule):
                             width=int(self.cfg["evaluation"]["beam_width"]),
                         )
                     )
-                targets = batch["code"] * len(snr_values)
-                views = batch["view_type"] * len(snr_values)
+                valid_rows = valid.cpu().tolist()
+                targets = [
+                    value
+                    for value, keep in zip(
+                        batch["code"] * len(snr_values),
+                        valid_rows,
+                        strict=True,
+                    )
+                    if keep
+                ]
+                views = [
+                    value
+                    for value, keep in zip(
+                        batch["view_type"] * len(snr_values),
+                        valid_rows,
+                        strict=True,
+                    )
+                    if keep
+                ]
+                valid_snrs = repeated_snr[valid].tolist()
                 noisy_rows.extend(
                     {
                         "target": target,
@@ -772,7 +790,7 @@ class AudioLMModule(pl.LightningModule):
                     for target, view_type, snr, result, ranking in zip(
                         targets,
                         views,
-                        repeated_snr.tolist(),
+                        valid_snrs,
                         noisy_greedy,
                         noisy_rankings,
                         strict=True,
@@ -787,6 +805,8 @@ class AudioLMModule(pl.LightningModule):
             ]
             count = len(selected)
             prefix = f"probe/clean/{view_type}"
+            metrics[f"{prefix}/evaluated"] = float(count)
+            metrics[f"{prefix}/skipped"] = 0.0
             metrics[f"{prefix}/greedy_top1"] = sum(
                 row["greedy"].code == row["target"] for row in selected
             ) / count
@@ -802,6 +822,12 @@ class AudioLMModule(pl.LightningModule):
                     and math.isclose(row["snr_db"], snr)
                 ]
                 noisy_prefix = f"probe/noise/{view_type}/snr_{snr:g}"
+                metrics[f"{noisy_prefix}/evaluated"] = float(len(noisy))
+                metrics[f"{noisy_prefix}/skipped"] = float(count - len(noisy))
+                if not noisy:
+                    metrics[f"{noisy_prefix}/greedy_top1"] = float("nan")
+                    metrics[f"{noisy_prefix}/beam_top1"] = float("nan")
+                    continue
                 metrics[f"{noisy_prefix}/greedy_top1"] = sum(
                     row["greedy"].code == row["target"] for row in noisy
                 ) / len(noisy)
@@ -817,17 +843,25 @@ class AudioLMModule(pl.LightningModule):
                 if width == 10 and row["target"] in codes:
                     reciprocal_rank += 1 / (codes.index(row["target"]) + 1)
             metrics[f"probe/noise/aggregate/beam_top{width}"] = (
-                hits / len(noisy_rows)
+                hits / len(noisy_rows) if noisy_rows else float("nan")
             )
-        metrics["probe/noise/aggregate/greedy_top1"] = sum(
-            row["greedy"].code == row["target"] for row in noisy_rows
-        ) / len(noisy_rows)
-        metrics["probe/noise/aggregate/beam_mrr"] = (
-            reciprocal_rank / len(noisy_rows)
+        metrics["probe/noise/aggregate/greedy_top1"] = (
+            sum(row["greedy"].code == row["target"] for row in noisy_rows)
+            / len(noisy_rows)
+            if noisy_rows
+            else float("nan")
         )
-        metrics["probe/noise/aggregate/invalid_code_rate"] = sum(
-            not row["greedy"].ended_with_eos for row in noisy_rows
-        ) / len(noisy_rows)
+        metrics["probe/noise/aggregate/beam_mrr"] = (
+            reciprocal_rank / len(noisy_rows) if noisy_rows else float("nan")
+        )
+        metrics["probe/noise/aggregate/invalid_code_rate"] = (
+            sum(not row["greedy"].ended_with_eos for row in noisy_rows)
+            / len(noisy_rows)
+            if noisy_rows
+            else float("nan")
+        )
+        metrics["probe/noise/aggregate/evaluated"] = float(len(noisy_rows))
+        metrics["probe/noise/aggregate/skipped"] = float(skipped_noisy_rows)
         metrics["probe/noise/online_tokenization_seconds"] = tokenization_seconds
         if self.logger is not None:
             self.logger.log_metrics(metrics, step=self.global_step)

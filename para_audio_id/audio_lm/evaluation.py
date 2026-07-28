@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 import json
 import math
 from pathlib import Path
+import random
 import time
 
 import torch
@@ -31,6 +33,8 @@ def select_checkpoint_cohort(
     cohort: str,
     expected_tracks: int | None = None,
     max_tracks: int | None = None,
+    sample_tracks: int | None = None,
+    sample_seed: int = 1337,
 ) -> list[str]:
     key = {"probe": "validation_probe", "training": "training_track_ids"}.get(cohort)
     if key is None:
@@ -45,7 +49,15 @@ def select_checkpoint_cohort(
             f"Expected exactly {expected_tracks} {cohort} tracks, checkpoint has "
             f"{len(track_ids)}"
         )
-    if max_tracks is not None:
+    if max_tracks is not None and sample_tracks is not None:
+        raise ValueError("max_tracks and sample_tracks are mutually exclusive")
+    if sample_tracks is not None:
+        if not 1 <= sample_tracks <= len(track_ids):
+            raise ValueError(
+                f"sample_tracks must be between 1 and {len(track_ids)}"
+            )
+        track_ids = random.Random(sample_seed).sample(track_ids, sample_tracks)
+    elif max_tracks is not None:
         if max_tracks < 1:
             raise ValueError("max_tracks must be positive")
         track_ids = track_ids[:max_tracks]
@@ -98,6 +110,8 @@ def _evaluate_cached_positions(
     cohort: str,
     expected_tracks: int | None,
     max_tracks: int | None,
+    sample_tracks: int | None,
+    sample_seed: int,
     device: str,
     beam_width: int | None,
 ) -> dict:
@@ -106,6 +120,8 @@ def _evaluate_cached_positions(
         cohort=cohort,
         expected_tracks=expected_tracks,
         max_tracks=max_tracks,
+        sample_tracks=sample_tracks,
+        sample_seed=sample_seed,
     )
     data_cfg = cfg["data"]
     fingerprint = checkpoint["tokenizer_fingerprint"]
@@ -131,14 +147,21 @@ def _evaluate_cached_positions(
             [float(value) for value in data_cfg["shifted_evaluation_starts"]],
         ),
     )
+    batch_size = int(cfg["evaluation"]["generation_batch_size"])
+    batches_per_position = math.ceil(len(track_ids) / batch_size)
     total_positions = sum(len(starts) for _, starts in policies)
-    progress = tqdm(total=total_positions, desc=f"{cohort} position groups")
+    progress = tqdm(
+        total=total_positions * batches_per_position,
+        desc=f"{cohort} evaluation",
+        unit="batch",
+    )
     for view_type, starts in policies:
         for start in starts:
+            progress.set_postfix(view=view_type, start=f"{start:g}")
             indices = dataset.indices_for(track_ids, view_type, start)
             loader = DataLoader(
                 Subset(dataset, indices),
-                batch_size=int(cfg["evaluation"]["generation_batch_size"]),
+                batch_size=batch_size,
                 shuffle=False,
                 collate_fn=lambda examples: collate_causal_documents(
                     examples,
@@ -152,14 +175,20 @@ def _evaluate_cached_positions(
                 if len(columns) != 1:
                     raise RuntimeError("Cached evaluation prompts have unequal lengths")
                 prompts = input_ids[:, : int(columns[0]) + 1]
-                greedy = batched_greedy_generate(model, prompts, vocabulary)
-                beams = (
-                    batched_beam_generate(
-                        model, prompts, vocabulary, width=beam_width
-                    )
-                    if beam_width is not None
-                    else [[] for _ in greedy]
+                autocast = (
+                    torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+                    if str(device).startswith("cuda")
+                    else nullcontext()
                 )
+                with autocast:
+                    greedy = batched_greedy_generate(model, prompts, vocabulary)
+                    beams = (
+                        batched_beam_generate(
+                            model, prompts, vocabulary, width=beam_width
+                        )
+                        if beam_width is not None
+                        else [[] for _ in greedy]
+                    )
                 rows.extend(
                     {
                         "track_id": track_id,
@@ -185,7 +214,7 @@ def _evaluate_cached_positions(
                         strict=True,
                     )
                 )
-            progress.update()
+                progress.update()
     progress.close()
     by_start = {
         f"{view_type}:{start:g}": _generation_metrics(
@@ -201,6 +230,7 @@ def _evaluate_cached_positions(
     metrics = {
         "cohort": cohort,
         "selected_tracks": len(track_ids),
+        "sample_seed": sample_seed if sample_tracks is not None else None,
         "generation_protocol": "five_autoregressive_digits_then_eos",
         "canonical": _generation_metrics(
             [row for row in rows if row["view_type"] == "canonical"]
@@ -224,6 +254,8 @@ def evaluate(
     cohort: str = "probe",
     expected_tracks: int | None = None,
     max_tracks: int | None = None,
+    sample_tracks: int | None = None,
+    sample_seed: int = 1337,
     device: str = "cuda",
     beam_width: int | None = 10,
     generation_only: bool = False,
@@ -239,6 +271,8 @@ def evaluate(
             cohort=cohort,
             expected_tracks=expected_tracks,
             max_tracks=max_tracks,
+            sample_tracks=sample_tracks,
+            sample_seed=sample_seed,
             device=device,
             beam_width=beam_width,
         )
@@ -252,6 +286,8 @@ def evaluate(
         cohort=cohort,
         expected_tracks=expected_tracks,
         max_tracks=max_tracks,
+        sample_tracks=sample_tracks,
+        sample_seed=sample_seed,
     )
     positions = [float(value) for value in cfg["evaluation"]["shifted_starts"]]
     bad = BadFileRegistry(cfg["data"]["runtime_bad_files"])
@@ -374,6 +410,7 @@ def evaluate(
     metrics = {
         "cohort": cohort,
         "selected_tracks": len(selected_track_ids),
+        "sample_seed": sample_seed if sample_tracks is not None else None,
         "evaluated_tracks": len({row["track_id"] for row in rows}),
         "skipped_tracks": len(selected_track_ids)
         - len({row["track_id"] for row in rows}),

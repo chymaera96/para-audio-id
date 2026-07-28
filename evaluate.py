@@ -23,6 +23,17 @@ def main() -> None:
         help="Fail unless the selected checkpoint cohort has exactly this many tracks.",
     )
     parser.add_argument("--max-tracks", type=int)
+    parser.add_argument(
+        "--sample-tracks",
+        type=int,
+        help="Evaluate a seeded random subset of the selected cohort.",
+    )
+    parser.add_argument(
+        "--sample-seed",
+        type=int,
+        default=1337,
+        help="Random-subset seed used with --sample-tracks (default: 1337).",
+    )
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--beam-width", type=int, default=10)
     parser.add_argument(
@@ -37,6 +48,8 @@ def main() -> None:
         cohort=args.cohort,
         expected_tracks=args.expected_tracks,
         max_tracks=args.max_tracks,
+        sample_tracks=args.sample_tracks,
+        sample_seed=args.sample_seed,
         device=args.device,
         beam_width=None if args.greedy_only else args.beam_width,
         generation_only=args.greedy_only,

@@ -287,7 +287,7 @@ class AudioLMModule(pl.LightningModule):
     def _step(self, batch: dict, prefix: str) -> torch.Tensor:
         batch_size = int(batch["input_ids"].shape[0])
         logits = self.model(batch["input_ids"], batch["attention_mask"])
-        loss, overall_metrics, per_view = causal_losses_by_view(
+        loss, overall_metrics, _ = causal_losses_by_view(
             logits,
             batch["input_ids"],
             batch["audio_target_mask"],
@@ -309,17 +309,6 @@ class AudioLMModule(pl.LightningModule):
                 sync_dist=True,
                 batch_size=batch_size,
             )
-        for view_type, metrics in per_view.items():
-            view_batch_size = batch["view_type"].count(view_type)
-            for name, value in metrics.items():
-                self.log(
-                    f"{prefix}/{view_type}/{name}",
-                    value,
-                    on_step=prefix == "train",
-                    on_epoch=True,
-                    sync_dist=True,
-                    batch_size=view_batch_size,
-                )
         self.log(
             f"{prefix}/loss",
             loss,

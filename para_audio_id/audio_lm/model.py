@@ -46,3 +46,30 @@ class AudioCausalLM(nn.Module):
         if input_ids.shape[1] > self.max_position_embeddings:
             raise ValueError("Input exceeds configured positional context")
         return self.network(input_ids=input_ids, attention_mask=attention_mask).logits
+
+    def forward_with_cache(
+        self,
+        input_ids: torch.Tensor,
+        *,
+        past_key_values=None,
+    ):
+        """Run autoregressive inference while retaining GPT-2's attention cache."""
+        return self.network(
+            input_ids=input_ids,
+            past_key_values=past_key_values,
+            use_cache=True,
+        )
+
+    @staticmethod
+    def reorder_cache(past_key_values, indices: torch.Tensor):
+        """Select/repeat cached beams across supported Transformers cache formats."""
+        if hasattr(past_key_values, "batch_select_indices"):
+            reordered = past_key_values.batch_select_indices(indices)
+            return past_key_values if reordered is None else reordered
+        if hasattr(past_key_values, "reorder_cache"):
+            reordered = past_key_values.reorder_cache(indices)
+            return past_key_values if reordered is None else reordered
+        return tuple(
+            tuple(value.index_select(0, indices) for value in layer)
+            for layer in past_key_values
+        )

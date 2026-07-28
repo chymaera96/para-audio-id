@@ -96,6 +96,36 @@ def test_generation_emits_exactly_five_digits_then_eos():
     assert [len(results) for results in batched_beam] == [5, 5]
 
 
+def test_cached_greedy_matches_full_prefix_decoding():
+    vocabulary = AudioLMVocabulary()
+    torch.manual_seed(12)
+    model = AudioCausalLM(tiny_config(), vocabulary).eval()
+    prompt = torch.tensor(
+        [[vocabulary.bos_token_id, 1, 1025, vocabulary.id_token_id]]
+    )
+    sequence = prompt
+    expected_digits = []
+    expected_score = torch.tensor(0.0)
+    with torch.inference_mode():
+        for _ in range(5):
+            log_probs = model(sequence)[
+                :, -1, vocabulary.digit_offset : vocabulary.digit_offset + 10
+            ].log_softmax(dim=-1)
+            digit = log_probs.argmax(dim=-1)
+            expected_score += log_probs[0, int(digit.item())]
+            expected_digits.append(int(digit.item()))
+            sequence = torch.cat(
+                (sequence, (digit + vocabulary.digit_offset)[:, None]), dim=1
+            )
+        expected_score += model(sequence)[:, -1, :].log_softmax(dim=-1)[
+            0, vocabulary.eos_token_id
+        ]
+    result = batched_greedy_generate(model, prompt, vocabulary)[0]
+    expected_code = "".join(str(digit) for digit in expected_digits)
+    assert result.code == expected_code
+    assert result.log_probability == pytest.approx(float(expected_score), abs=1e-5)
+
+
 def test_paired_loss_is_equal_mean_of_independent_view_losses():
     vocabulary = AudioLMVocabulary()
     examples = [
@@ -172,6 +202,21 @@ def test_checkpoint_training_cohort_selection_is_exact():
     with pytest.raises(ValueError, match="Expected exactly 1000"):
         select_checkpoint_cohort(
             checkpoint, cohort="training", expected_tracks=1000
+        )
+    first = select_checkpoint_cohort(
+        checkpoint, cohort="training", sample_tracks=1, sample_seed=7
+    )
+    second = select_checkpoint_cohort(
+        checkpoint, cohort="training", sample_tracks=1, sample_seed=7
+    )
+    assert first == second
+    assert len(first) == 1 and first[0] in checkpoint["training_track_ids"]
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        select_checkpoint_cohort(
+            checkpoint,
+            cohort="training",
+            max_tracks=1,
+            sample_tracks=1,
         )
 
 

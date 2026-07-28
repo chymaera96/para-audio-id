@@ -62,11 +62,12 @@ def batched_greedy_generate(
 ) -> list[GenerationResult]:
     if prompts.ndim != 2:
         raise ValueError("Batched prompts must have shape [batch, sequence]")
-    sequence = prompts
     generated = []
     scores = torch.zeros(prompts.shape[0], device=prompts.device)
+    output = model.forward_with_cache(prompts)
+    logits = output.logits[:, -1, :]
+    past_key_values = output.past_key_values
     for _ in range(5):
-        logits = model(sequence)[:, -1, :]
         log_probs = logits[
             :, vocabulary.digit_offset : vocabulary.digit_offset + 10
         ].log_softmax(dim=-1)
@@ -74,8 +75,13 @@ def batched_greedy_generate(
         scores += log_probs.gather(1, raw_digits[:, None]).squeeze(1)
         tokens = raw_digits + vocabulary.digit_offset
         generated.append(tokens)
-        sequence = torch.cat((sequence, tokens[:, None]), dim=1)
-    eos_scores = model(sequence)[:, -1, :].log_softmax(dim=-1)[
+        output = model.forward_with_cache(
+            tokens[:, None],
+            past_key_values=past_key_values,
+        )
+        logits = output.logits[:, -1, :]
+        past_key_values = output.past_key_values
+    eos_scores = logits.log_softmax(dim=-1)[
         :, vocabulary.eos_token_id
     ]
     scores += eos_scores
@@ -103,31 +109,37 @@ def batched_beam_generate(
     if width < 1 or width > 10:
         raise ValueError("Beam width must be between 1 and 10")
     batch = prompts.shape[0]
-    sequences = prompts[:, None, :]
     scores = torch.zeros((batch, 1), device=prompts.device)
     generated = torch.empty((batch, 1, 0), dtype=torch.long, device=prompts.device)
     beam_count = 1
+    output = model.forward_with_cache(prompts)
+    logits = output.logits[:, -1, :]
+    past_key_values = output.past_key_values
     for _ in range(5):
-        flat = sequences.reshape(batch * beam_count, -1)
-        logits = model(flat)[:, -1, :]
         digit_log_probs = logits[
             :, vocabulary.digit_offset : vocabulary.digit_offset + 10
-        ].log_softmax(dim=-1)
-        candidates = digit_log_probs.reshape(batch, beam_count, 10) + scores[:, :, None]
+        ].log_softmax(dim=-1).reshape(batch, beam_count, 10)
+        candidates = digit_log_probs + scores[:, :, None]
         next_scores, flat_indices = candidates.reshape(batch, -1).topk(width, dim=-1)
         parent = flat_indices // 10
         raw_digits = flat_indices % 10
-        gather_sequence = parent[:, :, None].expand(-1, -1, sequences.shape[-1])
-        sequences = sequences.gather(1, gather_sequence)
         gather_generated = parent[:, :, None].expand(-1, -1, generated.shape[-1])
         generated = generated.gather(1, gather_generated)
         tokens = raw_digits + vocabulary.digit_offset
-        sequences = torch.cat((sequences, tokens[:, :, None]), dim=-1)
         generated = torch.cat((generated, tokens[:, :, None]), dim=-1)
         scores = next_scores
+        parent_flat = (
+            torch.arange(batch, device=prompts.device)[:, None] * beam_count + parent
+        ).reshape(-1)
+        past_key_values = model.reorder_cache(past_key_values, parent_flat)
+        output = model.forward_with_cache(
+            tokens.reshape(-1, 1),
+            past_key_values=past_key_values,
+        )
+        logits = output.logits[:, -1, :]
+        past_key_values = output.past_key_values
         beam_count = width
-    flat = sequences.reshape(batch * width, -1)
-    eos_scores = model(flat)[:, -1, :].log_softmax(dim=-1)[
+    eos_scores = logits.log_softmax(dim=-1)[
         :, vocabulary.eos_token_id
     ].reshape(batch, width)
     scores += eos_scores

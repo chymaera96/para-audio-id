@@ -124,17 +124,24 @@ masked. Clean and noisy digit and boundary targets remain active.
 
 ```text
 loss =
-    mean(clean audio-token CE)
-    + 20 * mean_available(clean digit CE, noisy digit CE)
-    + mean_available(clean boundary CE, noisy boundary CE)
+    (
+        250 * mean(clean audio-token CE)
+        + 100 * mean(all digit CE)
+        + 2 * mean(all boundary CE)
+    ) / 352
     + lambda_consistency * clean/noisy [ID]-state consistency
 ```
 
 The consistency loss is one minus cosine similarity between normalized
 final-layer `[ID]` states. The clean state is detached for this term; the noisy
-state, transformer, and noisy input embeddings retain gradients. The loss
-families are independently normalized. The previous tc5 weighted-token loss is
-logged only as a detached comparison metric.
+state, transformer, and noisy input embeddings retain gradients. Each loss
+family is computed as a mean, then recombined with tc5's effective family
+coefficients: approximately 0.710 audio, 0.284 digits, and 0.006 boundaries.
+Thus tc6 exactly matches tc5's base loss when no rows are noisy. The previous
+tc5 weighted-token loss is also logged as a detached comparison metric.
+Checkpoints record the `tc5_family_weighted_consistency_v2` loss protocol.
+Pre-fix tc6 checkpoints are rejected on resume because their optimizer and
+model states were trained with a materially different objective.
 
 | Effective steps | Noise probability | Consistency weight |
 | ---: | ---: | ---: |

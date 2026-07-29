@@ -234,15 +234,12 @@ def test_tc6_masks_noisy_audio_and_preserves_id_boundary_gradients():
         consistency_weight=0.1,
     )
     expected = (
-        metrics["clean_audio_loss"]
-        + 20
-        * 0.5
-        * (metrics["clean_digit_loss"] + metrics["noisy_digit_loss"])
-        + 0.5
-        * (
-            metrics["clean_boundary_loss"]
-            + metrics["noisy_boundary_loss"]
+        (
+            2 * metrics["clean_audio_loss"]
+            + 100 * metrics["digit_loss"]
+            + 2 * metrics["boundary_loss"]
         )
+        / 104
         + 0.1 * metrics["consistency_loss"]
     )
     assert torch.allclose(loss, expected)
@@ -257,6 +254,48 @@ def test_tc6_masks_noisy_audio_and_preserves_id_boundary_gradients():
     assert not hidden.grad[0, id_column].any()
     assert hidden.grad[1, id_column].any()
     assert not metrics["legacy_weighted_token_loss"].requires_grad
+
+
+def test_tc6_clean_base_loss_exactly_matches_tc5_weighted_loss():
+    vocabulary = AudioLMVocabulary()
+    audio = torch.tensor(
+        [
+            value
+            for frame in range(125)
+            for value in (frame % 1024, 1024 + frame % 1024)
+        ]
+    )
+    examples = [
+        {
+            "audio_tokens": audio,
+            "code": "12345",
+            "track_id": f"track-{index}",
+            "document_index": index,
+        }
+        for index in range(2)
+    ]
+    batch = collate_causal_documents(examples, vocabulary, 512)
+    torch.manual_seed(23)
+    logits = torch.randn(
+        2, batch["input_ids"].shape[1], vocabulary.size
+    )
+    hidden = torch.randn(2, batch["input_ids"].shape[1], 8)
+    total, metrics = noise_consistency_losses(
+        logits,
+        hidden,
+        batch["input_ids"],
+        batch["audio_target_mask"],
+        batch["id_target_mask"],
+        batch["boundary_target_mask"],
+        torch.tensor([False, False]),
+        batch["track_id"],
+        id_digit_weight=20.0,
+        consistency_weight=0.0,
+    )
+    assert torch.allclose(total, metrics["legacy_weighted_token_loss"])
+    assert metrics["audio_family_coefficient"] == pytest.approx(250 / 352)
+    assert metrics["digit_family_coefficient"] == pytest.approx(100 / 352)
+    assert metrics["boundary_family_coefficient"] == pytest.approx(2 / 352)
 
 
 def test_tc6_consistency_is_zero_for_identical_id_states():

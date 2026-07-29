@@ -28,6 +28,10 @@ def test_primary_config_is_audio_lm_and_matches_logical_batch():
         cfg["train"]["curriculum"]["protocol"]
         == "noise_consistency_curriculum_v1"
     )
+    assert (
+        cfg["train"]["curriculum"]["loss_protocol"]
+        == "tc5_family_weighted_consistency_v2"
+    )
     assert cfg["train"]["curriculum"]["gate_threshold"] == 0.5
     assert cfg["evaluation"]["monitor_tracks"] == 100
     assert cfg["evaluation"]["noise_snr_db"] == [0, 5, 10, 20, 30]

@@ -50,6 +50,7 @@ from .tokenization import load_training_track_ids
 from .vocabulary import AudioLMVocabulary
 
 TRAINING_PROTOCOL = "noise_consistency_curriculum_v1"
+LOSS_PROTOCOL = "tc5_family_weighted_consistency_v2"
 
 
 class ResumableDataLoader(DataLoader):
@@ -1332,6 +1333,7 @@ class AudioLMModule(pl.LightningModule):
                 "training_track_ids": self.training_track_ids,
                 "training_corpus_fingerprint": self.training_corpus_fingerprint,
                 "training_protocol": TRAINING_PROTOCOL,
+                "loss_protocol": LOSS_PROTOCOL,
                 "curriculum_config": self.cfg["train"]["curriculum"],
                 "adaptive_curriculum_state": self.curriculum.state_dict(),
                 "snr_epoch_counts": self.snr_epoch_counts,
@@ -1382,6 +1384,11 @@ class AudioLMModule(pl.LightningModule):
             != TRAINING_PROTOCOL
         ):
             raise ValueError("Resume checkpoint uses a different training protocol")
+        if checkpoint.get("loss_protocol") != LOSS_PROTOCOL:
+            raise ValueError(
+                "Resume checkpoint uses the invalid pre-fix tc6 loss protocol; "
+                "restart tc6 from scratch"
+            )
         if checkpoint.get("curriculum_config") != self.cfg["train"]["curriculum"]:
             raise ValueError("Resume checkpoint uses a different curriculum")
         if checkpoint.get("monitor_recipes") != self.monitor_recipes:
@@ -1482,6 +1489,8 @@ def train(cfg: dict, *, checkpoint: str | Path | None = None) -> None:
         raise ValueError(f"Configuration architecture must be {ARCHITECTURE}")
     if cfg["train"]["curriculum"].get("protocol") != TRAINING_PROTOCOL:
         raise ValueError(f"Curriculum protocol must be {TRAINING_PROTOCOL}")
+    if cfg["train"]["curriculum"].get("loss_protocol") != LOSS_PROTOCOL:
+        raise ValueError(f"Loss protocol must be {LOSS_PROTOCOL}")
     seed = int(cfg["train"]["seed"])
     pl.seed_everything(seed, workers=True)
     torch.use_deterministic_algorithms(

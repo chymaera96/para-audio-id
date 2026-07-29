@@ -176,8 +176,10 @@ background-noise assets. Its intervention is at the causal identifier boundary:
 - Clean and noisy digit and boundary losses remain active.
 - The final-layer clean/noisy states at `[ID]` are aligned with a one-sided
   cosine loss; only the clean state is detached for this component.
-- Identifier digit weight remains `20`, with audio, digit, and `[ID]`/`[EOS]`
-  loss families independently normalized.
+- Identifier digit weight remains `20`. Audio, digit, and `[ID]`/`[EOS]`
+  families are measured independently but recombined using tc5's effective
+  coefficients (approximately 0.710/0.284/0.006), preventing a change in
+  gradient balance when introducing consistency.
 
 The nominal run is 70K effective steps: 20K clean-only followed by a 50K
 noise/consistency curriculum. At 20K, clean integer-shifted teacher-forced exact
@@ -191,7 +193,10 @@ The SNR curriculum moves categorical probability mass from easy 20–30 dB noise
 toward 0–10 dB noise. In its final phase, approximately 10% of noisy views are
 exactly 0 dB. Checkpoints use protocol
 `noise_consistency_curriculum_v1`; tc5 checkpoints cannot initialize or resume
-tc6.
+tc6. Corrected checkpoints additionally use
+`tc5_family_weighted_consistency_v2`. Any tc6 checkpoint created before this
+loss marker used the incorrectly rescaled objective and is deliberately
+incompatible; tc6 must be restarted from random initialization.
 
 ## Interpretation
 

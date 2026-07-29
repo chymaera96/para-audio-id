@@ -2,6 +2,7 @@ import hashlib
 import json
 
 import numpy as np
+import pytest
 import soundfile as sf
 import torch
 
@@ -214,6 +215,7 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
             "gradient_clip_norm": 1.0,
             "curriculum": {
                 "protocol": "noise_consistency_curriculum_v1",
+                "loss_protocol": "tc5_family_weighted_consistency_v2",
                 "gate_threshold": 0.5,
                 "gate_max_extra_steps": 0,
                 "regression_drop": 0.05,
@@ -250,6 +252,16 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
     checkpoint = torch.load(last, map_location="cpu", weights_only=False)
     assert checkpoint["global_step"] == 8
     assert checkpoint["training_protocol"] == "noise_consistency_curriculum_v1"
+    assert checkpoint["loss_protocol"] == "tc5_family_weighted_consistency_v2"
     assert checkpoint["adaptive_curriculum_state"]["gate_open"]
     assert "snr_epoch_counts" in checkpoint
     train(cfg, checkpoint=last)
+
+    invalid_checkpoint = tmp_path / "invalid-prefixed-tc6.ckpt"
+    checkpoint.pop("loss_protocol")
+    torch.save(checkpoint, invalid_checkpoint)
+    with pytest.raises(
+        ValueError,
+        match="invalid pre-fix tc6 loss protocol",
+    ):
+        train(cfg, checkpoint=invalid_checkpoint)

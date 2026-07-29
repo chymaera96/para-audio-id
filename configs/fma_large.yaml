@@ -62,6 +62,7 @@ train:
   gradient_clip_norm: 1.0
   curriculum:
     protocol: noise_consistency_curriculum_v1
+    loss_protocol: tc5_family_weighted_consistency_v2
     gate_threshold: 0.5
     gate_max_extra_steps: 30000
     regression_drop: 0.05

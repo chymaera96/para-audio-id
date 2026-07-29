@@ -129,12 +129,6 @@ def _optional_masked_cross_entropy(
     )
 
 
-def _mean_available(
-    clean: torch.Tensor, noisy: torch.Tensor | None
-) -> torch.Tensor:
-    return clean if noisy is None else 0.5 * (clean + noisy)
-
-
 def _different_track_similarity(
     clean_states: torch.Tensor,
     noisy_states: torch.Tensor,
@@ -221,8 +215,16 @@ def noise_consistency_losses(
         boundary_target_mask & noisy_mask,
     )
 
-    digit_loss = _mean_available(clean_digit_loss, noisy_digit_loss)
-    boundary_loss = _mean_available(clean_boundary_loss, noisy_boundary_loss)
+    digit_loss = masked_cross_entropy(
+        shifted_logits,
+        shifted_targets,
+        id_target_mask,
+    )
+    boundary_loss = masked_cross_entropy(
+        shifted_logits,
+        shifted_targets,
+        boundary_target_mask,
+    )
 
     if not (id_target_mask.sum(dim=1) == 5).all():
         raise ValueError("Every document must contain exactly five digit targets")
@@ -263,12 +265,31 @@ def noise_consistency_losses(
         )
         different_similarity = same_similarity.clone()
 
-    total = (
-        clean_audio_loss
-        + float(id_digit_weight) * digit_loss
-        + boundary_loss
-        + float(consistency_weight) * consistency_loss
+    audio_counts = audio_target_mask.sum(dim=1)
+    digit_counts = id_target_mask.sum(dim=1)
+    boundary_counts = boundary_target_mask.sum(dim=1)
+    if (
+        audio_counts.unique().numel() != 1
+        or digit_counts.unique().numel() != 1
+        or boundary_counts.unique().numel() != 1
+    ):
+        raise ValueError(
+            "tc6 fixed family weighting requires uniform document target counts"
+        )
+    audio_count = audio_counts[0].to(clean_audio_loss.dtype)
+    digit_count = digit_counts[0].to(clean_audio_loss.dtype)
+    boundary_count = boundary_counts[0].to(clean_audio_loss.dtype)
+    family_weight = (
+        audio_count
+        + float(id_digit_weight) * digit_count
+        + boundary_count
     )
+    base_loss = (
+        audio_count * clean_audio_loss
+        + float(id_digit_weight) * digit_count * digit_loss
+        + boundary_count * boundary_loss
+    ) / family_weight
+    total = base_loss + float(consistency_weight) * consistency_loss
     legacy = causal_audio_id_losses(
         logits,
         input_ids,
@@ -279,6 +300,7 @@ def noise_consistency_losses(
     )
     return total, {
         "loss": total,
+        "base_loss": base_loss,
         "clean_audio_loss": clean_audio_loss,
         "clean_audio_perplexity": clean_audio_loss.detach()
         .clamp(max=math.log(1e6))
@@ -295,6 +317,13 @@ def noise_consistency_losses(
             if noisy_boundary_loss is not None
             else torch.full_like(clean_boundary_loss, float("nan"))
         ),
+        "digit_loss": digit_loss,
+        "boundary_loss": boundary_loss,
+        "audio_family_coefficient": audio_count / family_weight,
+        "digit_family_coefficient": (
+            float(id_digit_weight) * digit_count / family_weight
+        ),
+        "boundary_family_coefficient": boundary_count / family_weight,
         "consistency_loss": consistency_loss,
         "same_track_cosine": same_similarity,
         "different_track_cosine": different_similarity,

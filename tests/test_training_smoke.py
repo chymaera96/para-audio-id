@@ -5,7 +5,8 @@ import numpy as np
 import soundfile as sf
 import torch
 
-from para_audio_id.audio_lm.noise import NoiseSchedule
+from para_audio_id.audio_lm.curriculum import AdaptiveCurriculum
+from para_audio_id.audio_lm.noise import NoiseConsistencySchedule
 from para_audio_id.audio_lm.token_store import TokenRecord, write_shard
 from para_audio_id.audio_lm.tokenizer import TokenizerSpec
 from para_audio_id.audio_lm.training import train
@@ -131,15 +132,29 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
         "para_audio_id.audio_lm.training.MuQRVQTokenizer",
         FakeOnlineTokenizer,
     )
-    def forced_schedule(step):
-        return NoiseSchedule(1.0, 0.0, 30.0)
+    def forced_schedule(step, *, max_steps):
+        return NoiseConsistencySchedule(
+            1.0,
+            0.1,
+            (0.0, 0.0, 0.0, 1.0),
+            "easy",
+        )
+
     monkeypatch.setattr(
-        "para_audio_id.audio_lm.dataset.background_noise_schedule",
+        "para_audio_id.audio_lm.training.noise_consistency_schedule",
         forced_schedule,
     )
+
+    class AlwaysOpenCurriculum(AdaptiveCurriculum):
+        def __post_init__(self):
+            super().__post_init__()
+            self.gate_open = True
+            self.gate_open_step = self.clean_steps
+            self.regression_baseline = 1.0
+
     monkeypatch.setattr(
-        "para_audio_id.audio_lm.training.background_noise_schedule",
-        forced_schedule,
+        "para_audio_id.audio_lm.training.AdaptiveCurriculum",
+        AlwaysOpenCurriculum,
     )
     cfg = {
         "architecture": "audio_lm_v1",
@@ -186,7 +201,7 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
             "log_dir": str(tmp_path / "logs"),
             "checkpoint_dir": str(tmp_path / "checkpoints"),
             "run_id": "smoke",
-            "max_steps": 3,
+            "max_steps": 8,
             "tracks_per_microbatch": 4,
             "segments_per_track": 2,
             "learning_rate": 3e-4,
@@ -197,6 +212,14 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
             "checkpoint_interval": 2,
             "id_digit_weight": 20.0,
             "gradient_clip_norm": 1.0,
+            "curriculum": {
+                "protocol": "noise_consistency_curriculum_v1",
+                "gate_threshold": 0.5,
+                "gate_max_extra_steps": 0,
+                "regression_drop": 0.05,
+                "recovery_probes": 2,
+                "recovery_timeout_steps": 1,
+            },
             "wandb": {"enabled": False},
         },
         "evaluation": {
@@ -224,5 +247,9 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
     train(cfg)
     last = tmp_path / "checkpoints" / "smoke" / "last.ckpt"
     assert last.exists()
-    cfg["train"]["max_steps"] = 4
+    checkpoint = torch.load(last, map_location="cpu", weights_only=False)
+    assert checkpoint["global_step"] == 8
+    assert checkpoint["training_protocol"] == "noise_consistency_curriculum_v1"
+    assert checkpoint["adaptive_curriculum_state"]["gate_open"]
+    assert "snr_epoch_counts" in checkpoint
     train(cfg, checkpoint=last)

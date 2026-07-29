@@ -14,8 +14,6 @@ from torch.utils.data import Dataset, Sampler
 from ..audio import load_audio
 from .noise import (
     BackgroundNoiseAssets,
-    background_noise_schedule,
-    deterministic_noise_parameters,
     stable_uint64,
 )
 from .token_store import TokenStoreIndex
@@ -500,6 +498,7 @@ class OnlinePairCollator:
         segment_duration: float,
         noise_assets: BackgroundNoiseAssets,
         seed: int,
+        nominal_max_steps: int,
     ):
         self.vocabulary = vocabulary
         self.max_positions = int(max_positions)
@@ -508,6 +507,7 @@ class OnlinePairCollator:
         self.segment_duration = float(segment_duration)
         self.noise_assets = noise_assets
         self.seed = int(seed)
+        self.clean_steps = round(int(nominal_max_steps) * 20_000 / 70_000)
 
     def __call__(self, examples: list[dict]) -> dict:
         if len(examples) % 2:
@@ -539,20 +539,11 @@ class OnlinePairCollator:
             )
             keys.append(key)
             pair_roles.extend(("anchor", "secondary"))
-        schedule = background_noise_schedule(int(optimizer_step))
-        selected, _ = deterministic_noise_parameters(
-            keys,
-            probability=schedule.probability,
-            snr_min_db=schedule.snr_min_db,
-            snr_max_db=schedule.snr_max_db,
-            seed=self.seed,
-            step=int(optimizer_step),
-            batch_idx=int(batch_idx),
-        )
         expected = round(self.sample_rate * self.segment_duration)
-        for pair, keep in enumerate(selected):
-            if not keep:
-                continue
+        candidate_pairs = (
+            range(len(keys)) if int(optimizer_step) >= self.clean_steps else ()
+        )
+        for pair in candidate_pairs:
             anchor = examples[pair * 2]
             audio = load_audio(
                 self.audio_root / anchor["source_path"],
@@ -564,7 +555,15 @@ class OnlinePairCollator:
             if len(audio) != expected or not np.isfinite(audio).all():
                 raise ValueError("Online anchor waveform is invalid")
             anchors.append(audio)
-            noises.append(self.noise_assets.load_training(keys[pair]))
+            noise_key = stable_uint64(
+                self.seed,
+                optimizer_step,
+                batch_idx,
+                pair,
+                keys[pair],
+                "training-noise",
+            )
+            noises.append(self.noise_assets.load_training(noise_key))
             loaded_pairs.append(pair)
         empty = np.empty((0, expected), dtype=np.float32)
         batch = collate_causal_documents(

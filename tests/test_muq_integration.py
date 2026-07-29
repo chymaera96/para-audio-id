@@ -5,7 +5,7 @@ import torch
 
 from para_audio_id.audio_lm.dataset import collate_causal_documents
 from para_audio_id.audio_lm.generation import greedy_generate, prompt_from_audio_tokens
-from para_audio_id.audio_lm.losses import causal_losses_by_view
+from para_audio_id.audio_lm.losses import noise_consistency_losses
 from para_audio_id.audio_lm.model import AudioCausalLM
 from para_audio_id.audio_lm.noise import mix_background_noise
 from para_audio_id.audio_lm.tokenizer import MuQRVQTokenizer
@@ -62,14 +62,14 @@ def test_real_muq_rvq_probe():
     batch = collate_causal_documents(
         [
             {
-                "audio_tokens": noisy_tokens,
+                "audio_tokens": audio_tokens,
                 "code": "01234",
                 "track_id": "integration",
                 "document_index": 0,
                 "view_type": "canonical",
             },
             {
-                "audio_tokens": audio_tokens,
+                "audio_tokens": noisy_tokens,
                 "code": "01234",
                 "track_id": "integration",
                 "document_index": 1,
@@ -79,22 +79,25 @@ def test_real_muq_rvq_probe():
         tokenizer.vocabulary,
         512,
     )
-    logits = model(
+    logits, hidden = model(
         batch["input_ids"].to(tokenizer.device),
         batch["attention_mask"].to(tokenizer.device),
+        return_final_hidden_state=True,
     )
-    loss, _, per_view = causal_losses_by_view(
+    loss, metrics = noise_consistency_losses(
         logits,
+        hidden,
         batch["input_ids"].to(tokenizer.device),
         batch["audio_target_mask"].to(tokenizer.device),
         batch["id_target_mask"].to(tokenizer.device),
         batch["boundary_target_mask"].to(tokenizer.device),
-        ["anchor", "secondary"],
-        view_mode="paired_roles",
+        torch.tensor([False, True], device=tokenizer.device),
+        batch["track_id"],
         id_digit_weight=20.0,
+        consistency_weight=0.1,
     )
     loss.backward()
-    assert set(per_view) == {"anchor", "secondary"}
+    assert torch.isfinite(metrics["consistency_loss"])
     generated = greedy_generate(
         model.eval(),
         prompt_from_audio_tokens(audio_tokens.to(tokenizer.device), tokenizer.vocabulary),

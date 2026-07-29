@@ -49,7 +49,7 @@ train:
   log_dir: logs/fma-large-audio-lm
   checkpoint_dir: /gpfs/scratch/acw723/para-audio-id/audio-lm-checkpoints
   run_id:
-  max_steps: 60000
+  max_steps: 70000
   tracks_per_microbatch: 4
   segments_per_track: 2
   learning_rate: 3.0e-4
@@ -60,6 +60,13 @@ train:
   checkpoint_interval: 500
   id_digit_weight: 20.0
   gradient_clip_norm: 1.0
+  curriculum:
+    protocol: noise_consistency_curriculum_v1
+    gate_threshold: 0.5
+    gate_max_extra_steps: 30000
+    regression_drop: 0.05
+    recovery_probes: 2
+    recovery_timeout_steps: 20000
   wandb:
     enabled: false
     project: para-audio-id

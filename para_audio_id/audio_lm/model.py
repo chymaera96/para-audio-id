@@ -39,13 +39,26 @@ class AudioCausalLM(nn.Module):
         return int(self.network.config.n_positions)
 
     def forward(
-        self, input_ids: torch.Tensor, attention_mask: torch.Tensor | None = None
-    ) -> torch.Tensor:
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+        *,
+        return_final_hidden_state: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if input_ids.ndim != 2:
             raise ValueError(f"Expected [batch, sequence] input IDs, got {input_ids.shape}")
         if input_ids.shape[1] > self.max_position_embeddings:
             raise ValueError("Input exceeds configured positional context")
-        return self.network(input_ids=input_ids, attention_mask=attention_mask).logits
+        if not return_final_hidden_state:
+            return self.network(
+                input_ids=input_ids, attention_mask=attention_mask
+            ).logits
+        hidden = self.network.transformer(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            use_cache=False,
+        ).last_hidden_state
+        return self.network.lm_head(hidden), hidden
 
     def forward_with_cache(
         self,

@@ -11,6 +11,7 @@ import time
 import lightning.pytorch as pl
 import numpy as np
 import torch
+import torch.nn.functional as F
 from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
 from lightning.pytorch.loggers import WandbLogger
 from torch.utils.data import DataLoader, Subset
@@ -19,6 +20,7 @@ from tqdm import tqdm
 from ..audio import load_audio
 from ..config import save_config
 from .checkpoint import ARCHITECTURE
+from .curriculum import AdaptiveCurriculum, effective_cosine_multiplier
 from .dataset import (
     CachedPositionDataset,
     NoiseEvaluationCollator,
@@ -32,18 +34,22 @@ from .generation import (
     batched_greedy_generate,
     prompts_from_audio_tokens,
 )
-from .losses import causal_losses_by_view
+from .losses import causal_losses_by_view, noise_consistency_losses
 from .model import AudioCausalLM
 from .noise import (
     BackgroundNoiseAssets,
-    background_noise_schedule,
-    deterministic_noise_parameters,
+    SNR_BINS,
+    deterministic_consistency_noise_parameters,
     mix_background_noise,
+    noise_consistency_schedule,
+    stable_uint64,
 )
 from .token_store import TokenStoreIndex
 from .tokenizer import MuQRVQTokenizer, TokenizerSpec
 from .tokenization import load_training_track_ids
 from .vocabulary import AudioLMVocabulary
+
+TRAINING_PROTOCOL = "noise_consistency_curriculum_v1"
 
 
 class ResumableDataLoader(DataLoader):
@@ -80,6 +86,77 @@ def seed_worker(worker_id: int) -> None:
     seed = torch.initial_seed() % (2**32)
     random.seed(seed)
     np.random.seed(seed)
+
+
+def replace_secondary_rows_with_noisy_tokens(
+    batch: dict,
+    tokens: torch.Tensor,
+    pairs: list[int],
+    *,
+    id_token_id: int,
+) -> dict:
+    if tokens.shape[0] != len(pairs):
+        raise ValueError("Noisy token rows do not match selected pairs")
+    tensor_fields = (
+        "input_ids",
+        "attention_mask",
+        "audio_target_mask",
+        "id_target_mask",
+        "boundary_target_mask",
+        "document_index",
+        "segment_start",
+        "segment_duration",
+    )
+    result = {
+        **batch,
+        **{field: batch[field].clone() for field in tensor_fields},
+        "source_path": list(batch["source_path"]),
+        "track_id": list(batch["track_id"]),
+        "code": list(batch["code"]),
+        "view_type": list(batch["view_type"]),
+    }
+    result["is_noisy"] = torch.zeros(
+        len(result["input_ids"]),
+        device=result["input_ids"].device,
+        dtype=torch.bool,
+    )
+    for token_row, pair in zip(tokens, pairs, strict=True):
+        anchor_row = pair * 2
+        secondary_row = anchor_row + 1
+        if secondary_row >= len(result["input_ids"]):
+            raise ValueError(f"Invalid pair index {pair}")
+        if result["track_id"][anchor_row] != result["track_id"][secondary_row]:
+            raise ValueError("Noisy pair rows have different track identities")
+        if result["code"][anchor_row] != result["code"][secondary_row]:
+            raise ValueError("Noisy pair rows have different identifier codes")
+        positions = (result["input_ids"][anchor_row] == id_token_id).nonzero()
+        if len(positions) != 1:
+            raise RuntimeError("Clean anchor has an invalid ID boundary")
+        id_column = int(positions[0])
+        if len(token_row) != id_column - 1:
+            raise RuntimeError("Online and cached audio-token lengths do not match")
+        for field in tensor_fields:
+            result[field][secondary_row] = result[field][anchor_row]
+        for field in ("source_path", "track_id", "code"):
+            result[field][secondary_row] = result[field][anchor_row]
+        result["input_ids"][secondary_row, 1:id_column] = token_row
+        result["view_type"][secondary_row] = "noisy"
+        result["is_noisy"][secondary_row] = True
+    return result
+
+
+def prefetched_waveforms_for_step(
+    batch: dict, *, global_step: int, batch_idx: int
+) -> dict[int, tuple[torch.Tensor, torch.Tensor]]:
+    if (
+        int(batch["planned_optimizer_step"]) != int(global_step)
+        or int(batch["planned_batch_idx"]) != int(batch_idx)
+    ):
+        return {}
+    return {
+        pair: (batch["anchor_waveforms"][row], batch["noise_waveforms"][row])
+        for row, pair in enumerate(batch["loaded_pair_indices"])
+    }
 
 
 class AudioLMDataModule(pl.LightningDataModule):
@@ -177,7 +254,7 @@ class AudioLMDataModule(pl.LightningDataModule):
             ):
                 raise ValueError(f"View-token store {root} uses different track codes")
         corpus_payload = {
-            "training_protocol": "online_background_noise_curriculum_v1",
+            "training_protocol": TRAINING_PROTOCOL,
             "view_mode": view_mode,
             "track_ids": self.training_track_ids,
             "canonical_starts": data_cfg["canonical_starts"],
@@ -262,6 +339,7 @@ class AudioLMDataModule(pl.LightningDataModule):
             segment_duration=float(self.cfg["data"]["segment_duration"]),
             noise_assets=self.noise_assets,
             seed=int(self.cfg["train"]["seed"]),
+            nominal_max_steps=int(self.cfg["train"]["max_steps"]),
         )
 
     def train_dataloader(self) -> DataLoader:
@@ -359,6 +437,17 @@ class AudioLMModule(pl.LightningModule):
         self.monitor_recipes = monitor_recipes
         self.noise_manifest = noise_manifest
         self.model = AudioCausalLM(cfg, vocabulary)
+        curriculum_cfg = cfg["train"]["curriculum"]
+        self.curriculum = AdaptiveCurriculum(
+            nominal_max_steps=int(cfg["train"]["max_steps"]),
+            gate_threshold=float(curriculum_cfg["gate_threshold"]),
+            gate_max_extra_steps=int(curriculum_cfg["gate_max_extra_steps"]),
+            regression_drop=float(curriculum_cfg["regression_drop"]),
+            recovery_probes=int(curriculum_cfg["recovery_probes"]),
+            recovery_timeout_steps=int(
+                curriculum_cfg["recovery_timeout_steps"]
+            ),
+        )
         self.online_tokenizer = None
         self._last_probe_step = -1
         self.documents_consumed = 0
@@ -366,6 +455,10 @@ class AudioLMModule(pl.LightningModule):
         self.started_at = time.perf_counter()
         self.session_documents_start = 0
         self.session_tokens_start = 0
+        self.snr_epoch_counts = {name: 0 for name, _, _ in SNR_BINS}
+        self.snr_epoch_counts["exact_zero"] = 0
+        self.snr_epoch_counts["noisy_documents"] = 0
+        self.snr_epoch_counts["skipped_documents"] = 0
         self.save_hyperparameters(cfg)
 
     def _step(self, batch: dict, prefix: str) -> torch.Tensor:
@@ -426,8 +519,58 @@ class AudioLMModule(pl.LightningModule):
                 on_step=True,
                 on_epoch=False,
                 sync_dist=False,
+            )
+        logits, final_hidden_states = self.model(
+            batch["input_ids"],
+            batch["attention_mask"],
+            return_final_hidden_state=True,
         )
-        loss = self._step(batch, "train")
+        schedule = noise_consistency_schedule(
+            self.curriculum.effective_step(int(self.global_step)),
+            max_steps=int(self.cfg["train"]["max_steps"]),
+        )
+        consistency_weight = (
+            schedule.consistency_weight
+            * self.curriculum.consistency_multiplier
+        )
+        loss, metrics = noise_consistency_losses(
+            logits,
+            final_hidden_states,
+            batch["input_ids"],
+            batch["audio_target_mask"],
+            batch["id_target_mask"],
+            batch["boundary_target_mask"],
+            batch["is_noisy"],
+            batch["track_id"],
+            id_digit_weight=float(self.cfg["train"]["id_digit_weight"]),
+            consistency_weight=consistency_weight,
+        )
+        batch_size = int(batch["input_ids"].shape[0])
+        for name, value in metrics.items():
+            if name == "loss":
+                continue
+            self.log(
+                f"train/{name}",
+                value,
+                on_step=True,
+                on_epoch=True,
+                prog_bar=name
+                in {"clean_audio_loss", "teacher_forced_exact_accuracy"},
+                sync_dist=True,
+                batch_size=batch_size,
+            )
+        self.log(
+            "train/loss",
+            loss,
+            on_step=True,
+            on_epoch=True,
+            sync_dist=True,
+            batch_size=batch_size,
+        )
+        self.documents_consumed += batch_size * int(self.trainer.world_size)
+        self.tokens_consumed += int(batch["attention_mask"].sum()) * int(
+            self.trainer.world_size
+        )
         return loss
 
     def on_train_batch_start(self, batch: dict, batch_idx: int) -> None:
@@ -436,35 +579,49 @@ class AudioLMModule(pl.LightningModule):
     def on_train_batch_end(
         self, outputs, batch: dict, batch_idx: int
     ) -> None:
+        ended_at = time.perf_counter()
         if hasattr(self, "_train_batch_started"):
             self.log(
                 "throughput/training_step_seconds",
-                time.perf_counter() - self._train_batch_started,
+                ended_at - self._train_batch_started,
                 on_step=True,
                 on_epoch=False,
                 sync_dist=False,
             )
+        if hasattr(self, "_previous_batch_end"):
+            self.log(
+                "throughput/total_batch_seconds",
+                ended_at - self._previous_batch_end,
+                on_step=True,
+                on_epoch=False,
+                sync_dist=False,
+            )
+        self._previous_batch_end = ended_at
 
     def _apply_online_noise(self, batch: dict, batch_idx: int) -> tuple[dict, dict]:
-        schedule = background_noise_schedule(int(self.global_step))
+        effective_step = self.curriculum.effective_step(int(self.global_step))
+        schedule = noise_consistency_schedule(
+            effective_step,
+            max_steps=int(self.cfg["train"]["max_steps"]),
+        )
         pair_count = len(batch["augmentation_keys"])
-        selected, snrs = deterministic_noise_parameters(
+        selected, snrs, snr_bins = deterministic_consistency_noise_parameters(
             batch["augmentation_keys"],
-            probability=schedule.probability,
-            snr_min_db=schedule.snr_min_db,
-            snr_max_db=schedule.snr_max_db,
+            schedule=schedule,
             seed=int(self.cfg["train"]["seed"]),
             step=int(self.global_step),
             batch_idx=batch_idx,
         )
         realized_pairs: list[int] = []
+        skipped_pairs: list[int] = []
         tokenizer_seconds = 0.0
         proposed_pairs = [index for index, keep in enumerate(selected) if keep]
         if proposed_pairs:
-            loaded = {
-                pair: (batch["anchor_waveforms"][row], batch["noise_waveforms"][row])
-                for row, pair in enumerate(batch["loaded_pair_indices"])
-            }
+            loaded = prefetched_waveforms_for_step(
+                batch,
+                global_step=int(self.global_step),
+                batch_idx=batch_idx,
+            )
             missing_pairs = [pair for pair in proposed_pairs if pair not in loaded]
             for pair in missing_pairs:
                 anchor_row = pair * 2
@@ -477,7 +634,17 @@ class AudioLMModule(pl.LightningModule):
                     pad=True,
                 )
                 key = batch["augmentation_keys"][pair]
-                noise = self.trainer.datamodule.noise_assets.load_training(key)
+                noise_key = stable_uint64(
+                    int(self.cfg["train"]["seed"]),
+                    int(self.global_step),
+                    int(batch_idx),
+                    pair,
+                    key,
+                    "training-noise",
+                )
+                noise = self.trainer.datamodule.noise_assets.load_training(
+                    noise_key
+                )
                 loaded[pair] = (
                     torch.from_numpy(audio).to(self.device),
                     torch.from_numpy(noise).to(self.device),
@@ -515,26 +682,50 @@ class AudioLMModule(pl.LightningModule):
                     raise RuntimeError(
                         "Online token batch does not match selected pairs"
                     )
-                input_ids = batch["input_ids"].clone()
-                for token_row, pair in zip(tokens, realized_pairs, strict=True):
-                    secondary_row = pair * 2 + 1
-                    positions = (
-                        input_ids[secondary_row] == self.vocabulary.id_token_id
-                    ).nonzero()
-                    if len(positions) != 1:
-                        raise RuntimeError("Secondary document has an invalid ID boundary")
-                    id_column = int(positions[0])
-                    if len(token_row) != id_column - 1:
-                        raise RuntimeError(
-                            "Online and cached audio-token lengths do not match"
-                        )
-                    input_ids[secondary_row, 1:id_column] = token_row
-                batch = {**batch, "input_ids": input_ids}
+                batch = replace_secondary_rows_with_noisy_tokens(
+                    batch,
+                    tokens,
+                    realized_pairs,
+                    id_token_id=self.vocabulary.id_token_id,
+                )
+            skipped_pairs = [
+                pair
+                for pair, keep in zip(
+                    proposed_pairs, valid.tolist(), strict=True
+                )
+                if not keep
+            ]
+        if "is_noisy" not in batch:
+            batch = {
+                **batch,
+                "is_noisy": torch.zeros(
+                    len(batch["input_ids"]),
+                    device=batch["input_ids"].device,
+                    dtype=torch.bool,
+                ),
+            }
+        for pair in realized_pairs:
+            bin_name = snr_bins[pair]
+            if bin_name is not None:
+                self.snr_epoch_counts[bin_name] += 1
+            if snrs[pair] == 0.0:
+                self.snr_epoch_counts["exact_zero"] += 1
+        self.snr_epoch_counts["noisy_documents"] += len(realized_pairs)
+        self.snr_epoch_counts["skipped_documents"] += len(skipped_pairs)
         metrics = {
             "scheduled_probability": float(schedule.probability),
+            "scheduled_consistency_weight": float(
+                schedule.consistency_weight
+                * self.curriculum.consistency_multiplier
+            ),
             "realized_noisy_fraction": len(realized_pairs) / max(1, pair_count),
-            "snr_min_db": float(schedule.snr_min_db or 0.0),
-            "snr_max_db": float(schedule.snr_max_db or 0.0),
+            "effective_step": float(effective_step),
+            "consistency_multiplier": float(
+                self.curriculum.consistency_multiplier
+            ),
+            "gate_open": float(self.curriculum.gate_open),
+            "recovery_active": float(self.curriculum.recovery_active),
+            "skipped_noisy_documents": float(len(skipped_pairs)),
             "mean_snr_db": (
                 sum(snrs[pair] for pair in realized_pairs) / len(realized_pairs)
                 if realized_pairs
@@ -542,6 +733,11 @@ class AudioLMModule(pl.LightningModule):
             ),
             "online_tokenization_seconds": tokenizer_seconds,
         }
+        probabilities = schedule.snr_bin_probabilities or (0.0, 0.0, 0.0, 0.0)
+        for (name, _, _), probability in zip(
+            SNR_BINS, probabilities, strict=True
+        ):
+            metrics[f"scheduled_snr_probability_{name}"] = float(probability)
         return batch, metrics
 
     def validation_step(self, batch: dict, batch_idx: int) -> torch.Tensor:
@@ -552,6 +748,10 @@ class AudioLMModule(pl.LightningModule):
         self.log("progress/catalogue_pass", float(self.current_epoch), sync_dist=False)
 
     def on_fit_start(self) -> None:
+        if int(self.trainer.world_size) != 1:
+            raise ValueError(
+                "noise_consistency_curriculum_v1 currently requires one GPU"
+            )
         self.started_at = time.perf_counter()
         self.session_documents_start = self.documents_consumed
         self.session_tokens_start = self.tokens_consumed
@@ -586,6 +786,13 @@ class AudioLMModule(pl.LightningModule):
                     "data/validation_noise_files": float(
                         self.noise_manifest["validation_files"]
                     ),
+                    "train/protocol": TRAINING_PROTOCOL,
+                    "train/nominal_max_steps": float(
+                        self.curriculum.nominal_max_steps
+                    ),
+                    "train/hard_max_steps": float(
+                        self.curriculum.hard_max_steps
+                    ),
                 },
                 step=self.global_step,
             )
@@ -594,6 +801,8 @@ class AudioLMModule(pl.LightningModule):
             and self.cfg["evaluation"].get("online_monitor_enabled", True)
         ):
             self._generation_probe()
+        if self.curriculum.completed(int(self.global_step)):
+            self.trainer.should_stop = True
 
     def _verify_cached_token_equivalence(self) -> None:
         count = int(
@@ -636,6 +845,13 @@ class AudioLMModule(pl.LightningModule):
             sync_dist=False,
         )
         self.log("progress/tokens_consumed", float(self.tokens_consumed), sync_dist=False)
+        for name, count in self.snr_epoch_counts.items():
+            self.log(
+                f"augmentation/epoch_{name}",
+                float(count),
+                sync_dist=False,
+            )
+            self.snr_epoch_counts[name] = 0
         elapsed = max(time.perf_counter() - self.started_at, 1e-6)
         self.log(
             "throughput/documents_per_second",
@@ -665,6 +881,8 @@ class AudioLMModule(pl.LightningModule):
     def _generation_probe(self) -> None:
         if not self.cfg["evaluation"].get("online_monitor_enabled", True):
             self._last_probe_step = int(self.global_step)
+            if self.curriculum.completed(int(self.global_step)):
+                self.trainer.should_stop = True
             return
         if not self.trainer.is_global_zero or self.trainer.sanity_checking:
             return
@@ -675,6 +893,8 @@ class AudioLMModule(pl.LightningModule):
         clean_rows = []
         noisy_rows = []
         skipped_noisy_rows = 0
+        shifted_teacher_forced_correct = 0
+        shifted_teacher_forced_count = 0
         snr_values = [
             float(value) for value in self.cfg["evaluation"]["noise_snr_db"]
         ]
@@ -687,11 +907,32 @@ class AudioLMModule(pl.LightningModule):
             )
             for batch in loader:
                 input_ids = batch["input_ids"].to(self.device)
+                attention_mask = batch["attention_mask"].to(self.device)
+                clean_logits, clean_hidden = self.model(
+                    input_ids,
+                    attention_mask,
+                    return_final_hidden_state=True,
+                )
                 id_columns = (input_ids == self.vocabulary.id_token_id).nonzero()
                 unique_columns = id_columns[:, 1].unique()
                 if len(unique_columns) != 1:
                     raise RuntimeError("Generation batch has inconsistent ID boundaries")
-                prompts = input_ids[:, : int(unique_columns[0]) + 1]
+                id_column = int(unique_columns[0])
+                prompts = input_ids[:, : id_column + 1]
+                predictions = clean_logits[:, :-1].argmax(dim=-1)
+                targets_tensor = input_ids[:, 1:]
+                id_mask = batch["id_target_mask"].to(self.device)
+                exact = ((predictions == targets_tensor) | ~id_mask).all(dim=1)
+                shifted_rows = torch.tensor(
+                    [view == "shifted" for view in batch["view_type"]],
+                    device=self.device,
+                    dtype=torch.bool,
+                )
+                shifted_teacher_forced_correct += int(exact[shifted_rows].sum())
+                shifted_teacher_forced_count += int(shifted_rows.sum())
+                clean_id_states = F.normalize(
+                    clean_hidden[:, id_column], dim=-1
+                )
                 greedy = batched_greedy_generate(
                     self.model, prompts, self.vocabulary
                 )
@@ -742,6 +983,17 @@ class AudioLMModule(pl.LightningModule):
                 noisy_prompts = prompts_from_audio_tokens(
                     noisy_tokens, self.vocabulary
                 )
+                _, noisy_hidden = self.model(
+                    noisy_prompts,
+                    return_final_hidden_state=True,
+                )
+                noisy_id_states = F.normalize(noisy_hidden[:, -1], dim=-1)
+                repeated_clean_states = clean_id_states.repeat(
+                    len(snr_values), 1
+                )[valid]
+                same_cosines = F.cosine_similarity(
+                    repeated_clean_states, noisy_id_states, dim=-1
+                ).tolist()
                 noisy_greedy = []
                 noisy_rankings = []
                 for offset in range(0, len(noisy_prompts), batch_size):
@@ -779,6 +1031,40 @@ class AudioLMModule(pl.LightningModule):
                     if keep
                 ]
                 valid_snrs = repeated_snr[valid].tolist()
+                repeated_tracks = batch["track_id"] * len(snr_values)
+                valid_tracks = [
+                    value
+                    for value, keep in zip(
+                        repeated_tracks, valid_rows, strict=True
+                    )
+                    if keep
+                ]
+                different_cosines = []
+                for state, track_id in zip(
+                    noisy_id_states, valid_tracks, strict=True
+                ):
+                    different_index = next(
+                        (
+                            index
+                            for index, candidate in enumerate(batch["track_id"])
+                            if candidate != track_id
+                        ),
+                        None,
+                    )
+                    different_cosines.append(
+                        (
+                            float(
+                                F.cosine_similarity(
+                                    state.unsqueeze(0),
+                                    clean_id_states[different_index]
+                                    .detach()
+                                    .unsqueeze(0),
+                                )[0]
+                            )
+                            if different_index is not None
+                            else float("nan")
+                        )
+                    )
                 noisy_rows.extend(
                     {
                         "target": target,
@@ -786,13 +1072,25 @@ class AudioLMModule(pl.LightningModule):
                         "snr_db": snr,
                         "greedy": result,
                         "beam": ranking,
+                        "same_track_cosine": same_cosine,
+                        "different_track_cosine": different_cosine,
                     }
-                    for target, view_type, snr, result, ranking in zip(
+                    for (
+                        target,
+                        view_type,
+                        snr,
+                        result,
+                        ranking,
+                        same_cosine,
+                        different_cosine,
+                    ) in zip(
                         targets,
                         views,
                         valid_snrs,
                         noisy_greedy,
                         noisy_rankings,
+                        same_cosines,
+                        different_cosines,
                         strict=True,
                     )
                 )
@@ -834,6 +1132,73 @@ class AudioLMModule(pl.LightningModule):
                 metrics[f"{noisy_prefix}/beam_top1"] = sum(
                     row["beam"][0].code == row["target"] for row in noisy
                 ) / len(noisy)
+        for snr in snr_values:
+            noisy = [
+                row for row in noisy_rows if math.isclose(row["snr_db"], snr)
+            ]
+            prefix = f"probe/noise/snr_{snr:g}"
+            metrics[f"{prefix}/evaluated"] = float(len(noisy))
+            metrics[f"{prefix}/skipped"] = float(
+                len(clean_rows) - len(noisy)
+            )
+            for width in (1, 5, 10):
+                metrics[f"{prefix}/beam_top{width}"] = (
+                    sum(
+                        row["target"]
+                        in [result.code for result in row["beam"][:width]]
+                        for row in noisy
+                    )
+                    / len(noisy)
+                    if noisy
+                    else float("nan")
+                )
+            metrics[f"{prefix}/greedy_top1"] = (
+                sum(row["greedy"].code == row["target"] for row in noisy)
+                / len(noisy)
+                if noisy
+                else float("nan")
+            )
+            metrics[f"{prefix}/beam_mrr"] = (
+                sum(
+                    (
+                        1
+                        / (
+                            [result.code for result in row["beam"]].index(
+                                row["target"]
+                            )
+                            + 1
+                        )
+                        if row["target"]
+                        in [result.code for result in row["beam"]]
+                        else 0.0
+                    )
+                    for row in noisy
+                )
+                / len(noisy)
+                if noisy
+                else float("nan")
+            )
+            metrics[f"{prefix}/invalid_code_rate"] = (
+                sum(not row["greedy"].ended_with_eos for row in noisy)
+                / len(noisy)
+                if noisy
+                else float("nan")
+            )
+            metrics[f"{prefix}/same_track_cosine"] = (
+                sum(row["same_track_cosine"] for row in noisy) / len(noisy)
+                if noisy
+                else float("nan")
+            )
+            valid_different = [
+                row["different_track_cosine"]
+                for row in noisy
+                if math.isfinite(row["different_track_cosine"])
+            ]
+            metrics[f"{prefix}/different_track_cosine"] = (
+                sum(valid_different) / len(valid_different)
+                if valid_different
+                else float("nan")
+            )
         reciprocal_rank = 0.0
         for width in (1, 5, 10):
             hits = 0
@@ -863,9 +1228,79 @@ class AudioLMModule(pl.LightningModule):
         metrics["probe/noise/aggregate/evaluated"] = float(len(noisy_rows))
         metrics["probe/noise/aggregate/skipped"] = float(skipped_noisy_rows)
         metrics["probe/noise/online_tokenization_seconds"] = tokenization_seconds
+        shifted_teacher_forced_exact = (
+            shifted_teacher_forced_correct / shifted_teacher_forced_count
+            if shifted_teacher_forced_count
+            else float("nan")
+        )
+        shifted_clean = [
+            row for row in clean_rows if row["view_type"] == "shifted"
+        ]
+        shifted_greedy_top1 = sum(
+            row["greedy"].code == row["target"] for row in shifted_clean
+        ) / len(shifted_clean)
+        metrics[
+            "probe/clean/shifted/teacher_forced_exact_accuracy"
+        ] = shifted_teacher_forced_exact
+        current_schedule = noise_consistency_schedule(
+            self.curriculum.effective_step(int(self.global_step)),
+            max_steps=int(self.cfg["train"]["max_steps"]),
+        )
+        decision = self.curriculum.observe_probe(
+            global_step=int(self.global_step),
+            shifted_teacher_forced_exact=shifted_teacher_forced_exact,
+            shifted_greedy_top1=shifted_greedy_top1,
+            consistency_is_active=(
+                current_schedule.consistency_weight
+                * self.curriculum.consistency_multiplier
+                > 0
+            ),
+        )
+        metrics["curriculum/effective_step"] = float(
+            self.curriculum.effective_step(int(self.global_step))
+        )
+        metrics["curriculum/gate_open"] = float(self.curriculum.gate_open)
+        metrics["curriculum/recovery_active"] = float(
+            self.curriculum.recovery_active
+        )
+        metrics["curriculum/consistency_multiplier"] = float(
+            self.curriculum.consistency_multiplier
+        )
+        metrics["curriculum/gate_open_step"] = float(
+            self.curriculum.gate_open_step
+            if self.curriculum.gate_open_step is not None
+            else -1
+        )
+        metrics["curriculum/regression_baseline"] = float(
+            self.curriculum.regression_baseline
+            if self.curriculum.regression_baseline is not None
+            else float("nan")
+        )
+        metrics["curriculum/event_gate_opened"] = float(
+            decision.event == "gate_opened"
+        )
+        metrics["curriculum/event_recovery_started"] = float(
+            decision.event == "recovery_started"
+        )
+        metrics["curriculum/event_recovery_completed"] = float(
+            decision.event == "recovery_completed"
+        )
         if self.logger is not None:
             self.logger.log_metrics(metrics, step=self.global_step)
         self._last_probe_step = int(self.global_step)
+        if decision.failure is not None:
+            self._save_diagnostic_and_fail(decision.failure)
+        if self.curriculum.completed(int(self.global_step)):
+            self.trainer.should_stop = True
+
+    def _save_diagnostic_and_fail(self, reason: str) -> None:
+        path = checkpoint_dir(self.cfg) / f"diagnostic-step-{int(self.global_step)}.ckpt"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.trainer.save_checkpoint(path)
+        raise RuntimeError(
+            f"tc6 adaptive curriculum stopped: {reason}. "
+            f"Diagnostic checkpoint: {path}"
+        )
 
     def on_before_optimizer_step(self, optimizer) -> None:
         if self.global_step % int(self.cfg["trainer"]["log_every_n_steps"]):
@@ -896,7 +1331,10 @@ class AudioLMModule(pl.LightningModule):
                 "validation_probe": self.validation_probe,
                 "training_track_ids": self.training_track_ids,
                 "training_corpus_fingerprint": self.training_corpus_fingerprint,
-                "training_protocol": "online_background_noise_curriculum_v1",
+                "training_protocol": TRAINING_PROTOCOL,
+                "curriculum_config": self.cfg["train"]["curriculum"],
+                "adaptive_curriculum_state": self.curriculum.state_dict(),
+                "snr_epoch_counts": self.snr_epoch_counts,
                 "monitor_recipes": self.monitor_recipes,
                 "background_noise_manifest": self.noise_manifest,
                 "view_policy": {
@@ -941,9 +1379,11 @@ class AudioLMModule(pl.LightningModule):
             raise ValueError("Resume checkpoint training-track subset does not match")
         if (
             checkpoint.get("training_protocol")
-            != "online_background_noise_curriculum_v1"
+            != TRAINING_PROTOCOL
         ):
             raise ValueError("Resume checkpoint uses a different training protocol")
+        if checkpoint.get("curriculum_config") != self.cfg["train"]["curriculum"]:
+            raise ValueError("Resume checkpoint uses a different curriculum")
         if checkpoint.get("monitor_recipes") != self.monitor_recipes:
             raise ValueError("Resume checkpoint monitoring recipes do not match")
         if checkpoint.get("background_noise_manifest") != self.noise_manifest:
@@ -958,6 +1398,15 @@ class AudioLMModule(pl.LightningModule):
         self.documents_consumed = int(checkpoint.get("documents_consumed", 0))
         self.tokens_consumed = int(checkpoint.get("tokens_consumed", 0))
         self._last_probe_step = int(checkpoint.get("last_probe_step", -1))
+        self.curriculum.load_state_dict(
+            checkpoint["adaptive_curriculum_state"]
+        )
+        self.snr_epoch_counts = {
+            key: int(value)
+            for key, value in checkpoint.get(
+                "snr_epoch_counts", self.snr_epoch_counts
+            ).items()
+        }
         random.setstate(checkpoint["python_rng_state"])
         numpy_state = checkpoint["numpy_rng_state"]
         np.random.set_state(
@@ -987,10 +1436,12 @@ class AudioLMModule(pl.LightningModule):
             raise ValueError("warmup_steps must be between zero and max_steps")
 
         def schedule(step: int) -> float:
-            if step < warmup_steps:
-                return (step + 1) / warmup_steps
-            progress = (step - warmup_steps) / max(1, max_steps - warmup_steps)
-            return 0.5 * (1 + math.cos(math.pi * min(progress, 1.0)))
+            effective_step = self.curriculum.effective_step(step)
+            return effective_cosine_multiplier(
+                effective_step,
+                max_steps=max_steps,
+                warmup_steps=warmup_steps,
+            )
 
         scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, schedule)
         return {
@@ -1029,6 +1480,8 @@ def build_logger(cfg: dict, directory: Path):
 def train(cfg: dict, *, checkpoint: str | Path | None = None) -> None:
     if cfg.get("architecture") != ARCHITECTURE:
         raise ValueError(f"Configuration architecture must be {ARCHITECTURE}")
+    if cfg["train"]["curriculum"].get("protocol") != TRAINING_PROTOCOL:
+        raise ValueError(f"Curriculum protocol must be {TRAINING_PROTOCOL}")
     seed = int(cfg["train"]["seed"])
     pl.seed_everything(seed, workers=True)
     torch.use_deterministic_algorithms(
@@ -1085,7 +1538,7 @@ def train(cfg: dict, *, checkpoint: str | Path | None = None) -> None:
     )
     optimizer_steps_per_pass = len(display_sampler) // accumulation
     display_max_epochs = math.ceil(
-        int(cfg["train"]["max_steps"]) / optimizer_steps_per_pass
+        module.curriculum.hard_max_steps / optimizer_steps_per_pass
     )
     evaluation_batches = int(cfg["train"]["evaluation_interval"]) * accumulation
     trainer = pl.Trainer(
@@ -1093,7 +1546,7 @@ def train(cfg: dict, *, checkpoint: str | Path | None = None) -> None:
         devices=cfg["trainer"]["devices"],
         strategy=cfg["trainer"]["strategy"],
         max_epochs=display_max_epochs,
-        max_steps=int(cfg["train"]["max_steps"]),
+        max_steps=module.curriculum.hard_max_steps,
         precision=cfg["trainer"]["precision"],
         accumulate_grad_batches=accumulation,
         gradient_clip_val=float(cfg["train"]["gradient_clip_norm"]),

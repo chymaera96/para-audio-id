@@ -22,6 +22,14 @@ class NoiseSchedule:
     snr_max_db: float | None
 
 
+@dataclass(frozen=True)
+class NoiseConsistencySchedule:
+    probability: float
+    consistency_weight: float
+    snr_bin_probabilities: tuple[float, float, float, float] | None
+    phase: str
+
+
 def background_noise_schedule(step: int) -> NoiseSchedule:
     if step < 0:
         raise ValueError("Global step cannot be negative")
@@ -37,6 +45,58 @@ def background_noise_schedule(step: int) -> NoiseSchedule:
         progress = (step - 35_000) / 10_000
         return NoiseSchedule(0.50 + 0.25 * progress, 0.0, 30.0)
     return NoiseSchedule(0.75, 0.0, 30.0)
+
+
+def _scaled_boundaries(max_steps: int) -> tuple[int, int, int, int, int]:
+    if max_steps < 7:
+        raise ValueError("max_steps is too small for the tc6 curriculum")
+    return tuple(
+        round(max_steps * reference / 70_000)
+        for reference in (20_000, 30_000, 40_000, 55_000, 70_000)
+    )
+
+
+def noise_consistency_schedule(
+    effective_step: int, *, max_steps: int = 70_000
+) -> NoiseConsistencySchedule:
+    if effective_step < 0:
+        raise ValueError("Effective step cannot be negative")
+    clean_end, easy_end, mixed_end, hard_end, final_end = _scaled_boundaries(
+        max_steps
+    )
+    step = min(effective_step, final_end)
+    if step < clean_end:
+        return NoiseConsistencySchedule(0.0, 0.0, None, "clean")
+    if step < easy_end:
+        progress = (step - clean_end) / max(1, easy_end - clean_end)
+        return NoiseConsistencySchedule(
+            0.25 * progress,
+            0.05 * progress,
+            (0.00, 0.05, 0.25, 0.70),
+            "easy",
+        )
+    if step < mixed_end:
+        progress = (step - easy_end) / max(1, mixed_end - easy_end)
+        return NoiseConsistencySchedule(
+            0.25 + 0.25 * progress,
+            0.05 + 0.05 * progress,
+            (0.05, 0.15, 0.35, 0.45),
+            "mixed",
+        )
+    if step < hard_end:
+        progress = (step - mixed_end) / max(1, hard_end - mixed_end)
+        return NoiseConsistencySchedule(
+            0.50 + 0.25 * progress,
+            0.10,
+            (0.20, 0.30, 0.30, 0.20),
+            "hardening",
+        )
+    return NoiseConsistencySchedule(
+        0.75,
+        0.10,
+        (0.40, 0.30, 0.20, 0.10),
+        "consolidation",
+    )
 
 
 def stable_uint64(*values: object) -> int:
@@ -74,6 +134,65 @@ def deterministic_noise_parameters(
             uniform = stable_uniform(seed, step, pair, key, "snr")
             snrs.append(snr_min_db + uniform * (snr_max_db - snr_min_db))
     return selected, snrs
+
+
+SNR_BINS = (
+    ("very_hard", 0.0, 5.0),
+    ("hard", 5.0, 10.0),
+    ("medium", 10.0, 20.0),
+    ("easy", 20.0, 30.0),
+)
+
+
+def deterministic_consistency_noise_parameters(
+    keys: list[int],
+    *,
+    schedule: NoiseConsistencySchedule,
+    seed: int,
+    step: int,
+    batch_idx: int,
+) -> tuple[list[bool], list[float], list[str | None]]:
+    if not 0.0 <= schedule.probability <= 1.0:
+        raise ValueError("Noise probability must be between zero and one")
+    probabilities = schedule.snr_bin_probabilities
+    if probabilities is not None and not math.isclose(sum(probabilities), 1.0):
+        raise ValueError("SNR-bin probabilities must sum to one")
+    selected = []
+    snrs = []
+    bins: list[str | None] = []
+    for pair, key in enumerate(keys):
+        keep = (
+            stable_uniform(seed, step, batch_idx, pair, key, "apply")
+            < schedule.probability
+        )
+        selected.append(keep)
+        if probabilities is None:
+            snrs.append(0.0)
+            bins.append(None)
+            continue
+        draw = stable_uniform(seed, step, batch_idx, pair, key, "snr-bin")
+        cumulative = 0.0
+        bin_index = len(probabilities) - 1
+        for index, probability in enumerate(probabilities):
+            cumulative += probability
+            if draw < cumulative:
+                bin_index = index
+                break
+        name, minimum, maximum = SNR_BINS[bin_index]
+        bins.append(name)
+        if (
+            schedule.phase == "consolidation"
+            and name == "very_hard"
+            and stable_uniform(seed, step, batch_idx, pair, key, "exact-zero")
+            < 0.25
+        ):
+            snrs.append(0.0)
+        else:
+            position = stable_uniform(
+                seed, step, batch_idx, pair, key, "snr-within-bin"
+            )
+            snrs.append(minimum + position * (maximum - minimum))
+    return selected, snrs, bins
 
 
 class BackgroundNoiseAssets:

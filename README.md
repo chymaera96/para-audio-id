@@ -116,52 +116,56 @@ hidden size 768, 12 heads, tied embeddings, and no dropout. The vocabulary has
 2,048 collision-free audio tokens, `[BOS]`, `[ID]`, ten dedicated digit tokens,
 and `[EOS]`.
 
-Training jointly predicts the complete document from the first optimizer step.
-It uses one token-level causal mean, with every identifier digit assigned a fixed
-weight of 20:
+The tc6 experiment reuses the exact 10,000 identities and cached canonical and
+shifted tokens. A non-noisy identity contributes its canonical/shifted pair; a
+noisy identity contributes an exact same-segment clean/noisy pair. Noisy audio
+tokens remain in the causal input, but their audio-token prediction targets are
+masked. Clean and noisy digit and boundary targets remain active.
 
 ```text
-loss = (
-  sum(audio token losses)
-  + 20 * sum(identifier digit losses)
-  + sum([ID] and [EOS] losses)
-) / (number of audio tokens + 20 * number of digits + 2)
+loss =
+    mean(clean audio-token CE)
+    + 20 * mean_available(clean digit CE, noisy digit CE)
+    + mean_available(clean boundary CE, noisy boundary CE)
+    + lambda_consistency * clean/noisy [ID]-state consistency
 ```
 
-Audio and identifier losses are also logged separately for diagnosis, but neither
-is optimized as a separately normalized objective and there is no objective
-schedule.
-The current experiment reuses the exact 10,000 identities and cached canonical
-and shifted tokens. Each track contributes a clean anchor plus a second view.
-The second view is initially the other cached clean excerpt and is progressively
-replaced by an online background-noise version of the anchor:
+The consistency loss is one minus cosine similarity between normalized
+final-layer `[ID]` states. The clean state is detached for this term; the noisy
+state, transformer, and noisy input embeddings retain gradients. The loss
+families are independently normalized. The previous tc5 weighted-token loss is
+logged only as a detached comparison metric.
 
-| Optimizer steps | Noise probability | SNR |
+| Effective steps | Noise probability | Consistency weight |
 | ---: | ---: | ---: |
-| 0–20K | 0 | disabled |
-| 20–25K | 0 → 0.25 | 20–30 dB |
-| 25–35K | 0.25 → 0.50 | 10–30 dB |
-| 35–45K | 0.50 → 0.75 | 0–30 dB |
-| 45–60K | 0.75 | 0–30 dB |
+| 0–20K | 0 | 0 |
+| 20–30K | 0 → 0.25 | 0 → 0.05 |
+| 30–40K | 0.25 → 0.50 | 0.05 → 0.10 |
+| 40–55K | 0.50 → 0.75 | 0.10 |
+| 55–70K | 0.75 | 0.10 |
 
 Clean documents always use the existing token shards. Noisy waveforms are mixed
 at the requested RMS SNR and passed through a frozen, component-only MuQ Mel-RVQ
-tokenizer once per microbatch. Only background noise is enabled.
-Anchor and second-view causal losses are independently normalized and averaged
-equally. Identifier digit targets retain their fixed weight of 20.
+tokenizer once per microbatch. SNR is sampled from a categorical curriculum that
+moves mass from 20–30 dB toward 0–10 dB; approximately 10% of final noisy views
+are exactly 0 dB. Only background noise is enabled.
+
 The single-GPU logical batch is 32 tracks × 2 segments: a physical microbatch of
 four tracks × two segments with eight gradient-accumulation steps.
-Training stops after 60,000 optimizer steps and warms up for exactly 200 before
-cosine decay. Checkpoints are saved every 500 steps. A fixed 100-track clean and
-held-out-noise greedy/beam monitor runs at step zero, every 2,500 steps, and at
-the final step over canonical, integer-shifted, and held-out half-shifted views.
-Catalogue passes reshuffle identities and advance deterministic per-track view
-permutations, but do not control stopping or checkpoint cadence.
+
+The nominal run is 70,000 effective optimizer steps. At 20K, the curriculum
+waits for clean shifted teacher-forced exact accuracy of at least 0.5. A
+five-point clean shifted Top-1 regression freezes the curriculum, halves its
+consistency multiplier, and waits for recovery. The LR cosine follows this
+effective clock, not paused raw steps. Gate and recovery allowances give a 120K
+raw-step hard ceiling. Checkpoints are saved every 500 raw steps. A fixed
+100-track greedy/beam monitor runs at step zero, every 2,500 raw steps, and at
+completion over canonical, integer-shifted, and held-out half-shifted views.
 
 ```bash
 python train.py configs/fma_large.yaml \
   --devices 1 \
-  --run-id noise-curriculum-10k-60k \
+  --run-id tc6 \
   --wandb-online
 ```
 
@@ -171,7 +175,7 @@ state:
 ```bash
 python train.py configs/fma_large.yaml \
   --devices 1 \
-  --run-id noise-curriculum-10k-60k \
+  --run-id tc6 \
   --wandb-online \
   --resume
 ```
@@ -184,8 +188,10 @@ Checkpoints are written every 500 optimizer steps under:
 
 Checkpoints embed the vocabulary, exact cohort, view grids, monitor recipes,
 noise-manifest fingerprints, corpus and tokenizer fingerprints, and code
-mapping. Interruption resume is accepted only when all training-protocol and
-asset metadata match.
+mapping. They also preserve the tc6 gate, effective clock, regression baseline,
+recovery state, consistency multiplier, and SNR counters. Interruption resume is
+accepted only when all training-protocol and asset metadata match; tc5
+checkpoints are incompatible.
 
 PyTorch deterministic algorithms and seeded Python, NumPy, Torch, samplers, and
 workers are enabled. `deterministic_warn_only: true` reports CUDA operations for

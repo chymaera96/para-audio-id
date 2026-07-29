@@ -5,9 +5,12 @@ import torch
 
 from para_audio_id.audio_lm.noise import (
     BackgroundNoiseAssets,
+    NoiseConsistencySchedule,
     background_noise_schedule,
+    deterministic_consistency_noise_parameters,
     deterministic_noise_parameters,
     mix_background_noise,
+    noise_consistency_schedule,
     stable_uniform,
 )
 
@@ -129,3 +132,87 @@ def test_noise_assets_reject_overlapping_source_names(tmp_path):
         BackgroundNoiseAssets(
             train, validation, sample_rate=8_000, samples=40
         )
+
+
+@pytest.mark.parametrize(
+    ("step", "probability", "weight", "phase"),
+    [
+        (0, 0.0, 0.0, "clean"),
+        (19_999, 0.0, 0.0, "clean"),
+        (20_000, 0.0, 0.0, "easy"),
+        (25_000, 0.125, 0.025, "easy"),
+        (30_000, 0.25, 0.05, "mixed"),
+        (35_000, 0.375, 0.075, "mixed"),
+        (40_000, 0.50, 0.10, "hardening"),
+        (47_500, 0.625, 0.10, "hardening"),
+        (55_000, 0.75, 0.10, "consolidation"),
+        (70_000, 0.75, 0.10, "consolidation"),
+    ],
+)
+def test_tc6_schedule_boundaries(step, probability, weight, phase):
+    schedule = noise_consistency_schedule(step)
+    assert schedule.probability == pytest.approx(probability)
+    assert schedule.consistency_weight == pytest.approx(weight)
+    assert schedule.phase == phase
+
+
+def test_tc6_schedule_scales_with_nominal_steps():
+    halfway = noise_consistency_schedule(17_500, max_steps=35_000)
+    reference = noise_consistency_schedule(35_000, max_steps=70_000)
+    assert halfway == reference
+
+
+def test_tc6_final_snr_sampler_matches_bins_and_exact_zero_mass():
+    schedule = NoiseConsistencySchedule(
+        1.0,
+        0.1,
+        (0.40, 0.30, 0.20, 0.10),
+        "consolidation",
+    )
+    _, snrs, bins = deterministic_consistency_noise_parameters(
+        list(range(20_000)),
+        schedule=schedule,
+        seed=7,
+        step=60_000,
+        batch_idx=3,
+    )
+    counts = {name: bins.count(name) / len(bins) for name in set(bins)}
+    assert counts["very_hard"] == pytest.approx(0.40, abs=0.015)
+    assert counts["hard"] == pytest.approx(0.30, abs=0.015)
+    assert counts["medium"] == pytest.approx(0.20, abs=0.015)
+    assert counts["easy"] == pytest.approx(0.10, abs=0.015)
+    assert sum(snr == 0.0 for snr in snrs) / len(snrs) == pytest.approx(
+        0.10, abs=0.01
+    )
+
+
+def test_tc6_noise_recipe_is_resume_stable_and_changes_by_step():
+    schedule = NoiseConsistencySchedule(
+        1.0,
+        0.1,
+        (0.20, 0.30, 0.30, 0.20),
+        "hardening",
+    )
+    first = deterministic_consistency_noise_parameters(
+        [11, 12, 13, 14],
+        schedule=schedule,
+        seed=5,
+        step=41_000,
+        batch_idx=7,
+    )
+    resumed = deterministic_consistency_noise_parameters(
+        [11, 12, 13, 14],
+        schedule=schedule,
+        seed=5,
+        step=41_000,
+        batch_idx=7,
+    )
+    next_step = deterministic_consistency_noise_parameters(
+        [11, 12, 13, 14],
+        schedule=schedule,
+        seed=5,
+        step=41_001,
+        batch_idx=7,
+    )
+    assert first == resumed
+    assert first != next_step

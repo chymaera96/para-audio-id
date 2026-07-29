@@ -2,6 +2,7 @@ import json
 
 import numpy as np
 import pytest
+import torch
 
 from para_audio_id.audio_lm.dataset import (
     AudioTokenDataset,
@@ -15,6 +16,10 @@ from para_audio_id.audio_lm.token_store import (
     TokenStoreIndex,
     validate_shard,
     write_shard,
+)
+from para_audio_id.audio_lm.training import (
+    prefetched_waveforms_for_step,
+    replace_secondary_rows_with_noisy_tokens,
 )
 from para_audio_id.audio_lm.vocabulary import AudioLMVocabulary
 
@@ -316,3 +321,71 @@ def test_causal_document_masks_and_no_first_digit_leakage(tmp_path):
         | batch["id_target_mask"]
         & batch["boundary_target_mask"]
     ).any()
+
+
+def test_noisy_secondary_is_an_exact_copy_of_the_clean_anchor():
+    vocabulary = AudioLMVocabulary()
+    examples = [
+        {
+            "audio_tokens": torch.tensor([index + 1, 1025 + index]),
+            "code": f"{pair:05d}",
+            "track_id": f"track-{pair}",
+            "source_path": f"{pair}.mp3",
+            "segment_start": float(index),
+            "segment_duration": 5.0,
+            "document_index": index,
+            "view_type": "canonical" if index % 2 == 0 else "shifted",
+        }
+        for pair in range(2)
+        for index in (pair * 2, pair * 2 + 1)
+    ]
+    batch = collate_causal_documents(examples, vocabulary, 32)
+    replaced = replace_secondary_rows_with_noisy_tokens(
+        batch,
+        torch.tensor([[77, 1101]]),
+        [0],
+        id_token_id=vocabulary.id_token_id,
+    )
+    assert replaced["is_noisy"].tolist() == [False, True, False, False]
+    assert replaced["view_type"][1] == "noisy"
+    for field in (
+        "track_id",
+        "code",
+        "source_path",
+    ):
+        assert replaced[field][1] == replaced[field][0]
+    for field in ("segment_start", "segment_duration", "document_index"):
+        assert replaced[field][1] == replaced[field][0]
+    id_column = int(
+        (replaced["input_ids"][0] == vocabulary.id_token_id).nonzero()[0]
+    )
+    assert replaced["input_ids"][1, 1:id_column].tolist() == [77, 1101]
+    assert torch.equal(
+        replaced["input_ids"][1, id_column:],
+        replaced["input_ids"][0, id_column:],
+    )
+    assert replaced["input_ids"][2:].equal(batch["input_ids"][2:])
+
+
+def test_prefetched_waveforms_cannot_override_actual_sampler_step():
+    anchor = torch.ones(1, 8)
+    noise = torch.zeros(1, 8)
+    batch = {
+        "planned_optimizer_step": 20,
+        "planned_batch_idx": 3,
+        "anchor_waveforms": anchor,
+        "noise_waveforms": noise,
+        "loaded_pair_indices": [2],
+    }
+    selected = prefetched_waveforms_for_step(
+        batch, global_step=20, batch_idx=3
+    )
+    assert set(selected) == {2}
+    assert torch.equal(selected[2][0], anchor[0])
+    assert torch.equal(selected[2][1], noise[0])
+    assert (
+        prefetched_waveforms_for_step(
+            batch, global_step=21, batch_idx=3
+        )
+        == {}
+    )

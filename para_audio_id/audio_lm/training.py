@@ -30,7 +30,6 @@ from .dataset import (
 )
 from .generation import (
     batched_beam_generate,
-    batched_greedy_generate,
     prompts_from_audio_tokens,
 )
 from .losses import causal_losses_by_view, noise_consistency_losses
@@ -61,14 +60,14 @@ from .vocabulary import AudioLMVocabulary
 
 TRAINING_PROTOCOL = "online_random_crop_noise_consistency_v1"
 LOSS_PROTOCOL = "tc5_family_weighted_consistency_v2"
-MONITOR_PROTOCOL = "tc6_three_group_monitor_v1"
+MONITOR_PROTOCOL = "compact_beam_monitor_v2"
 TRAIN_METRICS = {
-    "base_loss",
     "clean_audio_loss",
     "digit_loss",
     "consistency_loss",
-    "consistency_contribution",
-    "cosine_margin",
+    "same_track_cosine",
+    "different_track_cosine",
+    "teacher_forced_exact_accuracy",
 }
 VALIDATION_METRICS = {
     "audio_loss",
@@ -81,12 +80,27 @@ AUGMENTATION_METRICS = {
     "realized_noisy_fraction",
     "mean_snr_db",
     "online_tokenization_seconds",
-    "crop_decoding_seconds",
-    "augmentation_seconds",
-    "random_start_mean_seconds",
-    "random_start_collisions",
-    "replacement_count",
 }
+
+
+def tc6_probe_wandb_keys(snr_values: list[float]) -> set[str]:
+    return {
+        *{
+            f"probe/clean/{view_type}/beam_top1"
+            for view_type in ("canonical", "shifted", "heldout")
+        },
+        *{
+            f"probe/noise/{view_type}/beam_top1"
+            for view_type in ("canonical", "shifted", "heldout")
+        },
+        *{
+            f"probe/noise/snr_{snr:g}/beam_top1"
+            for snr in snr_values
+        },
+        "probe/noise/aggregate/beam_top1",
+        "probe/noise/online_tokenization_seconds",
+        "probe/clean/shifted/teacher_forced_exact_accuracy",
+    }
 
 
 class ResumableDataLoader(DataLoader):
@@ -650,7 +664,6 @@ class AudioLMModule(pl.LightningModule):
         self.documents_consumed = 0
         self.tokens_consumed = 0
         self.started_at = time.perf_counter()
-        self.session_documents_start = 0
         self.session_tokens_start = 0
         self.snr_epoch_counts = {name: 0 for name, _, _ in SNR_BINS}
         self.snr_epoch_counts["exact_zero"] = 0
@@ -1120,7 +1133,6 @@ class AudioLMModule(pl.LightningModule):
                 f"{TRAINING_PROTOCOL} currently requires one GPU"
             )
         self.started_at = time.perf_counter()
-        self.session_documents_start = self.documents_consumed
         self.session_tokens_start = self.tokens_consumed
         tokenizer_cfg = self.cfg["tokenizer"]
         if self.online_tokenizer is None:
@@ -1176,26 +1188,11 @@ class AudioLMModule(pl.LightningModule):
 
     def on_train_epoch_end(self) -> None:
         for role in ("clean", "noisy"):
-            count = self.conditional_exact[f"{role}_count"]
-            if count:
-                self.log(
-                    f"train/{role}_teacher_forced_exact_accuracy",
-                    self.conditional_exact[f"{role}_correct"] / count,
-                    sync_dist=False,
-                )
             self.conditional_exact[f"{role}_correct"] = 0.0
             self.conditional_exact[f"{role}_count"] = 0
         for name in self.snr_epoch_counts:
             self.snr_epoch_counts[name] = 0
         elapsed = max(time.perf_counter() - self.started_at, 1e-6)
-        self.log(
-            "throughput/documents_per_second",
-            float(
-                (self.documents_consumed - self.session_documents_start)
-                / elapsed
-            ),
-            sync_dist=False,
-        )
         self.log(
             "throughput/tokens_per_second",
             float((self.tokens_consumed - self.session_tokens_start) / elapsed),
@@ -1232,6 +1229,8 @@ class AudioLMModule(pl.LightningModule):
         rows: list[dict] = []
         skipped_queries: list[dict] = []
         tokenization_seconds = 0.0
+        shifted_teacher_forced_correct = 0
+        shifted_teacher_forced_count = 0
         with torch.inference_mode():
             loader = tqdm(
                 self.trainer.datamodule.generation_dataloader(),
@@ -1249,11 +1248,52 @@ class AudioLMModule(pl.LightningModule):
                 if self.device.type == "cuda":
                     torch.cuda.synchronize(self.device)
                 tokenization_seconds += time.perf_counter() - started
+                clean_examples = [
+                    {
+                        "audio_tokens": tokens.detach().cpu(),
+                        "code": code,
+                        "track_id": track_id,
+                        "document_index": -1,
+                        "view_type": view_type,
+                    }
+                    for tokens, code, track_id, view_type in zip(
+                        clean_tokens,
+                        batch["code"],
+                        batch["track_id"],
+                        batch["view_type"],
+                        strict=True,
+                    )
+                ]
+                clean_documents = collate_causal_documents(
+                    clean_examples,
+                    self.vocabulary,
+                    int(self.cfg["model"]["max_position_embeddings"]),
+                )
+                for name, value in list(clean_documents.items()):
+                    if isinstance(value, torch.Tensor):
+                        clean_documents[name] = value.to(self.device)
+                clean_logits = self.model(
+                    clean_documents["input_ids"],
+                    clean_documents["attention_mask"],
+                )
+                predictions = clean_logits[:, :-1].argmax(dim=-1)
+                targets = clean_documents["input_ids"][:, 1:]
+                id_mask = clean_documents["id_target_mask"]
+                exact = ((predictions == targets) | ~id_mask).all(dim=1)
+                shifted_mask = torch.tensor(
+                    [
+                        view_type == "shifted"
+                        for view_type in batch["view_type"]
+                    ],
+                    device=self.device,
+                    dtype=torch.bool,
+                )
+                shifted_teacher_forced_correct += int(
+                    exact[shifted_mask].sum()
+                )
+                shifted_teacher_forced_count += int(shifted_mask.sum())
                 clean_prompts = prompts_from_audio_tokens(
                     clean_tokens, self.vocabulary
-                )
-                clean_greedy = batched_greedy_generate(
-                    self.model, clean_prompts, self.vocabulary
                 )
                 clean_beams = batched_beam_generate(
                     self.model,
@@ -1268,15 +1308,13 @@ class AudioLMModule(pl.LightningModule):
                         "view_type": view_type,
                         "start": start,
                         "snr_db": None,
-                        "greedy": greedy,
                         "beam": beam,
                     }
-                    for track_id, code, view_type, start, greedy, beam in zip(
+                    for track_id, code, view_type, start, beam in zip(
                         batch["track_id"],
                         batch["code"],
                         batch["view_type"],
                         batch["start"],
-                        clean_greedy,
                         clean_beams,
                         strict=True,
                     )
@@ -1311,9 +1349,6 @@ class AudioLMModule(pl.LightningModule):
                     prompts = prompts_from_audio_tokens(
                         noisy_tokens, self.vocabulary
                     )
-                    greedy = batched_greedy_generate(
-                        self.model, prompts, self.vocabulary
-                    )
                     beams = batched_beam_generate(
                         self.model,
                         prompts,
@@ -1327,7 +1362,6 @@ class AudioLMModule(pl.LightningModule):
                             "view_type": view_type,
                             "start": start,
                             "snr_db": snr,
-                            "greedy": result,
                             "beam": beam,
                         }
                         for (
@@ -1335,7 +1369,6 @@ class AudioLMModule(pl.LightningModule):
                             code,
                             view_type,
                             start,
-                            result,
                             beam,
                         ) in zip(
                             [
@@ -1354,7 +1387,6 @@ class AudioLMModule(pl.LightningModule):
                                 batch["start"][int(index)]
                                 for index in valid_indices
                             ],
-                            greedy,
                             beams,
                             strict=True,
                         )
@@ -1371,14 +1403,6 @@ class AudioLMModule(pl.LightningModule):
             ]
             result = {
                 "queries": count,
-                "greedy_top1": sum(
-                    row["greedy"].code == row["target"] for row in selected
-                )
-                / count,
-                "greedy_protocol_valid": sum(
-                    row["greedy"].ended_with_eos for row in selected
-                )
-                / count,
             }
             for width in (1, 5, 10):
                 result[f"beam_top{width}"] = sum(
@@ -1439,6 +1463,13 @@ class AudioLMModule(pl.LightningModule):
             metrics["probe/noise/aggregate/beam_top1"] = noisy_summary[
                 "beam_top1"
             ]
+        if shifted_teacher_forced_count:
+            metrics[
+                "probe/clean/shifted/teacher_forced_exact_accuracy"
+            ] = (
+                shifted_teacher_forced_correct
+                / shifted_teacher_forced_count
+            )
         for view_type, summaries in by_view.items():
             if summaries["clean"]:
                 metrics[f"probe/clean/{view_type}/beam_top1"] = summaries[
@@ -1455,6 +1486,12 @@ class AudioLMModule(pl.LightningModule):
                 if summary
             }
         )
+        allowed_probe_keys = tc6_probe_wandb_keys(snr_values)
+        unexpected = set(metrics) - allowed_probe_keys
+        if unexpected:
+            raise RuntimeError(
+                f"tc7 produced non-tc6 W&B probe keys: {sorted(unexpected)}"
+            )
         if self.logger is not None:
             self.logger.log_metrics(metrics, step=self.global_step)
         serializable_rows = [
@@ -1464,11 +1501,6 @@ class AudioLMModule(pl.LightningModule):
                 "view_type": row["view_type"],
                 "start": row["start"],
                 "snr_db": row["snr_db"],
-                "greedy": {
-                    "code": row["greedy"].code,
-                    "log_probability": row["greedy"].log_probability,
-                    "ended_with_eos": row["greedy"].ended_with_eos,
-                },
                 "beam": [
                     {
                         "code": result.code,

@@ -217,8 +217,8 @@ Evaluation preserves tc6's seeded 100-track comparison protocol: one balanced
 canonical, integer-shifted, and held-out half-offset position per track, clean
 and at `0/5/10/20/30 dB`. These fixed queries are decoded and tokenized online,
 so neither tc7 training nor evaluation reads grid-token stores. W&B retains
-beam Top-1 curves while complete greedy, beam Top-1/5/10, MRR, protocol,
-position, and failure records are written to JSONL.
+the exact cleaned tc6 metric names and beam Top-1 curves, while complete beam
+Top-1/5/10, MRR, position, and failure records are written to JSONL.
 
 ## Interpretation
 

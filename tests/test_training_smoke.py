@@ -6,7 +6,12 @@ import soundfile as sf
 import torch
 
 from para_audio_id.audio_lm.tokenizer import TokenizerSpec
-from para_audio_id.audio_lm.training import train
+from para_audio_id.audio_lm.training import (
+    AUGMENTATION_METRICS,
+    TRAIN_METRICS,
+    tc6_probe_wandb_keys,
+    train,
+)
 from para_audio_id.audio_lm.vocabulary import AudioLMVocabulary
 
 
@@ -174,7 +179,7 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
         == "online_random_crop_noise_consistency_v1"
     )
     assert checkpoint["loss_protocol"] == "tc5_family_weighted_consistency_v2"
-    assert checkpoint["monitor_protocol"] == "tc6_three_group_monitor_v1"
+    assert checkpoint["monitor_protocol"] == "compact_beam_monitor_v2"
     assert len(checkpoint["monitor_recipes"]) == 6
     assert {
         row["view_type"] for row in checkpoint["monitor_recipes"]
@@ -185,3 +190,37 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
     torch.save(checkpoint, invalid)
     with pytest.raises(ValueError, match="different training protocol"):
         train(cfg, checkpoint=invalid)
+
+
+def test_tc7_wandb_keys_match_cleaned_tc6_schema():
+    assert TRAIN_METRICS == {
+        "clean_audio_loss",
+        "digit_loss",
+        "consistency_loss",
+        "same_track_cosine",
+        "different_track_cosine",
+        "teacher_forced_exact_accuracy",
+    }
+    assert AUGMENTATION_METRICS == {
+        "scheduled_probability",
+        "scheduled_consistency_weight",
+        "realized_noisy_fraction",
+        "mean_snr_db",
+        "online_tokenization_seconds",
+    }
+    assert tc6_probe_wandb_keys([0.0, 5.0, 10.0, 20.0, 30.0]) == {
+        "probe/clean/canonical/beam_top1",
+        "probe/clean/shifted/beam_top1",
+        "probe/clean/heldout/beam_top1",
+        "probe/noise/canonical/beam_top1",
+        "probe/noise/shifted/beam_top1",
+        "probe/noise/heldout/beam_top1",
+        "probe/noise/snr_0/beam_top1",
+        "probe/noise/snr_5/beam_top1",
+        "probe/noise/snr_10/beam_top1",
+        "probe/noise/snr_20/beam_top1",
+        "probe/noise/snr_30/beam_top1",
+        "probe/noise/aggregate/beam_top1",
+        "probe/noise/online_tokenization_seconds",
+        "probe/clean/shifted/teacher_forced_exact_accuracy",
+    }

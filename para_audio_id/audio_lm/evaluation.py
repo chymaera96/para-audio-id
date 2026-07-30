@@ -115,19 +115,40 @@ def _evaluate_tc6_monitor_manifest(
     )
     snrs = [float(value) for value in cfg["evaluation"]["noise_snr_db"]]
     rows = []
+    skipped_queries = []
     started = time.perf_counter()
     with torch.inference_mode():
         for batch in tqdm(loader, desc="tc6-compatible evaluation"):
+            skipped_queries.extend(batch["skipped"])
             clean = batch["clean_waveforms"].to(device)
+            if not len(clean):
+                continue
             noise = batch["noise_waveforms"].to(device)
-            variants = [(None, clean)]
+            variants = [
+                (
+                    None,
+                    clean,
+                    list(range(len(clean))),
+                )
+            ]
             for snr in snrs:
                 requested = torch.full((len(clean),), snr, device=device)
                 mixed, valid = mix_background_noise(clean, noise, requested)
-                if not valid.all():
-                    raise RuntimeError("Random evaluation noise mixing is invalid")
-                variants.append((snr, mixed))
-            for snr, waveforms in variants:
+                valid_indices = valid.nonzero(as_tuple=False).flatten().tolist()
+                for index in (~valid).nonzero(as_tuple=False).flatten().tolist():
+                    skipped_queries.append(
+                        {
+                            "track_id": batch["track_id"][index],
+                            "code": batch["code"][index],
+                            "view_type": batch["view_type"][index],
+                            "start": batch["start"][index],
+                            "snr_db": snr,
+                            "error": "noise mixing produced invalid audio",
+                        }
+                    )
+                if valid_indices:
+                    variants.append((snr, mixed[valid], valid_indices))
+            for snr, waveforms, indices in variants:
                 tokens = tokenizer.tokenize(waveforms)
                 prompts = torch.stack(
                     [
@@ -162,10 +183,10 @@ def _evaluate_tc6_monitor_manifest(
                         ],
                     }
                     for track_id, code, view_type, start, result, ranking in zip(
-                        batch["track_id"],
-                        batch["code"],
-                        batch["view_type"],
-                        batch["start"],
+                        [batch["track_id"][index] for index in indices],
+                        [batch["code"][index] for index in indices],
+                        [batch["view_type"][index] for index in indices],
+                        [batch["start"][index] for index in indices],
                         greedy,
                         beams,
                         strict=True,
@@ -212,12 +233,24 @@ def _evaluate_tc6_monitor_manifest(
     }
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps({"metrics": metrics, "queries": rows}, indent=2) + "\n")
+    output.write_text(
+        json.dumps(
+            {
+                "metrics": metrics,
+                "queries": rows,
+                "skipped_queries": skipped_queries,
+            },
+            indent=2,
+        )
+        + "\n"
+    )
     return metrics
 
 
 def _generation_metrics(rows: list[dict]) -> dict:
     count = len(rows)
+    if not count:
+        return {"queries": 0}
     metrics = {
         "queries": count,
         "greedy_top1": sum(row["greedy"] == row["code"] for row in rows) / count,

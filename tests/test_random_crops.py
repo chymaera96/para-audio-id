@@ -7,6 +7,7 @@ from para_audio_id.audio_lm.random_crops import (
     OnlineTrackBatchSampler,
     OnlineTrackDataset,
     RandomCropCollator,
+    RandomEvaluationCollator,
     make_tc6_evaluation_manifest,
     random_start_sample,
 )
@@ -209,3 +210,53 @@ def test_short_track_starts_at_zero_and_is_padded(tmp_path):
         )
         == 0
     )
+
+
+def test_monitor_collator_skips_invalid_crop_without_aborting(tmp_path):
+    audio_root = tmp_path / "audio"
+    train_noise = tmp_path / "noise_train"
+    validation_noise = tmp_path / "noise_validation"
+    audio_root.mkdir()
+    train_noise.mkdir()
+    validation_noise.mkdir()
+    waveform = np.sin(
+        2 * np.pi * 220 * np.arange(6 * 8_000, dtype=np.float32) / 8_000
+    )
+    sf.write(audio_root / "valid.wav", waveform, 8_000)
+    sf.write(train_noise / "train.wav", waveform[:40_000], 8_000)
+    sf.write(validation_noise / "validation.wav", waveform[:40_000], 8_000)
+    assets = BackgroundNoiseAssets(
+        train_noise, validation_noise, sample_rate=8_000, samples=40_000
+    )
+    common = {
+        "source_duration": 6.0,
+        "start_sample": 0,
+        "start": 0.0,
+        "crop_duration": 5.0,
+        "view_type": "canonical",
+    }
+    batch = RandomEvaluationCollator(
+        audio_root=audio_root,
+        noise_assets=assets,
+        sample_rate=8_000,
+        seed=3,
+    )(
+        [
+            {
+                **common,
+                "track_id": "valid",
+                "code": "00001",
+                "source_path": "valid.wav",
+            },
+            {
+                **common,
+                "track_id": "bad",
+                "code": "00002",
+                "source_path": "missing.wav",
+            },
+        ]
+    )
+    assert batch["clean_waveforms"].shape == (1, 40_000)
+    assert batch["track_id"] == ["valid"]
+    assert len(batch["skipped"]) == 1
+    assert batch["skipped"][0]["track_id"] == "bad"

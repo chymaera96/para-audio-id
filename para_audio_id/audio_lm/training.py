@@ -1230,6 +1230,7 @@ class AudioLMModule(pl.LightningModule):
             float(value) for value in self.cfg["evaluation"]["noise_snr_db"]
         ]
         rows: list[dict] = []
+        skipped_queries: list[dict] = []
         tokenization_seconds = 0.0
         with torch.inference_mode():
             loader = tqdm(
@@ -1238,7 +1239,10 @@ class AudioLMModule(pl.LightningModule):
                 disable=not self.trainer.is_global_zero,
             )
             for batch in loader:
+                skipped_queries.extend(batch["skipped"])
                 clean = batch["clean_waveforms"].to(self.device)
+                if not len(clean):
+                    continue
                 noise = batch["noise_waveforms"].to(self.device)
                 started = time.perf_counter()
                 clean_tokens = self.online_tokenizer.tokenize(clean)
@@ -1282,12 +1286,25 @@ class AudioLMModule(pl.LightningModule):
                         (len(clean),), snr, device=self.device
                     )
                     mixed, valid = mix_background_noise(clean, noise, requested)
-                    if not valid.all():
-                        raise RuntimeError(
-                            "Fixed random monitor produced invalid noisy audio"
+                    valid_indices = valid.nonzero(as_tuple=False).flatten()
+                    for index in (~valid).nonzero(as_tuple=False).flatten():
+                        row_index = int(index)
+                        skipped_queries.append(
+                            {
+                                "track_id": batch["track_id"][row_index],
+                                "code": batch["code"][row_index],
+                                "view_type": batch["view_type"][row_index],
+                                "start": batch["start"][row_index],
+                                "snr_db": snr,
+                                "error": "noise mixing produced invalid audio",
+                            }
                         )
+                    if not len(valid_indices):
+                        continue
                     started = time.perf_counter()
-                    noisy_tokens = self.online_tokenizer.tokenize(mixed)
+                    noisy_tokens = self.online_tokenizer.tokenize(
+                        mixed[valid]
+                    )
                     if self.device.type == "cuda":
                         torch.cuda.synchronize(self.device)
                     tokenization_seconds += time.perf_counter() - started
@@ -1321,10 +1338,22 @@ class AudioLMModule(pl.LightningModule):
                             result,
                             beam,
                         ) in zip(
-                            batch["track_id"],
-                            batch["code"],
-                            batch["view_type"],
-                            batch["start"],
+                            [
+                                batch["track_id"][int(index)]
+                                for index in valid_indices
+                            ],
+                            [
+                                batch["code"][int(index)]
+                                for index in valid_indices
+                            ],
+                            [
+                                batch["view_type"][int(index)]
+                                for index in valid_indices
+                            ],
+                            [
+                                batch["start"][int(index)]
+                                for index in valid_indices
+                            ],
                             greedy,
                             beams,
                             strict=True,
@@ -1336,7 +1365,7 @@ class AudioLMModule(pl.LightningModule):
         def summarize(selected: list[dict]) -> dict:
             count = len(selected)
             if not count:
-                raise RuntimeError("Random-crop monitor selected no queries")
+                return {}
             beam_codes = [
                 [result.code for result in row["beam"]] for row in selected
             ]
@@ -1388,6 +1417,10 @@ class AudioLMModule(pl.LightningModule):
                 ),
             }
             for view_type in ("canonical", "shifted", "heldout")
+            if any(
+                row["view_type"] == view_type
+                for row in clean_rows + noisy_rows
+            )
         }
         by_snr = {
             f"{snr:g}": summarize(
@@ -1400,20 +1433,26 @@ class AudioLMModule(pl.LightningModule):
             for snr in snr_values
         }
         metrics = {
-            "probe/noise/aggregate/beam_top1": noisy_summary["beam_top1"],
             "probe/noise/online_tokenization_seconds": tokenization_seconds,
         }
+        if noisy_summary:
+            metrics["probe/noise/aggregate/beam_top1"] = noisy_summary[
+                "beam_top1"
+            ]
         for view_type, summaries in by_view.items():
-            metrics[f"probe/clean/{view_type}/beam_top1"] = summaries[
-                "clean"
-            ]["beam_top1"]
-            metrics[f"probe/noise/{view_type}/beam_top1"] = summaries[
-                "noise"
-            ]["beam_top1"]
+            if summaries["clean"]:
+                metrics[f"probe/clean/{view_type}/beam_top1"] = summaries[
+                    "clean"
+                ]["beam_top1"]
+            if summaries["noise"]:
+                metrics[f"probe/noise/{view_type}/beam_top1"] = summaries[
+                    "noise"
+                ]["beam_top1"]
         metrics.update(
             {
                 f"probe/noise/snr_{snr}/beam_top1": summary["beam_top1"]
                 for snr, summary in by_snr.items()
+                if summary
             }
         )
         if self.logger is not None:
@@ -1448,6 +1487,7 @@ class AudioLMModule(pl.LightningModule):
             "by_view": by_view,
             "by_snr": by_snr,
             "tokenization_seconds": tokenization_seconds,
+            "skipped_queries": skipped_queries,
             "queries": serializable_rows,
         }
         path = output_dir(self.cfg) / "probe_metrics.jsonl"

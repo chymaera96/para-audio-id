@@ -180,27 +180,30 @@ class RandomEvaluationCollator:
     def __call__(self, examples: list[dict]) -> dict:
         clean = []
         noise = []
+        valid_examples = []
+        skipped = []
         for row in examples:
-            waveform = load_audio(
-                self.audio_root / row["source_path"],
-                sample_rate=self.sample_rate,
-                start=float(row["start"]),
-                duration=float(row["crop_duration"]),
-                pad=True,
-            )
-            expected = round(self.sample_rate * float(row["crop_duration"]))
-            if (
-                len(waveform) != expected
-                or not np.isfinite(waveform).all()
-                or float(np.sqrt(np.mean(np.square(waveform, dtype=np.float64))))
-                <= 1e-8
-            ):
-                raise ValueError(
-                    f"Fixed tc6 evaluation crop is invalid: {row['source_path']}"
+            try:
+                waveform = load_audio(
+                    self.audio_root / row["source_path"],
+                    sample_rate=self.sample_rate,
+                    start=float(row["start"]),
+                    duration=float(row["crop_duration"]),
+                    pad=True,
                 )
-            clean.append(waveform)
-            noise.append(
-                self.noise_assets.load_validation(
+                expected = round(
+                    self.sample_rate * float(row["crop_duration"])
+                )
+                rms = float(
+                    np.sqrt(np.mean(np.square(waveform, dtype=np.float64)))
+                )
+                if (
+                    len(waveform) != expected
+                    or not np.isfinite(waveform).all()
+                    or rms <= 1e-8
+                ):
+                    raise ValueError("decoded crop is invalid or silent")
+                validation_noise = self.noise_assets.load_validation(
                     stable_uint64(
                         self.seed,
                         row["track_id"],
@@ -208,15 +211,48 @@ class RandomEvaluationCollator:
                         "fixed-evaluation-noise",
                     )
                 )
+            except Exception as exc:
+                skipped.append(
+                    {
+                        "track_id": row["track_id"],
+                        "code": row["code"],
+                        "source_path": row["source_path"],
+                        "view_type": row["view_type"],
+                        "start": row["start"],
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                )
+                continue
+            clean.append(waveform)
+            noise.append(validation_noise)
+            valid_examples.append(row)
+        samples = round(
+            self.sample_rate
+            * (
+                float(valid_examples[0]["crop_duration"])
+                if valid_examples
+                else float(examples[0]["crop_duration"])
             )
+        )
         return {
-            "clean_waveforms": torch.from_numpy(np.stack(clean)),
-            "noise_waveforms": torch.from_numpy(np.stack(noise)),
-            "track_id": [row["track_id"] for row in examples],
-            "code": [row["code"] for row in examples],
-            "start_sample": [row["start_sample"] for row in examples],
-            "start": [row["start"] for row in examples],
-            "view_type": [row["view_type"] for row in examples],
+            "clean_waveforms": torch.from_numpy(
+                np.stack(clean)
+                if clean
+                else np.empty((0, samples), dtype=np.float32)
+            ),
+            "noise_waveforms": torch.from_numpy(
+                np.stack(noise)
+                if noise
+                else np.empty((0, samples), dtype=np.float32)
+            ),
+            "track_id": [row["track_id"] for row in valid_examples],
+            "code": [row["code"] for row in valid_examples],
+            "start_sample": [
+                row["start_sample"] for row in valid_examples
+            ],
+            "start": [row["start"] for row in valid_examples],
+            "view_type": [row["view_type"] for row in valid_examples],
+            "skipped": skipped,
         }
 
 

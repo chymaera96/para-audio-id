@@ -8,8 +8,10 @@ import torch
 from para_audio_id.audio_lm.tokenizer import TokenizerSpec
 from para_audio_id.audio_lm.training import (
     AUGMENTATION_METRICS,
+    TRAIN_LOG_LEVELS,
     TRAIN_METRICS,
     tc6_probe_wandb_keys,
+    tc6_training_wandb_keys,
     train,
 )
 from para_audio_id.audio_lm.vocabulary import AudioLMVocabulary
@@ -192,7 +194,7 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
         train(cfg, checkpoint=invalid)
 
 
-def test_tc7_wandb_keys_match_cleaned_tc6_schema():
+def test_tc7_wandb_keys_match_retained_tc6_schema():
     assert TRAIN_METRICS == {
         "clean_audio_loss",
         "digit_loss",
@@ -208,13 +210,27 @@ def test_tc7_wandb_keys_match_cleaned_tc6_schema():
         "mean_snr_db",
         "online_tokenization_seconds",
     }
+    assert TRAIN_LOG_LEVELS == {"on_step": True, "on_epoch": True}
+    assert tc6_training_wandb_keys() == {
+        "train/clean_audio_loss_step",
+        "train/clean_audio_loss_epoch",
+        "train/digit_loss_step",
+        "train/digit_loss_epoch",
+        "train/consistency_loss_step",
+        "train/consistency_loss_epoch",
+        "train/same_track_cosine_step",
+        "train/same_track_cosine_epoch",
+        "train/different_track_cosine_step",
+        "train/different_track_cosine_epoch",
+        "train/teacher_forced_exact_accuracy_step",
+        "train/teacher_forced_exact_accuracy_epoch",
+        "train/loss_step",
+        "train/loss_epoch",
+    }
     assert tc6_probe_wandb_keys([0.0, 5.0, 10.0, 20.0, 30.0]) == {
         "probe/clean/canonical/beam_top1",
         "probe/clean/shifted/beam_top1",
         "probe/clean/heldout/beam_top1",
-        "probe/noise/canonical/beam_top1",
-        "probe/noise/shifted/beam_top1",
-        "probe/noise/heldout/beam_top1",
         "probe/noise/snr_0/beam_top1",
         "probe/noise/snr_5/beam_top1",
         "probe/noise/snr_10/beam_top1",

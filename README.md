@@ -123,7 +123,8 @@ half-offset crop per track. All three groups are evaluated clean and at
 0/5/10/20/30 dB at step zero, every 2,500 steps, and at completion. Evaluation
 crops are decoded and tokenized online; tc7 still has no runtime token-store
 dependency. W&B uses the same compact metric names as tc6, while complete
-beam Top-1/5/10 and MRR results are appended to `probe_metrics.jsonl`.
+training metrics retain tc6's `_step` and `_epoch` suffixes. Complete beam
+Top-1/5/10 and MRR results are appended to `probe_metrics.jsonl`.
 
 ```bash
 python train.py configs/fma_large.yaml \

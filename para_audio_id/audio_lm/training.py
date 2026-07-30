@@ -81,16 +81,21 @@ AUGMENTATION_METRICS = {
     "mean_snr_db",
     "online_tokenization_seconds",
 }
+TRAIN_LOG_LEVELS = {"on_step": True, "on_epoch": True}
+
+
+def tc6_training_wandb_keys() -> set[str]:
+    return {
+        f"train/{name}_{level}"
+        for name in TRAIN_METRICS | {"loss"}
+        for level in ("step", "epoch")
+    }
 
 
 def tc6_probe_wandb_keys(snr_values: list[float]) -> set[str]:
     return {
         *{
             f"probe/clean/{view_type}/beam_top1"
-            for view_type in ("canonical", "shifted", "heldout")
-        },
-        *{
-            f"probe/noise/{view_type}/beam_top1"
             for view_type in ("canonical", "shifted", "heldout")
         },
         *{
@@ -890,8 +895,7 @@ class AudioLMModule(pl.LightningModule):
             self.log(
                 f"train/{name}",
                 value,
-                on_step=True,
-                on_epoch=False,
+                **TRAIN_LOG_LEVELS,
                 prog_bar=name
                 in {"clean_audio_loss", "teacher_forced_exact_accuracy"},
                 sync_dist=True,
@@ -900,8 +904,7 @@ class AudioLMModule(pl.LightningModule):
         self.log(
             "train/loss",
             loss,
-            on_step=True,
-            on_epoch=False,
+            **TRAIN_LOG_LEVELS,
             sync_dist=True,
             batch_size=batch_size,
         )
@@ -1474,10 +1477,6 @@ class AudioLMModule(pl.LightningModule):
             if summaries["clean"]:
                 metrics[f"probe/clean/{view_type}/beam_top1"] = summaries[
                     "clean"
-                ]["beam_top1"]
-            if summaries["noise"]:
-                metrics[f"probe/noise/{view_type}/beam_top1"] = summaries[
-                    "noise"
                 ]["beam_top1"]
         metrics.update(
             {

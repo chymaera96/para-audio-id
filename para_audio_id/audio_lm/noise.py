@@ -187,7 +187,7 @@ def deterministic_consistency_noise_parameters(
             < schedule.probability
         )
         selected.append(keep)
-        if probabilities is None:
+        if probabilities is None or not keep:
             snrs.append(0.0)
             bins.append(None)
             continue

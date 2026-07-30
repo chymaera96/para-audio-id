@@ -52,7 +52,7 @@ from .random_crops import (
     RandomCropCollator,
     RandomEvaluationCollator,
     RandomEvaluationDataset,
-    make_random_evaluation_manifest,
+    make_tc6_evaluation_manifest,
 )
 from .tokenizer import MuQRVQTokenizer, TokenizerSpec
 from .token_store import TokenStoreIndex
@@ -61,7 +61,7 @@ from .vocabulary import AudioLMVocabulary
 
 TRAINING_PROTOCOL = "online_random_crop_noise_consistency_v1"
 LOSS_PROTOCOL = "tc5_family_weighted_consistency_v2"
-MONITOR_PROTOCOL = "fixed_random_crop_monitor_v1"
+MONITOR_PROTOCOL = "tc6_three_group_monitor_v1"
 TRAIN_METRICS = {
     "base_loss",
     "clean_audio_loss",
@@ -500,21 +500,22 @@ class AudioLMDataModule(pl.LightningDataModule):
             int(self.cfg["evaluation"]["monitor_tracks"]), len(records)
         )
         generator = np.random.default_rng(int(self.cfg["train"]["seed"]) + 919)
-        probe_indices = generator.choice(
-            len(records), size=probe_count, replace=False
+        selected = generator.choice(
+            self.dataset.track_ids, size=probe_count, replace=False
         )
-        probe_records = [records[int(index)] for index in probe_indices]
+        probe_records = [by_track[str(track_id)] for track_id in selected]
         self.probe_track_ids = [record.track_id for record in probe_records]
-        self.monitor_recipes = make_random_evaluation_manifest(
+        self.monitor_recipes = make_tc6_evaluation_manifest(
             probe_records,
             sample_rate=sample_rate,
             crop_duration=crop_duration,
-            seed=int(self.cfg["train"]["seed"]) + 1771,
+            seed=int(self.cfg["train"]["seed"]),
         )
-        self.reserved_starts = {
-            row["track_id"]: int(row["start_sample"])
-            for row in self.monitor_recipes
-        }
+        self.reserved_starts: dict[str, set[int]] = {}
+        for row in self.monitor_recipes:
+            self.reserved_starts.setdefault(row["track_id"], set()).add(
+                int(row["start_sample"])
+            )
         self.evaluation_dataset = RandomEvaluationDataset(self.monitor_recipes)
         corpus_payload = {
             "training_protocol": TRAINING_PROTOCOL,
@@ -662,7 +663,7 @@ class AudioLMModule(pl.LightningModule):
             "noisy_count": 0,
         }
         self.replacement_audit: list[dict] = []
-        self.failure_audit: list[dict] = []
+        self.failed_crop_attempt_audit: list[dict] = []
         self.save_hyperparameters(cfg)
 
     def _step(self, batch: dict, prefix: str) -> torch.Tensor:
@@ -781,8 +782,8 @@ class AudioLMModule(pl.LightningModule):
             math.isclose(float(snr), 0.0) for snr in crop_batch["snrs"]
         )
         self.snr_epoch_counts["noisy_documents"] += realized_noisy
-        self.snr_epoch_counts["skipped_documents"] += len(
-            crop_batch["failures"]
+        self.snr_epoch_counts["skipped_documents"] += int(
+            crop_batch["skipped_documents"]
         )
         augmentation = {
             "scheduled_probability": float(schedule.probability),
@@ -864,7 +865,9 @@ class AudioLMModule(pl.LightningModule):
             ) * noisy_count
             self.conditional_exact["noisy_count"] += noisy_count
         self.replacement_audit.extend(crop_batch["replacements"])
-        self.failure_audit.extend(crop_batch["failures"])
+        self.failed_crop_attempt_audit.extend(
+            crop_batch["failed_crop_attempts"]
+        )
         batch_size = int(batch["input_ids"].shape[0])
         for name, value in metrics.items():
             if name not in TRAIN_METRICS:
@@ -926,7 +929,9 @@ class AudioLMModule(pl.LightningModule):
                 },
                 "snrs": crop_batch["snrs"],
                 "snr_bins": crop_batch["snr_bins"],
-                "failures": crop_batch["failures"],
+                "failed_crop_attempts": crop_batch[
+                    "failed_crop_attempts"
+                ],
                 "replacements": crop_batch["replacements"],
                 "retry_count": int(crop_batch["retry_count"]),
                 "decode_seconds": float(crop_batch["decode_seconds"]),
@@ -1229,7 +1234,7 @@ class AudioLMModule(pl.LightningModule):
         with torch.inference_mode():
             loader = tqdm(
                 self.trainer.datamodule.generation_dataloader(),
-                desc=f"random-crop monitor step {int(self.global_step)}",
+                desc=f"tc6-compatible monitor step {int(self.global_step)}",
                 disable=not self.trainer.is_global_zero,
             )
             for batch in loader:
@@ -1256,13 +1261,17 @@ class AudioLMModule(pl.LightningModule):
                     {
                         "track_id": track_id,
                         "target": code,
+                        "view_type": view_type,
+                        "start": start,
                         "snr_db": None,
                         "greedy": greedy,
                         "beam": beam,
                     }
-                    for track_id, code, greedy, beam in zip(
+                    for track_id, code, view_type, start, greedy, beam in zip(
                         batch["track_id"],
                         batch["code"],
+                        batch["view_type"],
+                        batch["start"],
                         clean_greedy,
                         clean_beams,
                         strict=True,
@@ -1298,13 +1307,24 @@ class AudioLMModule(pl.LightningModule):
                         {
                             "track_id": track_id,
                             "target": code,
+                            "view_type": view_type,
+                            "start": start,
                             "snr_db": snr,
                             "greedy": result,
                             "beam": beam,
                         }
-                        for track_id, code, result, beam in zip(
+                        for (
+                            track_id,
+                            code,
+                            view_type,
+                            start,
+                            result,
+                            beam,
+                        ) in zip(
                             batch["track_id"],
                             batch["code"],
+                            batch["view_type"],
+                            batch["start"],
                             greedy,
                             beams,
                             strict=True,
@@ -1350,6 +1370,25 @@ class AudioLMModule(pl.LightningModule):
         noisy_rows = [row for row in rows if row["snr_db"] is not None]
         clean_summary = summarize(clean_rows)
         noisy_summary = summarize(noisy_rows)
+        by_view = {
+            view_type: {
+                "clean": summarize(
+                    [
+                        row
+                        for row in clean_rows
+                        if row["view_type"] == view_type
+                    ]
+                ),
+                "noise": summarize(
+                    [
+                        row
+                        for row in noisy_rows
+                        if row["view_type"] == view_type
+                    ]
+                ),
+            }
+            for view_type in ("canonical", "shifted", "heldout")
+        }
         by_snr = {
             f"{snr:g}": summarize(
                 [
@@ -1361,15 +1400,19 @@ class AudioLMModule(pl.LightningModule):
             for snr in snr_values
         }
         metrics = {
-            "probe/random/clean/beam_top1": clean_summary["beam_top1"],
-            "probe/random/noise/beam_top1": noisy_summary["beam_top1"],
-            "probe/random/online_tokenization_seconds": tokenization_seconds,
+            "probe/noise/aggregate/beam_top1": noisy_summary["beam_top1"],
+            "probe/noise/online_tokenization_seconds": tokenization_seconds,
         }
+        for view_type, summaries in by_view.items():
+            metrics[f"probe/clean/{view_type}/beam_top1"] = summaries[
+                "clean"
+            ]["beam_top1"]
+            metrics[f"probe/noise/{view_type}/beam_top1"] = summaries[
+                "noise"
+            ]["beam_top1"]
         metrics.update(
             {
-                f"probe/random/noise/snr_{snr}/beam_top1": summary[
-                    "beam_top1"
-                ]
+                f"probe/noise/snr_{snr}/beam_top1": summary["beam_top1"]
                 for snr, summary in by_snr.items()
             }
         )
@@ -1379,6 +1422,8 @@ class AudioLMModule(pl.LightningModule):
             {
                 "track_id": row["track_id"],
                 "target": row["target"],
+                "view_type": row["view_type"],
+                "start": row["start"],
                 "snr_db": row["snr_db"],
                 "greedy": {
                     "code": row["greedy"].code,
@@ -1400,6 +1445,7 @@ class AudioLMModule(pl.LightningModule):
             "global_step": int(self.global_step),
             "clean": clean_summary,
             "noise": noisy_summary,
+            "by_view": by_view,
             "by_snr": by_snr,
             "tokenization_seconds": tokenization_seconds,
             "queries": serializable_rows,
@@ -1672,7 +1718,7 @@ class AudioLMModule(pl.LightningModule):
                 "snr_epoch_counts": self.snr_epoch_counts,
                 "conditional_exact": self.conditional_exact,
                 "replacement_audit": self.replacement_audit,
-                "failure_audit": self.failure_audit,
+                "failed_crop_attempt_audit": self.failed_crop_attempt_audit,
                 "monitor_recipes": self.monitor_recipes,
                 "background_noise_manifest": self.noise_manifest,
                 "documents_consumed": self.documents_consumed,
@@ -1751,7 +1797,9 @@ class AudioLMModule(pl.LightningModule):
         self.replacement_audit = list(
             checkpoint.get("replacement_audit", [])
         )
-        self.failure_audit = list(checkpoint.get("failure_audit", []))
+        self.failed_crop_attempt_audit = list(
+            checkpoint.get("failed_crop_attempt_audit", [])
+        )
         random.setstate(checkpoint["python_rng_state"])
         numpy_state = checkpoint["numpy_rng_state"]
         np.random.set_state(

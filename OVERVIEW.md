@@ -213,10 +213,12 @@ optimizer steps: clean through 20K, a `0→0.75` noise and `0→0.10` consistenc
 ramp through 25K, then a fixed noisy regime through step 70K. There are no
 accuracy gates, effective clocks, pauses, or recovery interventions.
 
-Evaluation uses one persisted random crop for each of 100 monitoring tracks,
-clean and at `0/5/10/20/30 dB`. Grid-token stores are not read by tc7 training
-or evaluation. W&B retains compact beam Top-1 curves while complete greedy,
-beam Top-1/5/10, MRR, protocol, crop, and failure records are written to JSONL.
+Evaluation preserves tc6's seeded 100-track comparison protocol: one balanced
+canonical, integer-shifted, and held-out half-offset position per track, clean
+and at `0/5/10/20/30 dB`. These fixed queries are decoded and tokenized online,
+so neither tc7 training nor evaluation reads grid-token stores. W&B retains
+beam Top-1 curves while complete greedy, beam Top-1/5/10, MRR, protocol,
+position, and failure records are written to JSONL.
 
 ## Interpretation
 

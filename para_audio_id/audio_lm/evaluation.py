@@ -81,7 +81,7 @@ def _checkpoint_tokenizer(checkpoint: dict, device: str) -> MuQRVQTokenizer:
     return tokenizer
 
 
-def _evaluate_random_manifest(
+def _evaluate_tc6_monitor_manifest(
     model,
     vocabulary,
     cfg: dict,
@@ -117,7 +117,7 @@ def _evaluate_random_manifest(
     rows = []
     started = time.perf_counter()
     with torch.inference_mode():
-        for batch in tqdm(loader, desc="fixed random-crop evaluation"):
+        for batch in tqdm(loader, desc="tc6-compatible evaluation"):
             clean = batch["clean_waveforms"].to(device)
             noise = batch["noise_waveforms"].to(device)
             variants = [(None, clean)]
@@ -147,6 +147,8 @@ def _evaluate_random_manifest(
                     {
                         "track_id": track_id,
                         "code": code,
+                        "view_type": view_type,
+                        "start": start,
                         "snr_db": snr,
                         "greedy": result.code,
                         "greedy_ended_with_eos": result.ended_with_eos,
@@ -159,9 +161,11 @@ def _evaluate_random_manifest(
                             for candidate in ranking
                         ],
                     }
-                    for track_id, code, result, ranking in zip(
+                    for track_id, code, view_type, start, result, ranking in zip(
                         batch["track_id"],
                         batch["code"],
+                        batch["view_type"],
+                        batch["start"],
                         greedy,
                         beams,
                         strict=True,
@@ -170,11 +174,30 @@ def _evaluate_random_manifest(
     clean_rows = [row for row in rows if row["snr_db"] is None]
     noisy_rows = [row for row in rows if row["snr_db"] is not None]
     metrics = {
-        "cohort": "fixed_random_probe",
-        "selected_tracks": len(manifest),
+        "cohort": "tc6_fixed_probe",
+        "selected_tracks": len({row["track_id"] for row in manifest}),
         "generation_protocol": "five_autoregressive_digits_then_eos",
         "clean": _generation_metrics(clean_rows),
         "noise": _generation_metrics(noisy_rows),
+        "by_view": {
+            view_type: {
+                "clean": _generation_metrics(
+                    [
+                        row
+                        for row in clean_rows
+                        if row["view_type"] == view_type
+                    ]
+                ),
+                "noise": _generation_metrics(
+                    [
+                        row
+                        for row in noisy_rows
+                        if row["view_type"] == view_type
+                    ]
+                ),
+            }
+            for view_type in ("canonical", "shifted", "heldout")
+        },
         "by_snr": {
             f"{snr:g}": _generation_metrics(
                 [
@@ -377,7 +400,7 @@ def evaluate(
 ) -> dict:
     model, vocabulary, cfg, checkpoint = load_audio_lm(checkpoint_path, device)
     if checkpoint.get("training_protocol") == "online_random_crop_noise_consistency_v1":
-        return _evaluate_random_manifest(
+        return _evaluate_tc6_monitor_manifest(
             model,
             vocabulary,
             cfg,

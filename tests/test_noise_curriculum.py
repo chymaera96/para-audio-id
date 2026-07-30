@@ -219,6 +219,25 @@ def test_tc6_noise_recipe_is_resume_stable_and_changes_by_step():
     assert first != next_step
 
 
+def test_snr_bins_are_only_realized_for_selected_noise():
+    schedule = NoiseConsistencySchedule(
+        0.0,
+        0.1,
+        (0.40, 0.30, 0.20, 0.10),
+        "steady",
+    )
+    selected, snrs, bins = deterministic_consistency_noise_parameters(
+        [11, 12, 13, 14],
+        schedule=schedule,
+        seed=5,
+        step=25_000,
+        batch_idx=7,
+    )
+    assert selected == [False] * 4
+    assert snrs == [0.0] * 4
+    assert bins == [None] * 4
+
+
 @pytest.mark.parametrize(
     ("step", "probability", "weight", "phase"),
     [

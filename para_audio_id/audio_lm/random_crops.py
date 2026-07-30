@@ -22,8 +22,34 @@ from .noise import (
 )
 
 
-CROP_POLICY = "online_random_crop_24k_v1"
+CROP_POLICY = "online_random_crop_24k_v2"
 REPLACEMENT_POLICY = "deterministic_identity_replacement_v1"
+TC6_MONITOR_GRIDS = {
+    "canonical": (0.0, 5.0, 10.0, 15.0, 20.0, 25.0),
+    "shifted": (
+        1.0,
+        2.0,
+        3.0,
+        4.0,
+        6.0,
+        7.0,
+        8.0,
+        9.0,
+        11.0,
+        12.0,
+        13.0,
+        14.0,
+        16.0,
+        17.0,
+        18.0,
+        19.0,
+        21.0,
+        22.0,
+        23.0,
+        24.0,
+    ),
+    "heldout": (2.5, 7.5, 12.5, 17.5, 22.5),
+}
 
 
 def random_start_sample(
@@ -37,7 +63,7 @@ def random_start_sample(
     pair_slot: int,
     role: int,
     attempt: int = 0,
-    reserved_sample: int | None = None,
+    reserved_sample: int | set[int] | list[int] | tuple[int, ...] | None = None,
 ) -> int:
     source_samples = max(0, round(float(record.duration) * sample_rate))
     maximum = max(0, source_samples - crop_samples)
@@ -53,42 +79,48 @@ def random_start_sample(
         attempt,
         "crop-start",
     ) % (maximum + 1)
-    if reserved_sample is not None and start == reserved_sample:
-        start = (start + 1) % (maximum + 1)
+    if reserved_sample is not None:
+        reserved = (
+            {reserved_sample}
+            if isinstance(reserved_sample, int)
+            else set(reserved_sample)
+        )
+        for _ in range(maximum + 1):
+            if start not in reserved:
+                break
+            start = (start + 1) % (maximum + 1)
+        else:
+            raise ValueError(
+                f"Every valid crop start is reserved for track {record.track_id}"
+            )
     return int(start)
 
 
-def make_random_evaluation_manifest(
+def make_tc6_evaluation_manifest(
     records: list[CatalogueRecord],
     *,
     sample_rate: int,
     crop_duration: float,
     seed: int,
 ) -> list[dict]:
-    crop_samples = round(sample_rate * crop_duration)
     rows = []
-    half_second = max(1, sample_rate // 2)
-    for record in records:
-        maximum = max(0, round(record.duration * sample_rate) - crop_samples)
-        start = (
-            stable_uint64(seed, record.track_id, "fixed-random-evaluation")
-            % (maximum + 1)
-            if maximum
-            else 0
-        )
-        if maximum and start % half_second == 0:
-            start = (start + 1) % (maximum + 1)
-        rows.append(
-            {
-                "track_id": record.track_id,
-                "code": record.code,
-                "source_path": record.path,
-                "source_duration": float(record.duration),
-                "start_sample": int(start),
-                "start": float(start / sample_rate),
-                "crop_duration": float(crop_duration),
-            }
-        )
+    for track_offset, record in enumerate(records):
+        for view_offset, (view_type, starts) in enumerate(
+            TC6_MONITOR_GRIDS.items()
+        ):
+            start = starts[(track_offset + seed + view_offset) % len(starts)]
+            rows.append(
+                {
+                    "track_id": record.track_id,
+                    "code": record.code,
+                    "source_path": record.path,
+                    "source_duration": float(record.duration),
+                    "start_sample": round(float(start) * sample_rate),
+                    "start": float(start),
+                    "crop_duration": float(crop_duration),
+                    "view_type": view_type,
+                }
+            )
     return rows
 
 
@@ -164,7 +196,7 @@ class RandomEvaluationCollator:
                 <= 1e-8
             ):
                 raise ValueError(
-                    f"Fixed random evaluation crop is invalid: {row['source_path']}"
+                    f"Fixed tc6 evaluation crop is invalid: {row['source_path']}"
                 )
             clean.append(waveform)
             noise.append(
@@ -183,6 +215,8 @@ class RandomEvaluationCollator:
             "track_id": [row["track_id"] for row in examples],
             "code": [row["code"] for row in examples],
             "start_sample": [row["start_sample"] for row in examples],
+            "start": [row["start"] for row in examples],
+            "view_type": [row["view_type"] for row in examples],
         }
 
 
@@ -254,7 +288,7 @@ class RandomCropCollator:
         sample_rate: int,
         crop_duration: float,
         seed: int,
-        reserved_starts: dict[str, int],
+        reserved_starts: dict[str, set[int]],
         crop_retries: int = 4,
         replacement_retries: int = 32,
     ):
@@ -526,9 +560,12 @@ class RandomCropCollator:
             "planned_optimizer_step": int(optimizer_step),
             "planned_batch_idx": int(batch_idx),
             "schedule": asdict(schedule),
-            "snr_bins": [pair["snr_bin"] for pair in pairs],
+            "snr_bins": [
+                pair["snr_bin"] for pair in pairs if pair["is_noisy"]
+            ],
             "snrs": [pair["snr_db"] for pair in pairs if pair["is_noisy"]],
-            "failures": failures,
+            "failed_crop_attempts": failures,
+            "skipped_documents": 0,
             "replacements": replacements,
             "retry_count": sum(pair["retry_count"] for pair in pairs),
             "decode_seconds": decode_seconds,

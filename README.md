@@ -117,10 +117,13 @@ The single-GPU logical batch is 32 tracks × 2 segments: a physical microbatch o
 four tracks × two segments with eight gradient-accumulation steps.
 
 The run is exactly 70,000 optimizer steps. Checkpoints are saved every 500
-steps. A fixed manifest containing one held-out random crop for each of 100
-tracks is evaluated clean and at 0/5/10/20/30 dB at step zero, every 2,500
-steps, and at completion. W&B receives compact beam Top-1 curves; complete
-greedy/beam results are appended to `probe_metrics.jsonl`.
+steps. For direct comparison with tc6, the same seeded 100-track cohort is
+evaluated using one balanced canonical, integer-shifted, and held-out
+half-offset crop per track. All three groups are evaluated clean and at
+0/5/10/20/30 dB at step zero, every 2,500 steps, and at completion. Evaluation
+crops are decoded and tokenized online; tc7 still has no runtime token-store
+dependency. W&B receives beam Top-1 curves, while complete greedy/beam results
+are appended to `probe_metrics.jsonl`.
 
 ```bash
 python train.py configs/fma_large.yaml \

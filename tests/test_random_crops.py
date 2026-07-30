@@ -7,7 +7,7 @@ from para_audio_id.audio_lm.random_crops import (
     OnlineTrackBatchSampler,
     OnlineTrackDataset,
     RandomCropCollator,
-    make_random_evaluation_manifest,
+    make_tc6_evaluation_manifest,
     random_start_sample,
 )
 
@@ -42,17 +42,25 @@ def test_random_starts_are_deterministic_in_range_and_role_specific():
     assert first != second
 
 
-def test_random_manifest_is_stable_non_grid_and_reserved():
+def test_tc6_monitor_manifest_is_stable_balanced_and_reserved():
     selected = records(4)
-    first = make_random_evaluation_manifest(
+    first = make_tc6_evaluation_manifest(
         selected, sample_rate=24_000, crop_duration=5.0, seed=9
     )
-    repeated = make_random_evaluation_manifest(
+    repeated = make_tc6_evaluation_manifest(
         selected, sample_rate=24_000, crop_duration=5.0, seed=9
     )
     assert first == repeated
-    assert all(row["start_sample"] % 12_000 for row in first)
+    assert len(first) == 3 * len(selected)
+    assert {row["view_type"] for row in first} == {
+        "canonical",
+        "shifted",
+        "heldout",
+    }
     record = selected[0]
+    reserved = {
+        row["start_sample"] for row in first if row["track_id"] == record.track_id
+    }
     training = random_start_sample(
         record,
         sample_rate=24_000,
@@ -62,9 +70,9 @@ def test_random_manifest_is_stable_non_grid_and_reserved():
         batch_idx=0,
         pair_slot=0,
         role=0,
-        reserved_sample=first[0]["start_sample"],
+        reserved_sample=reserved,
     )
-    assert training != first[0]["start_sample"]
+    assert training not in reserved
 
 
 def test_online_track_sampler_replays_exact_batches():
@@ -173,6 +181,11 @@ def test_noisy_pairs_share_start_and_bad_identity_is_replaced(tmp_path):
         reserved_starts={},
     )(examples)
     assert batch["replacements"]
+    assert batch["failed_crop_attempts"]
+    assert batch["skipped_documents"] == 0
+    assert len(batch["snr_bins"]) == sum(
+        row["is_noisy"] for row in batch["metadata"]
+    )
     assert len({row["track_id"] for row in batch["metadata"]}) == 4
     for offset in range(0, 8, 2):
         first, second = batch["metadata"][offset : offset + 2]

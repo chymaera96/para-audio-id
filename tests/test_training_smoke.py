@@ -174,8 +174,11 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
         == "online_random_crop_noise_consistency_v1"
     )
     assert checkpoint["loss_protocol"] == "tc5_family_weighted_consistency_v2"
-    assert checkpoint["monitor_protocol"] == "fixed_random_crop_monitor_v1"
-    assert len(checkpoint["monitor_recipes"]) == 2
+    assert checkpoint["monitor_protocol"] == "tc6_three_group_monitor_v1"
+    assert len(checkpoint["monitor_recipes"]) == 6
+    assert {
+        row["view_type"] for row in checkpoint["monitor_recipes"]
+    } == {"canonical", "shifted", "heldout"}
 
     invalid = tmp_path / "invalid.ckpt"
     checkpoint["training_protocol"] = "noise_consistency_curriculum_v1"

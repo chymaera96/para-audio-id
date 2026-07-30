@@ -92,7 +92,7 @@ class AdaptiveCurriculum:
         *,
         global_step: int,
         shifted_teacher_forced_exact: float,
-        shifted_greedy_top1: float,
+        shifted_beam_top1: float,
         consistency_is_active: bool,
     ) -> ProbeDecision:
         if not self.gate_open:
@@ -101,7 +101,7 @@ class AdaptiveCurriculum:
             if shifted_teacher_forced_exact >= self.gate_threshold:
                 self.gate_open = True
                 self.gate_open_step = global_step
-                self.regression_baseline = shifted_greedy_top1
+                self.regression_baseline = shifted_beam_top1
                 return ProbeDecision(event="gate_opened")
             if global_step >= self.clean_steps + self.gate_max_extra_steps:
                 return ProbeDecision(
@@ -115,7 +115,7 @@ class AdaptiveCurriculum:
         if self.regression_baseline is None:
             raise RuntimeError("Open gate is missing its regression baseline")
         recovered = (
-            shifted_greedy_top1
+            shifted_beam_top1
             >= self.regression_baseline - self.regression_drop
         )
         if self.recovery_active:

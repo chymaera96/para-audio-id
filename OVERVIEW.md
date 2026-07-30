@@ -155,7 +155,6 @@ Additional details:
   positions under clean audio and validation noise at `0, 5, 10, 20, 30` dB.
 - Silent/corrupt monitoring excerpts retain their cached clean evaluation but
   are skipped for noisy SNR evaluation, where the SNR would be undefined.
-  Evaluated and skipped counts are logged.
 - Normal resume restores model, optimizer, scheduler, global step, sampler
   progress, RNG state, curriculum position, and deterministic augmentation
   choices.
@@ -184,10 +183,12 @@ background-noise assets. Its intervention is at the causal identifier boundary:
 The nominal run is 70K effective steps: 20K clean-only followed by a 50K
 noise/consistency curriculum. At 20K, clean integer-shifted teacher-forced exact
 accuracy must reach 0.5 before the curriculum clock opens. A clean shifted
-Top-1 regression can freeze the curriculum, halve consistency weight, and extend
-the raw run. The hard ceiling is 120K raw optimizer steps, including the gate
-and single recovery allowances. LR decay follows the effective clock and pauses
-with the curriculum.
+beam Top-1 regression can freeze the curriculum, halve consistency weight, and
+extend the raw run. The hard ceiling is 120K raw optimizer steps, including the
+gate and single recovery allowances. LR decay follows the effective clock and
+pauses with the curriculum. Its W&B monitor is beam-only and omits Top-5/10,
+MRR, greedy, evaluated/skipped, and redundant per-view/per-SNR cross-product
+plots.
 
 The SNR curriculum moves categorical probability mass from easy 20–30 dB noise
 toward 0–10 dB noise. In its final phase, approximately 10% of noisy views are

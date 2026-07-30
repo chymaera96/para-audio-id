@@ -23,14 +23,14 @@ def test_gate_pauses_effective_clock_opens_and_times_out():
     waiting = state.observe_probe(
         global_step=20_000,
         shifted_teacher_forced_exact=0.49,
-        shifted_greedy_top1=0.7,
+        shifted_beam_top1=0.7,
         consistency_is_active=False,
     )
     assert waiting.event == "gate_waiting"
     opened = state.observe_probe(
         global_step=25_000,
         shifted_teacher_forced_exact=0.5,
-        shifted_greedy_top1=0.8,
+        shifted_beam_top1=0.8,
         consistency_is_active=False,
     )
     assert opened.event == "gate_opened"
@@ -40,7 +40,7 @@ def test_gate_pauses_effective_clock_opens_and_times_out():
     timed_out = make_curriculum().observe_probe(
         global_step=50_000,
         shifted_teacher_forced_exact=0.49,
-        shifted_greedy_top1=0.7,
+        shifted_beam_top1=0.7,
         consistency_is_active=False,
     )
     assert "gate allowance" in timed_out.failure
@@ -51,13 +51,13 @@ def test_recovery_freezes_clock_halves_weight_and_fails_on_recurrence():
     state.observe_probe(
         global_step=20_000,
         shifted_teacher_forced_exact=0.5,
-        shifted_greedy_top1=0.8,
+        shifted_beam_top1=0.8,
         consistency_is_active=False,
     )
     started = state.observe_probe(
         global_step=25_000,
         shifted_teacher_forced_exact=0.8,
-        shifted_greedy_top1=0.74,
+        shifted_beam_top1=0.74,
         consistency_is_active=True,
     )
     assert started.event == "recovery_started"
@@ -67,14 +67,14 @@ def test_recovery_freezes_clock_halves_weight_and_fails_on_recurrence():
     first = state.observe_probe(
         global_step=27_500,
         shifted_teacher_forced_exact=0.8,
-        shifted_greedy_top1=0.75,
+        shifted_beam_top1=0.75,
         consistency_is_active=True,
     )
     assert first.event == "recovery_waiting"
     recovered = state.observe_probe(
         global_step=30_000,
         shifted_teacher_forced_exact=0.8,
-        shifted_greedy_top1=0.76,
+        shifted_beam_top1=0.76,
         consistency_is_active=True,
     )
     assert recovered.event == "recovery_completed"
@@ -83,7 +83,7 @@ def test_recovery_freezes_clock_halves_weight_and_fails_on_recurrence():
     recurrence = state.observe_probe(
         global_step=32_500,
         shifted_teacher_forced_exact=0.8,
-        shifted_greedy_top1=0.70,
+        shifted_beam_top1=0.70,
         consistency_is_active=True,
     )
     assert "second time" in recurrence.failure
@@ -94,13 +94,13 @@ def test_recovery_timeout_and_state_round_trip():
     state.observe_probe(
         global_step=20_000,
         shifted_teacher_forced_exact=0.5,
-        shifted_greedy_top1=0.8,
+        shifted_beam_top1=0.8,
         consistency_is_active=False,
     )
     state.observe_probe(
         global_step=25_000,
         shifted_teacher_forced_exact=0.8,
-        shifted_greedy_top1=0.7,
+        shifted_beam_top1=0.7,
         consistency_is_active=True,
     )
     payload = state.state_dict()
@@ -110,7 +110,7 @@ def test_recovery_timeout_and_state_round_trip():
     failure = restored.observe_probe(
         global_step=45_000,
         shifted_teacher_forced_exact=0.8,
-        shifted_greedy_top1=0.7,
+        shifted_beam_top1=0.7,
         consistency_is_active=True,
     )
     assert "recover within" in failure.failure
@@ -135,7 +135,7 @@ def test_lr_uses_frozen_effective_clock_and_finishes_at_zero():
     state.observe_probe(
         global_step=20_000,
         shifted_teacher_forced_exact=0.4,
-        shifted_greedy_top1=0.2,
+        shifted_beam_top1=0.2,
         consistency_is_active=False,
     )
     first = effective_cosine_multiplier(

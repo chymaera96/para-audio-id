@@ -253,6 +253,7 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
     assert checkpoint["global_step"] == 8
     assert checkpoint["training_protocol"] == "noise_consistency_curriculum_v1"
     assert checkpoint["loss_protocol"] == "tc5_family_weighted_consistency_v2"
+    assert checkpoint["monitor_protocol"] == "compact_beam_monitor_v2"
     assert checkpoint["adaptive_curriculum_state"]["gate_open"]
     assert "snr_epoch_counts" in checkpoint
     train(cfg, checkpoint=last)

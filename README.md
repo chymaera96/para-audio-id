@@ -162,12 +162,14 @@ four tracks × two segments with eight gradient-accumulation steps.
 
 The nominal run is 70,000 effective optimizer steps. At 20K, the curriculum
 waits for clean shifted teacher-forced exact accuracy of at least 0.5. A
-five-point clean shifted Top-1 regression freezes the curriculum, halves its
-consistency multiplier, and waits for recovery. The LR cosine follows this
+five-point clean shifted beam Top-1 regression freezes the curriculum, halves
+its consistency multiplier, and waits for recovery. The LR cosine follows this
 effective clock, not paused raw steps. Gate and recovery allowances give a 120K
 raw-step hard ceiling. Checkpoints are saved every 500 raw steps. A fixed
-100-track greedy/beam monitor runs at step zero, every 2,500 raw steps, and at
+100-track beam-only monitor runs at step zero, every 2,500 raw steps, and at
 completion over canonical, integer-shifted, and held-out half-shifted views.
+W&B records beam Top-1 only; it omits greedy, Top-5/10, MRR,
+evaluated/skipped counts, and the full view-by-SNR cross-product.
 
 ```bash
 python train.py configs/fma_large.yaml \

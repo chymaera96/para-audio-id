@@ -99,6 +99,27 @@ def noise_consistency_schedule(
     )
 
 
+def tc7_noise_consistency_schedule(step: int) -> NoiseConsistencySchedule:
+    if step < 0:
+        raise ValueError("Global step cannot be negative")
+    if step < 20_000:
+        return NoiseConsistencySchedule(0.0, 0.0, None, "clean")
+    if step < 25_000:
+        progress = (step - 20_000) / 5_000
+        return NoiseConsistencySchedule(
+            0.75 * progress,
+            0.10 * progress,
+            (0.40, 0.30, 0.20, 0.10),
+            "ramp",
+        )
+    return NoiseConsistencySchedule(
+        0.75,
+        0.10,
+        (0.40, 0.30, 0.20, 0.10),
+        "steady",
+    )
+
+
 def stable_uint64(*values: object) -> int:
     payload = ":".join(str(value) for value in values).encode()
     return int.from_bytes(hashlib.sha256(payload).digest()[:8], "big")
@@ -181,7 +202,7 @@ def deterministic_consistency_noise_parameters(
         name, minimum, maximum = SNR_BINS[bin_index]
         bins.append(name)
         if (
-            schedule.phase == "consolidation"
+            schedule.phase in {"consolidation", "ramp", "steady"}
             and name == "very_hard"
             and stable_uniform(seed, step, batch_idx, pair, key, "exact-zero")
             < 0.25

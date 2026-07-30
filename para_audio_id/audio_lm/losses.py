@@ -186,8 +186,9 @@ def noise_consistency_losses(
     shifted_logits = logits[:, :-1, :]
     shifted_targets = input_ids[:, 1:]
     clean_rows = ~is_noisy.bool()
+    noisy_rows = is_noisy.bool()
     clean_mask = clean_rows[:, None]
-    noisy_mask = is_noisy.bool()[:, None]
+    noisy_mask = noisy_rows[:, None]
 
     clean_audio_loss = masked_cross_entropy(
         shifted_logits,
@@ -298,6 +299,23 @@ def noise_consistency_losses(
         boundary_target_mask,
         id_digit_weight=id_digit_weight,
     )
+    predictions = shifted_logits.argmax(dim=-1)
+    row_exact = ((predictions == shifted_targets) | ~id_target_mask).all(dim=1)
+    clean_exact = row_exact[clean_rows].float().mean()
+    noisy_exact = (
+        row_exact[noisy_rows].float().mean()
+        if noisy_rows.any()
+        else torch.full_like(clean_exact, float("nan"))
+    )
+    digit_correct = (predictions == shifted_targets) & id_target_mask
+    clean_digit_accuracy = (
+        digit_correct[clean_rows].sum() / id_target_mask[clean_rows].sum()
+    )
+    noisy_digit_accuracy = (
+        digit_correct[noisy_rows].sum() / id_target_mask[noisy_rows].sum()
+        if noisy_rows.any()
+        else torch.full_like(clean_digit_accuracy, float("nan"))
+    )
     return total, {
         "loss": total,
         "base_loss": base_loss,
@@ -334,4 +352,8 @@ def noise_consistency_losses(
         "teacher_forced_exact_accuracy": legacy[
             "teacher_forced_exact_accuracy"
         ],
+        "clean_teacher_forced_digit_accuracy": clean_digit_accuracy,
+        "noisy_teacher_forced_digit_accuracy": noisy_digit_accuracy,
+        "clean_teacher_forced_exact_accuracy": clean_exact,
+        "noisy_teacher_forced_exact_accuracy": noisy_exact,
     }

@@ -36,15 +36,26 @@ def test_real_muq_rvq_probe():
         device=os.environ.get("MUQ_DEVICE", "cuda"),
         lightweight=True,
     )
-    lightweight_tokens = lightweight.tokenize(waveform)
-    assert torch.equal(lightweight_tokens[0].cpu(), audio_tokens)
+    anchors = torch.cat(
+        [waveform.roll(index * 1_000, dims=1) for index in range(4)]
+    ).to(lightweight.device)
+    noises = anchors.roll(7_000, dims=1)
     mixed, valid = mix_background_noise(
-        waveform.to(lightweight.device),
-        waveform.roll(7_000, dims=1).to(lightweight.device),
-        torch.tensor([5.0], device=lightweight.device),
+        anchors,
+        noises,
+        torch.tensor([0.0, 5.0, 10.0, 20.0], device=lightweight.device),
     )
     assert valid.all()
-    noisy_tokens = lightweight.tokenize(mixed)[0].cpu()
+    online_waveforms = torch.stack(
+        [
+            value
+            for pair in zip(anchors, mixed, strict=True)
+            for value in pair
+        ]
+    )
+    lightweight_tokens = lightweight.tokenize(online_waveforms)
+    assert torch.equal(lightweight_tokens[0].cpu(), audio_tokens)
+    assert lightweight_tokens.shape == (8, 250)
     cfg = {
         "model": {
             "architecture": "gpt2",
@@ -59,23 +70,24 @@ def test_real_muq_rvq_probe():
         }
     }
     model = AudioCausalLM(cfg, tokenizer.vocabulary).to(tokenizer.device)
+    examples = []
+    is_noisy = []
+    for pair in range(4):
+        for role, tokens in enumerate(
+            lightweight_tokens[pair * 2 : pair * 2 + 2].cpu()
+        ):
+            examples.append(
+                {
+                    "audio_tokens": tokens,
+                    "code": f"{pair:05d}",
+                    "track_id": f"integration-{pair}",
+                    "document_index": pair * 2 + role,
+                    "view_type": "noisy" if role else "random_clean",
+                }
+            )
+            is_noisy.append(bool(role))
     batch = collate_causal_documents(
-        [
-            {
-                "audio_tokens": audio_tokens,
-                "code": "01234",
-                "track_id": "integration",
-                "document_index": 0,
-                "view_type": "canonical",
-            },
-            {
-                "audio_tokens": noisy_tokens,
-                "code": "01234",
-                "track_id": "integration",
-                "document_index": 1,
-                "view_type": "noisy",
-            },
-        ],
+        examples,
         tokenizer.vocabulary,
         512,
     )
@@ -91,7 +103,7 @@ def test_real_muq_rvq_probe():
         batch["audio_target_mask"].to(tokenizer.device),
         batch["id_target_mask"].to(tokenizer.device),
         batch["boundary_target_mask"].to(tokenizer.device),
-        torch.tensor([False, True], device=tokenizer.device),
+        torch.tensor(is_noisy, device=tokenizer.device),
         batch["track_id"],
         id_digit_weight=20.0,
         consistency_weight=0.1,

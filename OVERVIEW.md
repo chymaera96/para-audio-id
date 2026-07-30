@@ -199,6 +199,25 @@ tc6. Corrected checkpoints additionally use
 loss marker used the incorrectly rescaled objective and is deliberately
 incompatible; tc6 must be restarted from random initialization.
 
+## `tc7`: continuous online crop coverage
+
+`tc7` starts from random weights on the same 10K identities but removes the
+canonical/shifted crop grids entirely. Every selected track supplies two
+deterministic random five-second crops decoded online. When noise is selected,
+the second row is a noisy version of the exact clean anchor crop. All eight
+final waveforms are tokenized together by the frozen lightweight MuQ Mel-RVQ
+path.
+
+The corrected tc6 loss is unchanged. The schedule is simpler and follows raw
+optimizer steps: clean through 20K, a `0→0.75` noise and `0→0.10` consistency
+ramp through 25K, then a fixed noisy regime through step 70K. There are no
+accuracy gates, effective clocks, pauses, or recovery interventions.
+
+Evaluation uses one persisted random crop for each of 100 monitoring tracks,
+clean and at `0/5/10/20/30 dB`. Grid-token stores are not read by tc7 training
+or evaluation. W&B retains compact beam Top-1 curves while complete greedy,
+beam Top-1/5/10, MRR, protocol, crop, and failure records are written to JSONL.
+
 ## Interpretation
 
 The progression isolates five questions:
@@ -211,6 +230,8 @@ The progression isolates five questions:
    destroying clean and shifted identification?
 5. `tc6`: can the causal identifier state become noise invariant without
    rewarding prediction of corruption-dependent noisy audio tokens?
+6. `tc7`: can continuous online temporal coverage replace hand-selected crop
+   grids while retaining the corrected noise-consistency objective?
 
 Teacher-forced digit accuracy is useful for optimization diagnostics, but the
 scientific identification result is free-running exact accuracy and beam

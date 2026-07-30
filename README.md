@@ -59,55 +59,17 @@ codebooks to time-major tokens, and confirms the complete causal document fits t
 Failure is a hard blocker. The pipeline does not substitute rounded continuous
 features or another codec.
 
-## Offline catalogue tokenization
+## Historical offline tokenization utilities
 
-After the probe passes:
+The repository still contains the older cache-preparation commands, but tc7
+does not use canonical, shifted, or half-offset token stores for training or
+evaluation. They remain useful only when reproducing tc2–tc6 from Git history.
 
-```bash
-python tokenize_catalogue.py configs/fma_large.yaml
-```
-
-The default output is:
-
-```text
-/gpfs/scratch/acw723/para-audio-id/audio_lm_tokens
-```
-
-The corpus contains six canonical five-second documents per catalogue track.
-Tokens are stored as atomic, memory-mappable `uint16` shards. Each shard has a
-JSONL span index and metadata containing the resolved tokenizer specification and
-fingerprint. Reruns skip complete compatible shards, rebuild incomplete shards,
-and refuse incompatible cache contents. `tokenization_report.json` accounts for
-every intended document and every explicit failure.
-
-Token shards are training artifacts and are never loaded by identification.
-
-For paired-shift training, first copy the exact cohort from the completed
-canonical 10K run:
+tc7 needs only the established 10K identity manifest:
 
 ```bash
-cp logs/fma-large-audio-lm/<canonical-10k-run>/training_tracks.json \
-  data/training_tracks_10k.json
+test -f data/training_tracks_10k.json
 ```
-
-Then prepare the two new, role-separated stores:
-
-```bash
-python prepare_paired_tokens.py configs/fma_large.yaml
-```
-
-This reuses the canonical cache and creates:
-
-```text
-/gpfs/scratch/acw723/para-audio-id/audio_lm_tokens_shifted_training_10k
-/gpfs/scratch/acw723/para-audio-id/audio_lm_tokens_heldout_evaluation_10k
-```
-
-The shifted-training store contains standalone crops at integer noncanonical
-starts. The evaluation-only store contains half-offset crops and is rejected by
-the training sampler. Both stores record their role, view policy, exact cohort,
-tokenizer fingerprint, source duration, and any zero-padding applied to short
-recordings. Preparation resumes at complete shard boundaries.
 
 ## Training
 
@@ -116,11 +78,11 @@ hidden size 768, 12 heads, tied embeddings, and no dropout. The vocabulary has
 2,048 collision-free audio tokens, `[BOS]`, `[ID]`, ten dedicated digit tokens,
 and `[EOS]`.
 
-The tc6 experiment reuses the exact 10,000 identities and cached canonical and
-shifted tokens. A non-noisy identity contributes its canonical/shifted pair; a
-noisy identity contributes an exact same-segment clean/noisy pair. Noisy audio
-tokens remain in the causal input, but their audio-token prediction targets are
-masked. Clean and noisy digit and boundary targets remain active.
+tc7 uses the exact established 10,000 identities but samples every five-second
+crop online. Each selected identity contributes two independently sampled clean
+crops, or an exact same-crop clean/noisy pair when noise is selected. Workers
+decode the final waveforms and one frozen lightweight MuQ call tokenizes all
+eight documents in each physical microbatch.
 
 ```text
 loss =
@@ -137,44 +99,33 @@ final-layer `[ID]` states. The clean state is detached for this term; the noisy
 state, transformer, and noisy input embeddings retain gradients. Each loss
 family is computed as a mean, then recombined with tc5's effective family
 coefficients: approximately 0.710 audio, 0.284 digits, and 0.006 boundaries.
-Thus tc6 exactly matches tc5's base loss when no rows are noisy. The previous
+Thus tc7 exactly matches tc5's base loss when no rows are noisy. The previous
 tc5 weighted-token loss is also logged as a detached comparison metric.
 Checkpoints record the `tc5_family_weighted_consistency_v2` loss protocol.
-Pre-fix tc6 checkpoints are rejected on resume because their optimizer and
-model states were trained with a materially different objective.
 
-| Effective steps | Noise probability | Consistency weight |
+| Raw steps | Noise probability | Consistency weight |
 | ---: | ---: | ---: |
 | 0–20K | 0 | 0 |
-| 20–30K | 0 → 0.25 | 0 → 0.05 |
-| 30–40K | 0.25 → 0.50 | 0.05 → 0.10 |
-| 40–55K | 0.50 → 0.75 | 0.10 |
-| 55–70K | 0.75 | 0.10 |
+| 20–25K | 0 → 0.75 | 0 → 0.10 |
+| 25–70K | 0.75 | 0.10 |
 
-Clean documents always use the existing token shards. Noisy waveforms are mixed
-at the requested RMS SNR and passed through a frozen, component-only MuQ Mel-RVQ
-tokenizer once per microbatch. SNR is sampled from a categorical curriculum that
-moves mass from 20–30 dB toward 0–10 dB; approximately 10% of final noisy views
-are exactly 0 dB. Only background noise is enabled.
+Noisy examples use fixed SNR-bin probabilities `0.40/0.30/0.20/0.10` for
+`0–5/5–10/10–20/20–30 dB`; 10% of noisy views are exactly 0 dB. The LR uses
+ordinary raw-step warm-up and cosine decay without gates, pauses, or recovery.
 
 The single-GPU logical batch is 32 tracks × 2 segments: a physical microbatch of
 four tracks × two segments with eight gradient-accumulation steps.
 
-The nominal run is 70,000 effective optimizer steps. At 20K, the curriculum
-waits for clean shifted teacher-forced exact accuracy of at least 0.5. A
-five-point clean shifted beam Top-1 regression freezes the curriculum, halves
-its consistency multiplier, and waits for recovery. The LR cosine follows this
-effective clock, not paused raw steps. Gate and recovery allowances give a 120K
-raw-step hard ceiling. Checkpoints are saved every 500 raw steps. A fixed
-100-track beam-only monitor runs at step zero, every 2,500 raw steps, and at
-completion over canonical, integer-shifted, and held-out half-shifted views.
-W&B records beam Top-1 only; it omits greedy, Top-5/10, MRR,
-evaluated/skipped counts, and the full view-by-SNR cross-product.
+The run is exactly 70,000 optimizer steps. Checkpoints are saved every 500
+steps. A fixed manifest containing one held-out random crop for each of 100
+tracks is evaluated clean and at 0/5/10/20/30 dB at step zero, every 2,500
+steps, and at completion. W&B receives compact beam Top-1 curves; complete
+greedy/beam results are appended to `probe_metrics.jsonl`.
 
 ```bash
 python train.py configs/fma_large.yaml \
   --devices 1 \
-  --run-id tc6 \
+  --run-id tc7 \
   --wandb-online
 ```
 
@@ -184,7 +135,7 @@ state:
 ```bash
 python train.py configs/fma_large.yaml \
   --devices 1 \
-  --run-id tc6 \
+  --run-id tc7 \
   --wandb-online \
   --resume
 ```
@@ -195,12 +146,10 @@ Checkpoints are written every 500 optimizer steps under:
 /gpfs/scratch/acw723/para-audio-id/audio-lm-checkpoints/<run-id>/
 ```
 
-Checkpoints embed the vocabulary, exact cohort, view grids, monitor recipes,
-noise-manifest fingerprints, corpus and tokenizer fingerprints, and code
-mapping. They also preserve the tc6 gate, effective clock, regression baseline,
-recovery state, consistency multiplier, and SNR counters. Interruption resume is
-accepted only when all training-protocol and asset metadata match; tc5
-checkpoints are incompatible.
+Checkpoints embed the vocabulary, exact cohort, random-crop and replacement
+policies, fixed monitor manifest, noise/tokenizer fingerprints, sampler state,
+RNG state, and code mapping. Resume is accepted only for compatible tc7
+checkpoints; tc5/tc6 checkpoints are rejected.
 
 PyTorch deterministic algorithms and seeded Python, NumPy, Torch, samplers, and
 workers are enabled. `deterministic_warn_only: true` reports CUDA operations for
@@ -208,18 +157,17 @@ which PyTorch cannot promise bitwise determinism instead of aborting a long run.
 
 ## Evaluation and inference
 
-Post-run evaluation reads all six canonical and all five held-out cached positions:
+Post-run evaluation uses the checkpoint's fixed 100-query random manifest and
+tokenizes clean and noisy query audio online:
 
 ```bash
 python evaluate.py \
-  /gpfs/scratch/acw723/para-audio-id/audio-lm-checkpoints/paired-10k-100k/last.ckpt \
-  evaluation-paired-10k.json \
-  --cohort training \
-  --expected-tracks 10000
+  /gpfs/scratch/acw723/para-audio-id/audio-lm-checkpoints/tc7/last.ckpt \
+  evaluation-tc7-random.json
 ```
 
-It reports greedy exact accuracy, beam Top-1/5/10, MRR, and protocol validity
-separately for canonical views, held-out views, and every individual start.
+It reports clean and per-SNR greedy exact accuracy, beam Top-1/5/10, MRR, and
+protocol validity.
 Batched generation receives only `[BOS] audio [ID]` and produces five digits plus
 `[EOS]`; it uses no teacher forcing or catalogue-derived valid-code constraint.
 
@@ -234,24 +182,6 @@ python identify.py \
 
 The five-digit exact random baseline is `1e-5`. A functioning pipeline is not
 evidence that catalogue acquisition succeeded.
-
-To evaluate the exact 1,000-track training cohort from the preceding run on
-shifted clean excerpts at 2.5, 12.5, and 22.5 seconds, with all five identifier
-digits generated autoregressively and no teacher-forced scoring:
-
-```bash
-python evaluate.py \
-  /gpfs/scratch/acw723/para-audio-id/audio-lm-checkpoints/tc-1k-id20-20k/last.ckpt \
-  evaluation-1k-shifted-greedy.json \
-  --cohort training \
-  --expected-tracks 1000 \
-  --greedy-only
-```
-
-The expected-track guard prevents accidentally running this test against the
-10,000-track checkpoint. The output records the checkpoint cohort, shifted
-positions, evaluated/skipped track counts, protocol validity, per-query generated
-codes, and free-running greedy exact accuracy.
 
 ## Tests
 

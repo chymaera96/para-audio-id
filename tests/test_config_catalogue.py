@@ -25,14 +25,15 @@ def test_primary_config_is_audio_lm_and_matches_logical_batch():
     assert cfg["train"]["evaluation_interval"] == 2_500
     assert cfg["train"]["checkpoint_interval"] == 500
     assert (
-        cfg["train"]["curriculum"]["protocol"]
-        == "noise_consistency_curriculum_v1"
+        cfg["train"]["schedule"]["protocol"]
+        == "online_random_crop_noise_consistency_v1"
     )
     assert (
-        cfg["train"]["curriculum"]["loss_protocol"]
+        cfg["train"]["schedule"]["loss_protocol"]
         == "tc5_family_weighted_consistency_v2"
     )
-    assert cfg["train"]["curriculum"]["gate_threshold"] == 0.5
+    assert cfg["train"]["schedule"]["clean_until_step"] == 20_000
+    assert cfg["train"]["schedule"]["ramp_until_step"] == 25_000
     assert cfg["evaluation"]["monitor_tracks"] == 100
     assert cfg["evaluation"]["noise_snr_db"] == [0, 5, 10, 20, 30]
     assert cfg["data"]["background_noise"]["training_root"].endswith(
@@ -41,14 +42,9 @@ def test_primary_config_is_audio_lm_and_matches_logical_batch():
     assert cfg["data"]["background_noise"]["validation_root"].endswith(
         "/bg_noise/test"
     )
-    assert cfg["data"]["view_mode"] == "paired"
-    assert len(cfg["data"]["canonical_starts"]) == 6
-    assert len(cfg["data"]["shifted_training_starts"]) == 20
-    assert len(cfg["data"]["shifted_evaluation_starts"]) == 5
-    assert not (
-        set(cfg["data"]["shifted_training_starts"])
-        & set(cfg["data"]["shifted_evaluation_starts"])
-    )
+    assert cfg["data"]["crop_retries"] == 4
+    assert cfg["data"]["replacement_retries"] == 32
+    assert not any("token_root" in key for key in cfg["data"])
     assert not any(key.startswith("id_loss_") for key in cfg["train"])
 
 

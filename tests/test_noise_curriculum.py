@@ -12,6 +12,7 @@ from para_audio_id.audio_lm.noise import (
     mix_background_noise,
     noise_consistency_schedule,
     stable_uniform,
+    tc7_noise_consistency_schedule,
 )
 
 
@@ -216,3 +217,22 @@ def test_tc6_noise_recipe_is_resume_stable_and_changes_by_step():
     )
     assert first == resumed
     assert first != next_step
+
+
+@pytest.mark.parametrize(
+    ("step", "probability", "weight", "phase"),
+    [
+        (0, 0.0, 0.0, "clean"),
+        (19_999, 0.0, 0.0, "clean"),
+        (20_000, 0.0, 0.0, "ramp"),
+        (22_500, 0.375, 0.05, "ramp"),
+        (24_999, 0.75 * 4_999 / 5_000, 0.10 * 4_999 / 5_000, "ramp"),
+        (25_000, 0.75, 0.10, "steady"),
+        (70_000, 0.75, 0.10, "steady"),
+    ],
+)
+def test_tc7_schedule_boundaries(step, probability, weight, phase):
+    schedule = tc7_noise_consistency_schedule(step)
+    assert schedule.probability == pytest.approx(probability)
+    assert schedule.consistency_weight == pytest.approx(weight)
+    assert schedule.phase == phase

@@ -1,4 +1,3 @@
-import hashlib
 import json
 
 import numpy as np
@@ -6,9 +5,6 @@ import pytest
 import soundfile as sf
 import torch
 
-from para_audio_id.audio_lm.curriculum import AdaptiveCurriculum
-from para_audio_id.audio_lm.noise import NoiseConsistencySchedule
-from para_audio_id.audio_lm.token_store import TokenRecord, write_shard
 from para_audio_id.audio_lm.tokenizer import TokenizerSpec
 from para_audio_id.audio_lm.training import train
 from para_audio_id.audio_lm.vocabulary import AudioLMVocabulary
@@ -30,132 +26,49 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
         preprocessing_version=1,
     )
     vocabulary = AudioLMVocabulary()
-    track_ids = [f"track-{track}" for track in range(4)]
     audio_root = tmp_path / "audio"
     audio_root.mkdir()
     waveform = np.sin(
-        2 * np.pi * 220 * np.arange(30 * 8_000, dtype=np.float32) / 8_000
+        2 * np.pi * 220 * np.arange(6 * 8_000, dtype=np.float32) / 8_000
     )
-    for track in range(4):
-        sf.write(audio_root / f"{track}.wav", waveform, 8_000)
+    catalogue = tmp_path / "catalogue.jsonl"
+    rows = []
+    track_ids = []
+    for index in range(4):
+        path = f"{index}.wav"
+        track_id = f"track-{index}"
+        sf.write(audio_root / path, waveform, 8_000)
+        rows.append(
+            {
+                "path": path,
+                "track_id": track_id,
+                "code": f"{index:05d}",
+                "duration": 6.0,
+            }
+        )
+        track_ids.append(track_id)
+    catalogue.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+    manifest = tmp_path / "training_tracks.json"
+    manifest.write_text(json.dumps(track_ids))
     noise_train = tmp_path / "noise_train"
     noise_validation = tmp_path / "noise_validation"
     noise_train.mkdir()
     noise_validation.mkdir()
     sf.write(noise_train / "train.wav", waveform[: 5 * 8_000], 8_000)
-    sf.write(
-        noise_validation / "validation.wav",
-        waveform[5 * 8_000 : 10 * 8_000],
-        8_000,
-    )
-    code_fingerprint = hashlib.sha256(
-        "\n".join(
-            f"{track_id}:{index:05d}" for index, track_id in enumerate(track_ids)
-        ).encode()
-    ).hexdigest()
-
-    def make_store(name, starts, role, view_type):
-        token_root = tmp_path / name
-        token_root.mkdir()
-        (token_root / "tokenizer_spec.json").write_text(
-            json.dumps(
-                {
-                    "tokenizer": spec.to_dict(),
-                    "fingerprint": spec.fingerprint,
-                    "vocabulary": vocabulary.to_dict(),
-                    "corpus_role": role,
-                    "view_policy_fingerprint": f"{role}-fingerprint",
-                    "track_ids": track_ids,
-                    "code_mapping_fingerprint": code_fingerprint,
-                }
-            )
-        )
-        records = []
-        parts = []
-        offset = 0
-        for track in range(4):
-            for start in starts:
-                tokens = np.array([int(start) % 1024, 1024 + int(start) % 1024], dtype=np.uint16)
-                parts.append(tokens)
-                records.append(
-                    TokenRecord(
-                        document_index=len(records),
-                        track_id=f"track-{track}",
-                        code=f"{track:05d}",
-                        source_path=f"{track}.wav",
-                        segment_start=float(start),
-                        segment_duration=5.0,
-                        status="ok",
-                        token_offset=offset,
-                        token_count=2,
-                        frames=1,
-                        view_type=view_type,
-                        corpus_role=role,
-                    )
-                )
-                offset += 2
-        write_shard(
-            token_root,
-            0,
-            records=records,
-            tokens=np.concatenate(parts),
-            tokenizer_spec=spec.to_dict(),
-            tokenizer_fingerprint=spec.fingerprint,
-            corpus_role=role,
-        )
-        return token_root
-
-    canonical_starts = [0, 5, 10, 15, 20, 25]
-    shifted_starts = [1, 2, 3, 4]
-    heldout_starts = [2.5, 7.5]
-    canonical_root = make_store(
-        "canonical", canonical_starts, "canonical_training", "canonical"
-    )
-    shifted_root = make_store(
-        "shifted", shifted_starts, "shifted_training", "shifted"
-    )
-    heldout_root = make_store(
-        "heldout", heldout_starts, "heldout_evaluation", "heldout"
-    )
-    manifest = tmp_path / "training_tracks.json"
-    manifest.write_text(json.dumps(track_ids))
+    sf.write(noise_validation / "validation.wav", waveform[: 5 * 8_000], 8_000)
 
     class FakeOnlineTokenizer:
         def __init__(self, *args, **kwargs):
             self.spec = spec
+            self.vocabulary = vocabulary
 
-        def tokenize(self, waveform):
-            return torch.tensor(
-                [[3, 1027]], device=waveform.device, dtype=torch.long
-            ).repeat(waveform.shape[0], 1)
+        def tokenize(self, waveforms):
+            frame = torch.tensor([3, 1027], device=waveforms.device)
+            return frame.repeat(waveforms.shape[0], 125)
 
     monkeypatch.setattr(
         "para_audio_id.audio_lm.training.MuQRVQTokenizer",
         FakeOnlineTokenizer,
-    )
-    def forced_schedule(step, *, max_steps):
-        return NoiseConsistencySchedule(
-            1.0,
-            0.1,
-            (0.0, 0.0, 0.0, 1.0),
-            "easy",
-        )
-
-    monkeypatch.setattr(
-        "para_audio_id.audio_lm.training.noise_consistency_schedule",
-        forced_schedule,
-    )
-
-    class AlwaysOpenCurriculum(AdaptiveCurriculum):
-        def __post_init__(self):
-            super().__post_init__()
-            self.gate_open = True
-            self.gate_open_step = self.clean_steps
-            self.regression_baseline = 1.0
-
-    monkeypatch.setattr(
-        "para_audio_id.audio_lm.training.AdaptiveCurriculum",
-        AlwaysOpenCurriculum,
     )
     cfg = {
         "architecture": "audio_lm_v1",
@@ -164,13 +77,14 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
             "revision": "resolved",
             "selected_codebooks": 2,
             "sample_rate": 24_000,
+            "device": "cpu",
         },
         "model": {
             "architecture": "gpt2",
             "num_layers": 1,
             "hidden_size": 32,
             "num_attention_heads": 4,
-            "max_position_embeddings": 32,
+            "max_position_embeddings": 512,
             "resid_pdrop": 0.0,
             "embd_pdrop": 0.0,
             "attn_pdrop": 0.0,
@@ -178,21 +92,15 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
         },
         "data": {
             "audio_root": str(audio_root),
-            "canonical_token_root": str(canonical_root),
-            "shifted_training_token_root": str(shifted_root),
-            "heldout_evaluation_token_root": str(heldout_root),
+            "catalogue": str(catalogue),
             "training_tracks_manifest": str(manifest),
-            "view_mode": "paired",
-            "canonical_starts": canonical_starts,
-            "shifted_training_starts": shifted_starts,
-            "shifted_evaluation_starts": heldout_starts,
-            "segments_per_track": 6,
             "max_training_tracks": 4,
             "segment_duration": 5.0,
+            "crop_retries": 4,
+            "replacement_retries": 32,
             "background_noise": {
                 "training_root": str(noise_train),
                 "validation_root": str(noise_validation),
-                "preflight_examples_per_view": 0,
             },
         },
         "train": {
@@ -202,25 +110,26 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
             "log_dir": str(tmp_path / "logs"),
             "checkpoint_dir": str(tmp_path / "checkpoints"),
             "run_id": "smoke",
-            "max_steps": 8,
+            "max_steps": 2,
             "tracks_per_microbatch": 4,
             "segments_per_track": 2,
             "learning_rate": 3e-4,
             "betas": [0.9, 0.95],
             "weight_decay": 0.0,
             "warmup_steps": 1,
-            "evaluation_interval": 2,
-            "checkpoint_interval": 2,
+            "evaluation_interval": 1,
+            "checkpoint_interval": 1,
             "id_digit_weight": 20.0,
             "gradient_clip_norm": 1.0,
-            "curriculum": {
-                "protocol": "noise_consistency_curriculum_v1",
+            "schedule": {
+                "protocol": "online_random_crop_noise_consistency_v1",
                 "loss_protocol": "tc5_family_weighted_consistency_v2",
-                "gate_threshold": 0.5,
-                "gate_max_extra_steps": 0,
-                "regression_drop": 0.05,
-                "recovery_probes": 2,
-                "recovery_timeout_steps": 1,
+                "clean_until_step": 20_000,
+                "ramp_until_step": 25_000,
+                "noise_probability": 0.75,
+                "consistency_weight": 0.1,
+                "snr_bin_probabilities": [0.4, 0.3, 0.2, 0.1],
+                "exact_zero_fraction_in_first_bin": 0.25,
             },
             "wandb": {"enabled": False},
         },
@@ -247,22 +156,29 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
         },
     }
     train(cfg)
+    uninterrupted = torch.load(
+        tmp_path / "checkpoints" / "smoke" / "last.ckpt",
+        map_location="cpu",
+        weights_only=False,
+    )
+    interrupted = tmp_path / "checkpoints" / "smoke" / "step-1.ckpt"
+    assert interrupted.exists()
+    train(cfg, checkpoint=interrupted)
     last = tmp_path / "checkpoints" / "smoke" / "last.ckpt"
-    assert last.exists()
     checkpoint = torch.load(last, map_location="cpu", weights_only=False)
-    assert checkpoint["global_step"] == 8
-    assert checkpoint["training_protocol"] == "noise_consistency_curriculum_v1"
+    for key, value in uninterrupted["state_dict"].items():
+        assert torch.equal(value, checkpoint["state_dict"][key])
+    assert checkpoint["global_step"] == 2
+    assert (
+        checkpoint["training_protocol"]
+        == "online_random_crop_noise_consistency_v1"
+    )
     assert checkpoint["loss_protocol"] == "tc5_family_weighted_consistency_v2"
-    assert checkpoint["monitor_protocol"] == "compact_beam_monitor_v2"
-    assert checkpoint["adaptive_curriculum_state"]["gate_open"]
-    assert "snr_epoch_counts" in checkpoint
-    train(cfg, checkpoint=last)
+    assert checkpoint["monitor_protocol"] == "fixed_random_crop_monitor_v1"
+    assert len(checkpoint["monitor_recipes"]) == 2
 
-    invalid_checkpoint = tmp_path / "invalid-prefixed-tc6.ckpt"
-    checkpoint.pop("loss_protocol")
-    torch.save(checkpoint, invalid_checkpoint)
-    with pytest.raises(
-        ValueError,
-        match="invalid pre-fix tc6 loss protocol",
-    ):
-        train(cfg, checkpoint=invalid_checkpoint)
+    invalid = tmp_path / "invalid.ckpt"
+    checkpoint["training_protocol"] = "noise_consistency_curriculum_v1"
+    torch.save(checkpoint, invalid)
+    with pytest.raises(ValueError, match="different training protocol"):
+        train(cfg, checkpoint=invalid)

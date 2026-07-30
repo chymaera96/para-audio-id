@@ -23,6 +23,8 @@ from .generation import (
     prompt_from_audio_tokens,
 )
 from .losses import causal_audio_id_losses
+from .noise import BackgroundNoiseAssets, mix_background_noise
+from .random_crops import RandomEvaluationCollator, RandomEvaluationDataset
 from .tokenizer import MuQRVQTokenizer
 from .token_store import TokenStoreIndex
 
@@ -72,10 +74,123 @@ def _checkpoint_tokenizer(checkpoint: dict, device: str) -> MuQRVQTokenizer:
         selected_codebooks=int(spec["selected_codebooks"]),
         sample_rate=int(spec["sample_rate"]),
         device=device,
+        lightweight=True,
     )
     if tokenizer.spec.fingerprint != checkpoint["tokenizer_fingerprint"]:
         raise ValueError("Loaded MuQ tokenizer does not match the checkpoint")
     return tokenizer
+
+
+def _evaluate_random_manifest(
+    model,
+    vocabulary,
+    cfg: dict,
+    checkpoint: dict,
+    *,
+    output: str | Path,
+    device: str,
+    beam_width: int | None,
+) -> dict:
+    manifest = checkpoint["monitor_recipes"]
+    tokenizer = _checkpoint_tokenizer(checkpoint, device)
+    noise_cfg = cfg["data"]["background_noise"]
+    assets = BackgroundNoiseAssets(
+        noise_cfg["training_root"],
+        noise_cfg["validation_root"],
+        sample_rate=tokenizer.sample_rate,
+        samples=round(
+            tokenizer.sample_rate * float(cfg["data"]["segment_duration"])
+        ),
+    )
+    loader = DataLoader(
+        RandomEvaluationDataset(manifest),
+        batch_size=int(cfg["evaluation"]["generation_batch_size"]),
+        shuffle=False,
+        collate_fn=RandomEvaluationCollator(
+            audio_root=cfg["data"]["audio_root"],
+            noise_assets=assets,
+            sample_rate=tokenizer.sample_rate,
+            seed=int(cfg["train"]["seed"]) + 1771,
+        ),
+    )
+    snrs = [float(value) for value in cfg["evaluation"]["noise_snr_db"]]
+    rows = []
+    started = time.perf_counter()
+    with torch.inference_mode():
+        for batch in tqdm(loader, desc="fixed random-crop evaluation"):
+            clean = batch["clean_waveforms"].to(device)
+            noise = batch["noise_waveforms"].to(device)
+            variants = [(None, clean)]
+            for snr in snrs:
+                requested = torch.full((len(clean),), snr, device=device)
+                mixed, valid = mix_background_noise(clean, noise, requested)
+                if not valid.all():
+                    raise RuntimeError("Random evaluation noise mixing is invalid")
+                variants.append((snr, mixed))
+            for snr, waveforms in variants:
+                tokens = tokenizer.tokenize(waveforms)
+                prompts = torch.stack(
+                    [
+                        prompt_from_audio_tokens(token, vocabulary)
+                        for token in tokens
+                    ]
+                )
+                greedy = batched_greedy_generate(model, prompts, vocabulary)
+                beams = (
+                    batched_beam_generate(
+                        model, prompts, vocabulary, width=beam_width
+                    )
+                    if beam_width is not None
+                    else [[] for _ in greedy]
+                )
+                rows.extend(
+                    {
+                        "track_id": track_id,
+                        "code": code,
+                        "snr_db": snr,
+                        "greedy": result.code,
+                        "greedy_ended_with_eos": result.ended_with_eos,
+                        "beam": [
+                            {
+                                "code": candidate.code,
+                                "log_probability": candidate.log_probability,
+                                "ended_with_eos": candidate.ended_with_eos,
+                            }
+                            for candidate in ranking
+                        ],
+                    }
+                    for track_id, code, result, ranking in zip(
+                        batch["track_id"],
+                        batch["code"],
+                        greedy,
+                        beams,
+                        strict=True,
+                    )
+                )
+    clean_rows = [row for row in rows if row["snr_db"] is None]
+    noisy_rows = [row for row in rows if row["snr_db"] is not None]
+    metrics = {
+        "cohort": "fixed_random_probe",
+        "selected_tracks": len(manifest),
+        "generation_protocol": "five_autoregressive_digits_then_eos",
+        "clean": _generation_metrics(clean_rows),
+        "noise": _generation_metrics(noisy_rows),
+        "by_snr": {
+            f"{snr:g}": _generation_metrics(
+                [
+                    row
+                    for row in noisy_rows
+                    if math.isclose(float(row["snr_db"]), snr)
+                ]
+            )
+            for snr in snrs
+        },
+        "elapsed_seconds": time.perf_counter() - started,
+    }
+    output = Path(output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps({"metrics": metrics, "queries": rows}, indent=2) + "\n")
+    return metrics
 
 
 def _generation_metrics(rows: list[dict]) -> dict:
@@ -261,6 +376,16 @@ def evaluate(
     generation_only: bool = False,
 ) -> dict:
     model, vocabulary, cfg, checkpoint = load_audio_lm(checkpoint_path, device)
+    if checkpoint.get("training_protocol") == "online_random_crop_noise_consistency_v1":
+        return _evaluate_random_manifest(
+            model,
+            vocabulary,
+            cfg,
+            checkpoint,
+            output=output,
+            device=device,
+            beam_width=beam_width,
+        )
     if "view_mode" in cfg.get("data", {}):
         return _evaluate_cached_positions(
             model,

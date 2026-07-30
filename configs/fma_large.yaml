@@ -21,26 +21,14 @@ model:
 data:
   audio_root: /gpfs/scratch/acw723/fma_data/fma_large
   catalogue: data/fma_large_100k.jsonl
-  runtime_bad_files: data/runtime_bad_files.jsonl
-  token_root: /gpfs/scratch/acw723/para-audio-id/audio_lm_tokens
-  canonical_token_root: /gpfs/scratch/acw723/para-audio-id/audio_lm_tokens
-  shifted_training_token_root: /gpfs/scratch/acw723/para-audio-id/audio_lm_tokens_shifted_training_10k
-  heldout_evaluation_token_root: /gpfs/scratch/acw723/para-audio-id/audio_lm_tokens_heldout_evaluation_10k
   training_tracks_manifest: data/training_tracks_10k.json
-  view_mode: paired
   segment_duration: 5.0
-  segments_per_track: 6
   max_training_tracks: 10000
-  canonical_starts: [0, 5, 10, 15, 20, 25]
-  shifted_training_starts:
-    [1, 2, 3, 4, 6, 7, 8, 9, 11, 12, 13, 14, 16, 17, 18, 19, 21, 22, 23, 24]
-  shifted_evaluation_starts: [2.5, 7.5, 12.5, 17.5, 22.5]
-  shard_documents: 10000
-  extraction_batch_size: 32
+  crop_retries: 4
+  replacement_retries: 32
   background_noise:
     training_root: /gpfs/scratch/acw723/audio-degradation-data/degradation_24k/bg_noise/train
     validation_root: /gpfs/scratch/acw723/audio-degradation-data/degradation_24k/bg_noise/test
-    preflight_examples_per_view: 2
 
 train:
   seed: 1337
@@ -60,14 +48,15 @@ train:
   checkpoint_interval: 500
   id_digit_weight: 20.0
   gradient_clip_norm: 1.0
-  curriculum:
-    protocol: noise_consistency_curriculum_v1
+  schedule:
+    protocol: online_random_crop_noise_consistency_v1
     loss_protocol: tc5_family_weighted_consistency_v2
-    gate_threshold: 0.5
-    gate_max_extra_steps: 30000
-    regression_drop: 0.05
-    recovery_probes: 2
-    recovery_timeout_steps: 20000
+    clean_until_step: 20000
+    ramp_until_step: 25000
+    noise_probability: 0.75
+    consistency_weight: 0.10
+    snr_bin_probabilities: [0.40, 0.30, 0.20, 0.10]
+    exact_zero_fraction_in_first_bin: 0.25
   wandb:
     enabled: false
     project: para-audio-id
@@ -78,7 +67,6 @@ train:
 evaluation:
   online_monitor_enabled: true
   monitor_tracks: 100
-  probe_batch_size: 8
   generation_batch_size: 16
   beam_width: 10
   noise_snr_db: [0, 5, 10, 20, 30]

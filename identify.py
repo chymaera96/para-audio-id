@@ -31,6 +31,7 @@ def identify(
         selected_codebooks=int(spec["selected_codebooks"]),
         sample_rate=int(spec["sample_rate"]),
         device=device,
+        lightweight=True,
     )
     if tokenizer.spec.fingerprint != checkpoint["tokenizer_fingerprint"]:
         raise ValueError("Loaded MuQ tokenizer does not match the checkpoint")

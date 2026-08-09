@@ -14,7 +14,7 @@ generation only: it does not search fingerprints, embeddings, an ANN index, toke
 shards, a valid-code list, or training audio.
 
 This is LLM-style memorisation through repeated causal continuations. Every clean
-five-second segment from a track is a separate document with the same identifier,
+two-second segment from a track is a separate document with the same identifier,
 and each document contains that identifier only once. Parametric indexing methods
 such as DSI are related work, but this system does not use staged DSI training.
 
@@ -61,11 +61,11 @@ features or another codec.
 
 ## Historical offline tokenization utilities
 
-The repository still contains the older cache-preparation commands, but tc7
+The repository still contains the older cache-preparation commands, but tc8
 does not use canonical, shifted, or half-offset token stores for training or
 evaluation. They remain useful only when reproducing tc2–tc6 from Git history.
 
-tc7 needs only the established 10K identity manifest:
+tc8 needs only the established 10K identity manifest:
 
 ```bash
 test -f data/training_tracks_10k.json
@@ -78,7 +78,7 @@ hidden size 768, 12 heads, tied embeddings, and no dropout. The vocabulary has
 2,048 collision-free audio tokens, `[BOS]`, `[ID]`, ten dedicated digit tokens,
 and `[EOS]`.
 
-tc7 uses the exact established 10,000 identities but samples every five-second
+tc8 uses the exact established 10,000 identities but samples every two-second
 crop online. Each selected identity contributes two independently sampled clean
 crops, or an exact same-crop clean/noisy pair when noise is selected. Workers
 decode the final waveforms and one frozen lightweight MuQ call tokenizes all
@@ -87,19 +87,20 @@ eight documents in each physical microbatch.
 ```text
 loss =
     (
-        250 * mean(clean audio-token CE)
-        + 100 * mean(all digit CE)
+        100 * mean(clean audio-token CE)
+        + 40 * mean(all digit CE)
         + 2 * mean(all boundary CE)
-    ) / 352
+    ) / 142
     + lambda_consistency * clean/noisy [ID]-state consistency
 ```
 
 The consistency loss is one minus cosine similarity between normalized
 final-layer `[ID]` states. The clean state is detached for this term; the noisy
 state, transformer, and noisy input embeddings retain gradients. Each loss
-family is computed as a mean, then recombined with tc5's effective family
-coefficients: approximately 0.710 audio, 0.284 digits, and 0.006 boundaries.
-Thus tc7 exactly matches tc5's base loss when no rows are noisy. The previous
+family is computed as a mean, then recombined with effective coefficients of
+approximately 0.704 audio, 0.282 digits, and 0.014 boundaries. Scaling the
+identifier digit weight from 20 to 8 preserves tc7's 2.5:1 audio-to-identifier
+ratio despite the shorter query. The previous
 tc5 weighted-token loss is also logged as a detached comparison metric.
 Checkpoints record the `tc5_family_weighted_consistency_v2` loss protocol.
 
@@ -121,15 +122,16 @@ steps. For direct comparison with tc6, the same seeded 100-track cohort is
 evaluated using one balanced canonical, integer-shifted, and held-out
 half-offset crop per track. All three groups are evaluated clean and at
 0/5/10/20/30 dB at step zero, every 2,500 steps, and at completion. Evaluation
-crops are decoded and tokenized online; tc7 still has no runtime token-store
-dependency. W&B uses the same compact metric names as tc6, while complete
+crops are two seconds long and are decoded and tokenized online; tc8 still has
+no runtime token-store dependency. W&B uses the same compact metric names as
+tc6, while complete
 training metrics retain tc6's `_step` and `_epoch` suffixes. Complete beam
 Top-1/5/10 and MRR results are appended to `probe_metrics.jsonl`.
 
 ```bash
 python train.py configs/fma_large.yaml \
   --devices 1 \
-  --run-id tc7 \
+  --run-id tc8 \
   --wandb-online
 ```
 
@@ -139,7 +141,7 @@ state:
 ```bash
 python train.py configs/fma_large.yaml \
   --devices 1 \
-  --run-id tc7 \
+  --run-id tc8 \
   --wandb-online \
   --resume
 ```
@@ -152,8 +154,8 @@ Checkpoints are written every 500 optimizer steps under:
 
 Checkpoints embed the vocabulary, exact cohort, random-crop and replacement
 policies, fixed monitor manifest, noise/tokenizer fingerprints, sampler state,
-RNG state, and code mapping. Resume is accepted only for compatible tc7
-checkpoints; tc5/tc6 checkpoints are rejected.
+RNG state, query specification, and code mapping. Resume is accepted only for
+compatible tc8 checkpoints; tc7 and all earlier checkpoints are rejected.
 
 PyTorch deterministic algorithms and seeded Python, NumPy, Torch, samplers, and
 workers are enabled. `deterministic_warn_only: true` reports CUDA operations for
@@ -161,13 +163,13 @@ which PyTorch cannot promise bitwise determinism instead of aborting a long run.
 
 ## Evaluation and inference
 
-Post-run evaluation uses the checkpoint's fixed 100-query random manifest and
-tokenizes clean and noisy query audio online:
+Post-run evaluation uses the checkpoint's fixed 100-track, three-group monitor
+manifest and tokenizes clean and noisy two-second query audio online:
 
 ```bash
 python evaluate.py \
-  /gpfs/scratch/acw723/para-audio-id/audio-lm-checkpoints/tc7/last.ckpt \
-  evaluation-tc7-random.json
+  /gpfs/scratch/acw723/para-audio-id/audio-lm-checkpoints/tc8/last.ckpt \
+  evaluation-tc8.json
 ```
 
 It reports clean and per-SNR greedy exact accuracy, beam Top-1/5/10, MRR, and

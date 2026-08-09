@@ -22,7 +22,7 @@ data:
   audio_root: /gpfs/scratch/acw723/fma_data/fma_large
   catalogue: data/fma_large_100k.jsonl
   training_tracks_manifest: data/training_tracks_10k.json
-  segment_duration: 5.0
+  segment_duration: 2.0
   max_training_tracks: 10000
   crop_retries: 4
   replacement_retries: 32
@@ -46,10 +46,10 @@ train:
   warmup_steps: 200
   evaluation_interval: 2500
   checkpoint_interval: 500
-  id_digit_weight: 20.0
+  id_digit_weight: 8.0
   gradient_clip_norm: 1.0
   schedule:
-    protocol: online_random_crop_noise_consistency_v1
+    protocol: two_second_online_random_crop_noise_consistency_v1
     loss_protocol: tc5_family_weighted_consistency_v2
     clean_until_step: 20000
     ramp_until_step: 25000

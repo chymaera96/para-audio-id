@@ -432,7 +432,10 @@ def evaluate(
     generation_only: bool = False,
 ) -> dict:
     model, vocabulary, cfg, checkpoint = load_audio_lm(checkpoint_path, device)
-    if checkpoint.get("training_protocol") == "online_random_crop_noise_consistency_v1":
+    if (
+        checkpoint.get("training_protocol")
+        == "two_second_online_random_crop_noise_consistency_v1"
+    ):
         return _evaluate_tc6_monitor_manifest(
             model,
             vocabulary,

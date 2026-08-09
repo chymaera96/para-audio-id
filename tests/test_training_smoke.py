@@ -68,10 +68,11 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
         def __init__(self, *args, **kwargs):
             self.spec = spec
             self.vocabulary = vocabulary
+            self.device = torch.device(kwargs.get("device", "cpu"))
 
         def tokenize(self, waveforms):
             frame = torch.tensor([3, 1027], device=waveforms.device)
-            return frame.repeat(waveforms.shape[0], 125)
+            return frame.repeat(waveforms.shape[0], 50)
 
     monkeypatch.setattr(
         "para_audio_id.audio_lm.training.MuQRVQTokenizer",
@@ -102,7 +103,7 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
             "catalogue": str(catalogue),
             "training_tracks_manifest": str(manifest),
             "max_training_tracks": 4,
-            "segment_duration": 5.0,
+            "segment_duration": 2.0,
             "crop_retries": 4,
             "replacement_retries": 32,
             "background_noise": {
@@ -126,10 +127,10 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
             "warmup_steps": 1,
             "evaluation_interval": 1,
             "checkpoint_interval": 1,
-            "id_digit_weight": 20.0,
+            "id_digit_weight": 8.0,
             "gradient_clip_norm": 1.0,
             "schedule": {
-                "protocol": "online_random_crop_noise_consistency_v1",
+                "protocol": "two_second_online_random_crop_noise_consistency_v1",
                 "loss_protocol": "tc5_family_weighted_consistency_v2",
                 "clean_until_step": 20_000,
                 "ramp_until_step": 25_000,
@@ -178,23 +179,42 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
     assert checkpoint["global_step"] == 2
     assert (
         checkpoint["training_protocol"]
-        == "online_random_crop_noise_consistency_v1"
+        == "two_second_online_random_crop_noise_consistency_v1"
     )
     assert checkpoint["loss_protocol"] == "tc5_family_weighted_consistency_v2"
     assert checkpoint["monitor_protocol"] == "compact_beam_monitor_v2"
+    assert checkpoint["crop_policy"] == "two_second_online_random_crop_24k_v1"
     assert len(checkpoint["monitor_recipes"]) == 6
     assert {
         row["view_type"] for row in checkpoint["monitor_recipes"]
     } == {"canonical", "shifted", "heldout"}
+    assert all(
+        row["crop_duration"] == 2.0
+        for row in checkpoint["monitor_recipes"]
+    )
+    assert checkpoint["query_spec"] == {
+        "segment_duration_seconds": 2.0,
+        "sample_rate": 24_000,
+        "waveform_samples": 48_000,
+        "frame_rate": 25.0,
+        "selected_codebooks": 2,
+        "frames": 50,
+        "audio_targets": 100,
+        "digit_targets": 5,
+        "boundary_targets": 2,
+        "document_tokens": 108,
+        "id_digit_weight": 8.0,
+        "max_position_embeddings": 512,
+    }
 
     invalid = tmp_path / "invalid.ckpt"
-    checkpoint["training_protocol"] = "noise_consistency_curriculum_v1"
+    checkpoint["training_protocol"] = "online_random_crop_noise_consistency_v1"
     torch.save(checkpoint, invalid)
     with pytest.raises(ValueError, match="different training protocol"):
         train(cfg, checkpoint=invalid)
 
 
-def test_tc7_wandb_keys_match_retained_tc6_schema():
+def test_tc8_wandb_keys_match_retained_tc6_schema():
     assert TRAIN_METRICS == {
         "clean_audio_loss",
         "digit_loss",

@@ -12,7 +12,7 @@ from para_audio_id.audio_lm.noise import (
     mix_background_noise,
     noise_consistency_schedule,
     stable_uniform,
-    tc7_noise_consistency_schedule,
+    tc8_noise_consistency_schedule,
 )
 
 
@@ -250,8 +250,8 @@ def test_snr_bins_are_only_realized_for_selected_noise():
         (70_000, 0.75, 0.10, "steady"),
     ],
 )
-def test_tc7_schedule_boundaries(step, probability, weight, phase):
-    schedule = tc7_noise_consistency_schedule(step)
+def test_tc8_schedule_boundaries(step, probability, weight, phase):
+    schedule = tc8_noise_consistency_schedule(step)
     assert schedule.probability == pytest.approx(probability)
     assert schedule.consistency_weight == pytest.approx(weight)
     assert schedule.phase == phase

@@ -327,6 +327,52 @@ def test_tc6_consistency_is_zero_for_identical_id_states():
     assert metrics["consistency_loss"] == pytest.approx(0.0, abs=1e-6)
 
 
+def test_tc8_two_second_family_weights_match_reported_objective():
+    vocabulary = AudioLMVocabulary()
+    audio = torch.tensor(
+        [
+            value
+            for frame in range(50)
+            for value in (frame % 1024, 1024 + frame % 1024)
+        ]
+    )
+    examples = [
+        {
+            "audio_tokens": audio,
+            "code": "12345",
+            "track_id": f"tc8-track-{index}",
+            "document_index": index,
+        }
+        for index in range(2)
+    ]
+    batch = collate_causal_documents(examples, vocabulary, 512)
+    torch.manual_seed(29)
+    logits = torch.randn(2, batch["input_ids"].shape[1], vocabulary.size)
+    hidden = torch.randn(2, batch["input_ids"].shape[1], 8)
+    total, metrics = noise_consistency_losses(
+        logits,
+        hidden,
+        batch["input_ids"],
+        batch["audio_target_mask"],
+        batch["id_target_mask"],
+        batch["boundary_target_mask"],
+        torch.tensor([False, False]),
+        batch["track_id"],
+        id_digit_weight=8.0,
+        consistency_weight=0.0,
+    )
+    assert batch["input_ids"].shape[1] == 108
+    assert batch["audio_target_mask"].sum(dim=1).tolist() == [100, 100]
+    assert torch.allclose(total, metrics["legacy_weighted_token_loss"])
+    assert metrics["audio_family_coefficient"] == pytest.approx(100 / 142)
+    assert metrics["digit_family_coefficient"] == pytest.approx(40 / 142)
+    assert metrics["boundary_family_coefficient"] == pytest.approx(2 / 142)
+    assert (
+        metrics["audio_family_coefficient"]
+        / metrics["digit_family_coefficient"]
+    ) == pytest.approx(2.5)
+
+
 def test_tc6_noisy_id_path_reaches_input_embeddings_and_transformer():
     vocabulary = AudioLMVocabulary()
     cfg = tiny_config()

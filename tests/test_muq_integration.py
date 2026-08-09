@@ -16,18 +16,18 @@ from para_audio_id.audio_lm.tokenizer import MuQRVQTokenizer
     os.environ.get("RUN_MUQ_INTEGRATION") != "1",
     reason="set RUN_MUQ_INTEGRATION=1 to load the real MuQ checkpoint",
 )
-def test_real_muq_rvq_probe():
+def test_real_muq_two_second_rvq_probe():
     tokenizer = MuQRVQTokenizer(
         "OpenMuQ/MuQ-large-msd-iter",
         selected_codebooks=2,
         device=os.environ.get("MUQ_DEVICE", "cuda"),
     )
     waveform = torch.sin(
-        2 * torch.pi * 220 * torch.arange(120_000) / 24_000
+        2 * torch.pi * 220 * torch.arange(48_000) / 24_000
     ).unsqueeze(0)
     report = tokenizer.probe(waveform)
     assert report["raw_shape"][1] == 2
-    assert report["serialized_tokens_per_example"] + 8 <= 512
+    assert report["serialized_tokens_per_example"] == 100
     audio_tokens = tokenizer.tokenize(waveform)[0].cpu()
     lightweight = MuQRVQTokenizer(
         "OpenMuQ/MuQ-large-msd-iter",
@@ -55,7 +55,7 @@ def test_real_muq_rvq_probe():
     )
     lightweight_tokens = lightweight.tokenize(online_waveforms)
     assert torch.equal(lightweight_tokens[0].cpu(), audio_tokens)
-    assert lightweight_tokens.shape == (8, 250)
+    assert lightweight_tokens.shape == (8, 100)
     cfg = {
         "model": {
             "architecture": "gpt2",
@@ -91,6 +91,7 @@ def test_real_muq_rvq_probe():
         tokenizer.vocabulary,
         512,
     )
+    assert batch["input_ids"].shape == (8, 108)
     logits, hidden = model(
         batch["input_ids"].to(tokenizer.device),
         batch["attention_mask"].to(tokenizer.device),
@@ -105,7 +106,7 @@ def test_real_muq_rvq_probe():
         batch["boundary_target_mask"].to(tokenizer.device),
         torch.tensor(is_noisy, device=tokenizer.device),
         batch["track_id"],
-        id_digit_weight=20.0,
+        id_digit_weight=8.0,
         consistency_weight=0.1,
     )
     loss.backward()

@@ -18,11 +18,11 @@ from .noise import (
     deterministic_consistency_noise_parameters,
     mix_background_noise,
     stable_uint64,
-    tc7_noise_consistency_schedule,
+    tc8_noise_consistency_schedule,
 )
 
 
-CROP_POLICY = "online_random_crop_24k_v2"
+CROP_POLICY = "two_second_online_random_crop_24k_v1"
 REPLACEMENT_POLICY = "deterministic_identity_replacement_v1"
 TC6_MONITOR_GRIDS = {
     "canonical": (0.0, 5.0, 10.0, 15.0, 20.0, 25.0),
@@ -410,7 +410,7 @@ class RandomCropCollator:
             raise ValueError("Random-crop batch has inconsistent sampler progress")
         optimizer_step = optimizer_steps.pop()
         batch_idx = batch_indices.pop()
-        schedule = tc7_noise_consistency_schedule(optimizer_step)
+        schedule = tc8_noise_consistency_schedule(optimizer_step)
         keys = [
             stable_uint64(
                 self.seed,

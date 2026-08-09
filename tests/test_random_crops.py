@@ -29,7 +29,7 @@ def test_random_starts_are_deterministic_in_range_and_role_specific():
     record = records(1)[0]
     kwargs = {
         "sample_rate": 24_000,
-        "crop_samples": 120_000,
+        "crop_samples": 48_000,
         "seed": 7,
         "optimizer_step": 123,
         "batch_idx": 4,
@@ -39,20 +39,21 @@ def test_random_starts_are_deterministic_in_range_and_role_specific():
     repeated = random_start_sample(record, role=0, **kwargs)
     second = random_start_sample(record, role=1, **kwargs)
     assert first == repeated
-    assert 0 <= first <= 120_000
+    assert 0 <= first <= 192_000
     assert first != second
 
 
 def test_tc6_monitor_manifest_is_stable_balanced_and_reserved():
     selected = records(4)
     first = make_tc6_evaluation_manifest(
-        selected, sample_rate=24_000, crop_duration=5.0, seed=9
+        selected, sample_rate=24_000, crop_duration=2.0, seed=9
     )
     repeated = make_tc6_evaluation_manifest(
-        selected, sample_rate=24_000, crop_duration=5.0, seed=9
+        selected, sample_rate=24_000, crop_duration=2.0, seed=9
     )
     assert first == repeated
     assert len(first) == 3 * len(selected)
+    assert all(row["crop_duration"] == 2.0 for row in first)
     assert {row["view_type"] for row in first} == {
         "canonical",
         "shifted",
@@ -65,7 +66,7 @@ def test_tc6_monitor_manifest_is_stable_balanced_and_reserved():
     training = random_start_sample(
         record,
         sample_rate=24_000,
-        crop_samples=120_000,
+        crop_samples=48_000,
         seed=9,
         optimizer_step=0,
         batch_idx=0,
@@ -112,7 +113,7 @@ def test_clean_collator_produces_two_distinct_crops_per_identity(tmp_path):
     sf.write(train_noise / "train.wav", waveform[:40_000], 8_000)
     sf.write(validation_noise / "validation.wav", waveform[40_000:], 8_000)
     assets = BackgroundNoiseAssets(
-        train_noise, validation_noise, sample_rate=8_000, samples=40_000
+        train_noise, validation_noise, sample_rate=8_000, samples=16_000
     )
     dataset = OnlineTrackDataset(selected)
     sampler = OnlineTrackBatchSampler(
@@ -127,11 +128,11 @@ def test_clean_collator_produces_two_distinct_crops_per_identity(tmp_path):
         audio_root=audio_root,
         noise_assets=assets,
         sample_rate=8_000,
-        crop_duration=5.0,
+        crop_duration=2.0,
         seed=3,
         reserved_starts={},
     )(examples)
-    assert batch["waveforms"].shape == (8, 40_000)
+    assert batch["waveforms"].shape == (8, 16_000)
     for offset in range(0, 8, 2):
         assert (
             batch["metadata"][offset]["track_id"]
@@ -160,7 +161,7 @@ def test_noisy_pairs_share_start_and_bad_identity_is_replaced(tmp_path):
     sf.write(train_noise / "train.wav", waveform[:40_000], 8_000)
     sf.write(validation_noise / "validation.wav", waveform[40_000:], 8_000)
     assets = BackgroundNoiseAssets(
-        train_noise, validation_noise, sample_rate=8_000, samples=40_000
+        train_noise, validation_noise, sample_rate=8_000, samples=16_000
     )
     dataset = OnlineTrackDataset(selected)
     examples = [
@@ -177,7 +178,7 @@ def test_noisy_pairs_share_start_and_bad_identity_is_replaced(tmp_path):
         audio_root=audio_root,
         noise_assets=assets,
         sample_rate=8_000,
-        crop_duration=5.0,
+        crop_duration=2.0,
         seed=3,
         reserved_starts={},
     )(examples)
@@ -196,12 +197,12 @@ def test_noisy_pairs_share_start_and_bad_identity_is_replaced(tmp_path):
 
 
 def test_short_track_starts_at_zero_and_is_padded(tmp_path):
-    record = records(1, duration=3.0)[0]
+    record = records(1, duration=1.0)[0]
     assert (
         random_start_sample(
             record,
             sample_rate=8_000,
-            crop_samples=40_000,
+            crop_samples=16_000,
             seed=1,
             optimizer_step=2,
             batch_idx=3,
@@ -226,13 +227,13 @@ def test_monitor_collator_skips_invalid_crop_without_aborting(tmp_path):
     sf.write(train_noise / "train.wav", waveform[:40_000], 8_000)
     sf.write(validation_noise / "validation.wav", waveform[:40_000], 8_000)
     assets = BackgroundNoiseAssets(
-        train_noise, validation_noise, sample_rate=8_000, samples=40_000
+        train_noise, validation_noise, sample_rate=8_000, samples=16_000
     )
     common = {
         "source_duration": 6.0,
         "start_sample": 0,
         "start": 0.0,
-        "crop_duration": 5.0,
+        "crop_duration": 2.0,
         "view_type": "canonical",
     }
     batch = RandomEvaluationCollator(
@@ -256,7 +257,7 @@ def test_monitor_collator_skips_invalid_crop_without_aborting(tmp_path):
             },
         ]
     )
-    assert batch["clean_waveforms"].shape == (1, 40_000)
+    assert batch["clean_waveforms"].shape == (1, 16_000)
     assert batch["track_id"] == ["valid"]
     assert len(batch["skipped"]) == 1
     assert batch["skipped"][0]["track_id"] == "bad"

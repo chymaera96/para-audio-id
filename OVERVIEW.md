@@ -13,6 +13,8 @@ should be taken from the corresponding W&B run or evaluation JSON.
 | `tc4` | Same 10K tracks | Canonical + integer-shifted | 20 | 100K | Added paired temporal-shift training |
 | `tc5` | Same 10K tracks | Clean paired views + online noisy anchor | 20 | 60K | Added the background-noise curriculum |
 | `tc6` | Same 10K tracks | Clean paired views + exact clean/noisy pairs | 20 | 70K nominal | Masks noisy audio loss and aligns clean/noisy `[ID]` states |
+| `tc7` | Same 10K tracks | Continuous random five-second crops | 20 | 70K | Replaced fixed training grids with online crops |
+| `tc8` | Same 10K tracks | Continuous random two-second crops | 8 | 70K | Tests shorter queries at the same audio-to-ID loss ratio |
 
 Each entry is a from-scratch model unless explicitly documented otherwise.
 In particular, `tc4` is not initialized from `tc3`, `tc5` is not initialized
@@ -30,8 +32,8 @@ From `tc2` onward, the system is a discrete-audio causal language model:
 - Audio is sampled at 24 kHz and tokenized using the frozen
   `OpenMuQ/MuQ-large-msd-iter` Mel-RVQ tokenizer.
 - The first two of MuQ's eight 1,024-entry codebooks are serialized in
-  time-major, codebook-interleaved order. A five-second crop normally produces
-  125 frames and 250 audio tokens.
+  time-major, codebook-interleaved order. A five-second crop produces 125 frames
+  and 250 audio tokens; tc8's two-second crop produces 50 frames and 100 tokens.
 - The vocabulary has 2,061 entries: 2,048 audio tokens, `[BOS]`, `[ID]`, ten
   digit tokens, and `[EOS]`.
 - The model is a randomly initialized GPT-2-style causal transformer: 12 layers,
@@ -221,9 +223,31 @@ the retained tc6 metric names—including its `_step` and `_epoch` training
 curves—and beam Top-1 probes. Complete beam Top-1/5/10, MRR, position, and
 failure records are written to JSONL.
 
+## `tc8`: two-second online random crops
+
+`tc8` starts from random weights and keeps tc7's exact 10K cohort, online crop
+sampler, background-noise distribution, consistency objective, raw-step
+schedule, logical batch, optimizer, and fixed 100-track evaluation protocol.
+The sole scientific intervention is reducing every training and evaluation
+query from five seconds to two seconds.
+
+At 25 MuQ frames per second with two selected codebooks, each query supplies
+100 audio targets rather than 250. The identifier digit weight is therefore
+scaled from 20 to 8:
+
+```text
+base loss = (100 * audio CE + 40 * digit CE + 2 * boundary CE) / 142
+```
+
+This preserves tc7's 2.5:1 audio-to-identifier ratio. The resulting family
+coefficients are approximately 0.704 audio, 0.282 identifier, and 0.014
+boundary. Each causal document has 108 tokens and remains within the unchanged
+512-position context. tc8 has distinct training and crop protocol markers and
+cannot initialize or resume from tc7.
+
 ## Interpretation
 
-The progression isolates five questions:
+The progression isolates seven questions:
 
 1. `tc2`: can the causal formulation memorize audio-token-to-code mappings?
 2. `tc3`: does a smaller catalogue and stronger ID supervision make that
@@ -235,6 +259,9 @@ The progression isolates five questions:
    rewarding prediction of corruption-dependent noisy audio tokens?
 6. `tc7`: can continuous online temporal coverage replace hand-selected crop
    grids while retaining the corrected noise-consistency objective?
+7. `tc8`: how much identification and noise robustness remain when acoustic
+   evidence is reduced from five seconds to two without changing the relative
+   audio-to-identifier supervision strength?
 
 Teacher-forced digit accuracy is useful for optimization diagnostics, but the
 scientific identification result is free-running exact accuracy and beam

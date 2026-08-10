@@ -7,6 +7,7 @@ import math
 from pathlib import Path
 import random
 import time
+import warnings
 
 import lightning.pytorch as pl
 import numpy as np
@@ -837,6 +838,7 @@ class AudioLMModule(pl.LightningModule):
         }
         self.replacement_audit: list[dict] = []
         self.failed_crop_attempt_audit: list[dict] = []
+        self._sampler_runtime_rebased = False
         self.save_hyperparameters(cfg)
 
     def _step(self, batch: dict, prefix: str) -> torch.Tensor:
@@ -883,12 +885,29 @@ class AudioLMModule(pl.LightningModule):
 
     def training_step(self, batch: dict, batch_idx: int) -> torch.Tensor:
         crop_batch = batch
-        if int(batch["planned_optimizer_step"]) != int(self.global_step):
-            raise RuntimeError(
-                "Resumed random-crop sampler is misaligned: planned optimizer "
-                f"step {int(batch['planned_optimizer_step'])}, actual "
-                f"{int(self.global_step)}"
-            )
+        planned_step = int(batch["planned_optimizer_step"])
+        actual_step = int(self.global_step)
+        if planned_step != actual_step:
+            planned_schedule = tc9_noise_consistency_schedule(planned_step)
+            actual_schedule = tc9_noise_consistency_schedule(actual_step)
+            if planned_schedule != actual_schedule:
+                raise RuntimeError(
+                    "Resumed random-crop sampler crossed a curriculum boundary: "
+                    f"planned step {planned_step} uses {planned_schedule}, actual "
+                    f"step {actual_step} uses {actual_schedule}"
+                )
+            if not self._sampler_runtime_rebased:
+                correction = actual_step - planned_step
+                self.trainer.datamodule.batch_sampler.optimizer_step_offset += (
+                    correction
+                )
+                warnings.warn(
+                    "Automatically rebased the resumed stochastic crop stream by "
+                    f"{correction} optimizer steps; model, optimizer, scheduler, "
+                    "global step, and curriculum state are unchanged.",
+                    stacklevel=2,
+                )
+                self._sampler_runtime_rebased = True
         if self.online_tokenizer is None:
             raise RuntimeError("Online MuQ tokenizer has not been initialized")
         waveforms = crop_batch["waveforms"].to(self.device)

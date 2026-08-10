@@ -112,6 +112,22 @@ def test_online_track_sampler_rebases_after_completed_epoch_resume():
     assert {row[1] for row in first_batch} == {312}
 
 
+def test_online_track_sampler_accepts_runtime_epoch_correction():
+    dataset = OnlineTrackDataset(records(10))
+    sampler = OnlineTrackBatchSampler(
+        dataset,
+        tracks_per_microbatch=10,
+        accumulation_steps=8,
+        seed=5,
+        catalogue_pass=313,
+    )
+    first_batch = next(iter(sampler))
+    assert {row[1] for row in first_batch} == {313}
+    sampler.optimizer_step_offset += 312 - 313
+    corrected_batch = next(iter(sampler))
+    assert {row[1] for row in corrected_batch} == {312}
+
+
 def test_clean_collator_produces_two_distinct_crops_per_identity(tmp_path):
     audio_root = tmp_path / "audio"
     train_noise = tmp_path / "noise_train"

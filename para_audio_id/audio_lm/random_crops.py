@@ -273,9 +273,20 @@ class OnlineTrackBatchSampler(Sampler[list[tuple[int, int, int, int]]]):
         self.accumulation_steps = int(accumulation_steps)
         self.seed = int(seed)
         self.catalogue_pass = int(catalogue_pass)
+        self.optimizer_step_offset = 0
 
     def set_epoch(self, catalogue_pass: int) -> None:
         self.catalogue_pass = int(catalogue_pass)
+
+    def align_resume_position(
+        self, *, batches_yielded: int, global_step: int
+    ) -> None:
+        if not 0 <= batches_yielded <= len(self):
+            raise ValueError(f"Invalid resumed sampler position {batches_yielded}")
+        nominal_next_step = (
+            self.catalogue_pass * len(self) + int(batches_yielded)
+        ) // self.accumulation_steps
+        self.optimizer_step_offset = int(global_step) - nominal_next_step
 
     def __len__(self) -> int:
         batches = math.ceil(len(self.dataset) / self.tracks_per_microbatch)
@@ -296,7 +307,7 @@ class OnlineTrackBatchSampler(Sampler[list[tuple[int, int, int, int]]]):
                 first_batches.append(selected.copy())
             optimizer_step = (
                 self.catalogue_pass * len(self) + yielded
-            ) // self.accumulation_steps
+            ) // self.accumulation_steps + self.optimizer_step_offset
             yield [
                 (int(index), optimizer_step, yielded, slot)
                 for slot, index in enumerate(selected)
@@ -307,7 +318,7 @@ class OnlineTrackBatchSampler(Sampler[list[tuple[int, int, int, int]]]):
             selected = first_batches[padding_index % len(first_batches)]
             optimizer_step = (
                 self.catalogue_pass * len(self) + batch_idx
-            ) // self.accumulation_steps
+            ) // self.accumulation_steps + self.optimizer_step_offset
             yield [
                 (int(index), optimizer_step, batch_idx, slot)
                 for slot, index in enumerate(selected)

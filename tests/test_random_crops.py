@@ -97,6 +97,21 @@ def test_online_track_sampler_replays_exact_batches():
     assert len(first) % 2 == 0
 
 
+def test_online_track_sampler_rebases_after_completed_epoch_resume():
+    dataset = OnlineTrackDataset(records(10))
+    sampler = OnlineTrackBatchSampler(
+        dataset,
+        tracks_per_microbatch=10,
+        accumulation_steps=8,
+        seed=5,
+        catalogue_pass=312,
+    )
+    sampler.align_resume_position(batches_yielded=len(sampler), global_step=312)
+    sampler.set_epoch(313)
+    first_batch = next(iter(sampler))
+    assert {row[1] for row in first_batch} == {312}
+
+
 def test_clean_collator_produces_two_distinct_crops_per_identity(tmp_path):
     audio_root = tmp_path / "audio"
     train_noise = tmp_path / "noise_train"

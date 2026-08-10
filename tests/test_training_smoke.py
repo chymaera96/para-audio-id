@@ -159,7 +159,7 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
             "devices": 1,
             "strategy": "auto",
             "precision": "32-true",
-            "accumulate_grad_batches": 1,
+            "accumulate_grad_batches": 8,
             "log_every_n_steps": 1,
         },
     }
@@ -213,11 +213,11 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
         "audio_targets_per_microbatch": 2_000,
         "causal_tokens_per_microbatch": 2_160,
         "waveform_seconds_per_microbatch": 40.0,
-        "gradient_accumulation_steps": 1,
-        "tracks_per_optimizer_step": 10,
-        "documents_per_optimizer_step": 20,
-        "audio_targets_per_optimizer_step": 2_000,
-        "waveform_seconds_per_optimizer_step": 40.0,
+        "gradient_accumulation_steps": 8,
+        "tracks_per_optimizer_step": 80,
+        "documents_per_optimizer_step": 160,
+        "audio_targets_per_optimizer_step": 16_000,
+        "waveform_seconds_per_optimizer_step": 320.0,
     }
 
     invalid = tmp_path / "invalid.ckpt"

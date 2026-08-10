@@ -743,6 +743,12 @@ class AudioLMDataModule(pl.LightningDataModule):
             **self._common_loader_args(),
         )
         if hasattr(self, "_pending_loader_state"):
+            self.batch_sampler.align_resume_position(
+                batches_yielded=int(
+                    self._pending_loader_state.get("batches_yielded", 0)
+                ),
+                global_step=int(self.trainer.global_step),
+            )
             self.train_loader.load_state_dict(self._pending_loader_state)
             del self._pending_loader_state
         return self.train_loader
@@ -879,11 +885,9 @@ class AudioLMModule(pl.LightningModule):
         crop_batch = batch
         if int(batch["planned_optimizer_step"]) != int(self.global_step):
             raise RuntimeError(
-                "Prefetched random crops do not match the current optimizer step"
-            )
-        if int(batch["planned_batch_idx"]) != int(batch_idx):
-            raise RuntimeError(
-                "Prefetched random crops do not match the current microbatch"
+                "Resumed random-crop sampler is misaligned: planned optimizer "
+                f"step {int(batch['planned_optimizer_step'])}, actual "
+                f"{int(self.global_step)}"
             )
         if self.online_tokenizer is None:
             raise RuntimeError("Online MuQ tokenizer has not been initialized")

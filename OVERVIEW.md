@@ -15,6 +15,7 @@ should be taken from the corresponding W&B run or evaluation JSON.
 | `tc6` | Same 10K tracks | Clean paired views + exact clean/noisy pairs | 20 | 70K nominal | Masks noisy audio loss and aligns clean/noisy `[ID]` states |
 | `tc7` | Same 10K tracks | Continuous random five-second crops | 20 | 70K | Replaced fixed training grids with online crops |
 | `tc8` | Same 10K tracks | Continuous random two-second crops | 8 | 70K | Tests shorter queries at the same audio-to-ID loss ratio |
+| `tc9` | Same 10K tracks | Two-second crops, tc7-matched acoustic budget | 8 | 70K | Raises the physical batch from 8 to 20 documents |
 
 Each entry is a from-scratch model unless explicitly documented otherwise.
 In particular, `tc4` is not initialized from `tc3`, `tc5` is not initialized
@@ -50,9 +51,10 @@ From `tc2` onward, the system is a discrete-audio causal language model:
 - The common optimizer is AdamW with learning rate `3e-4`, betas
   `[0.9, 0.95]`, zero weight decay, BF16 mixed precision, and gradient clipping
   at `1.0`.
-- The single-GPU logical batch is 32 identities with two documents each:
-  four identities/eight documents per physical microbatch and eight gradient
-  accumulation steps.
+- Through tc8, the single-GPU logical batch is 32 identities with two documents
+  each: four identities/eight documents per physical microbatch and eight
+  gradient accumulation steps. tc9 increases this to ten identities/twenty
+  documents per physical microbatch while retaining accumulation eight.
 
 The arbitrary five-digit code mapping is preserved across the experiments so
 changes in behavior can be attributed to the training setup rather than a new
@@ -245,9 +247,26 @@ boundary. Each causal document has 108 tokens and remains within the unchanged
 512-position context. tc8 has distinct training and crop protocol markers and
 cannot initialize or resume from tc7.
 
+## `tc9`: token-budget-matched two-second crops
+
+`tc9` keeps tc8's two-second query, model, loss, noise curriculum, optimizer,
+evaluation protocol, and 70K update count, but increases the physical
+microbatch from four to ten tracks. With two documents per track, a tc9
+microbatch contains twenty 108-token documents, 2,000 audio targets, and 40
+seconds of waveform. This closely matches tc7's eight 258-token documents,
+2,000 audio targets, and 40 seconds of waveform per microbatch.
+
+Gradient accumulation remains eight, so tc9 processes 80 track selections and
+160 documents per optimizer update. This deliberately supplies 2.5 times as
+many identifier sequences as tc7 while matching its acoustic exposure. The
+experiment therefore separates tc8's reduced training-data budget from the
+intrinsic ambiguity and reduced evidence of a two-second query. Its distinct
+`token_budget_matched_two_second_noise_consistency_v1` checkpoint protocol
+rejects tc8 and earlier checkpoints.
+
 ## Interpretation
 
-The progression isolates seven questions:
+The progression isolates eight questions:
 
 1. `tc2`: can the causal formulation memorize audio-token-to-code mappings?
 2. `tc3`: does a smaller catalogue and stronger ID supervision make that
@@ -262,6 +281,9 @@ The progression isolates seven questions:
 7. `tc8`: how much identification and noise robustness remain when acoustic
    evidence is reduced from five seconds to two without changing the relative
    audio-to-identifier supervision strength?
+8. `tc9`: does matching tc7's acoustic-token and waveform budget recover the
+   two-second model's deficit, or is the remaining difficulty intrinsic to the
+   shorter and more ambiguous query?
 
 Teacher-forced digit accuracy is useful for optimization diagnostics, but the
 scientific identification result is free-running exact accuracy and beam

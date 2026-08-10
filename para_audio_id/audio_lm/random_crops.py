@@ -18,7 +18,7 @@ from .noise import (
     deterministic_consistency_noise_parameters,
     mix_background_noise,
     stable_uint64,
-    tc8_noise_consistency_schedule,
+    tc9_noise_consistency_schedule,
 )
 
 
@@ -410,7 +410,7 @@ class RandomCropCollator:
             raise ValueError("Random-crop batch has inconsistent sampler progress")
         optimizer_step = optimizer_steps.pop()
         batch_idx = batch_indices.pop()
-        schedule = tc8_noise_consistency_schedule(optimizer_step)
+        schedule = tc9_noise_consistency_schedule(optimizer_step)
         keys = [
             stable_uint64(
                 self.seed,

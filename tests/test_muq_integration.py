@@ -16,7 +16,7 @@ from para_audio_id.audio_lm.tokenizer import MuQRVQTokenizer
     os.environ.get("RUN_MUQ_INTEGRATION") != "1",
     reason="set RUN_MUQ_INTEGRATION=1 to load the real MuQ checkpoint",
 )
-def test_real_muq_two_second_rvq_probe():
+def test_real_muq_tc9_matched_budget_probe():
     tokenizer = MuQRVQTokenizer(
         "OpenMuQ/MuQ-large-msd-iter",
         selected_codebooks=2,
@@ -37,13 +37,16 @@ def test_real_muq_two_second_rvq_probe():
         lightweight=True,
     )
     anchors = torch.cat(
-        [waveform.roll(index * 1_000, dims=1) for index in range(4)]
+        [waveform.roll(index * 1_000, dims=1) for index in range(10)]
     ).to(lightweight.device)
     noises = anchors.roll(7_000, dims=1)
     mixed, valid = mix_background_noise(
         anchors,
         noises,
-        torch.tensor([0.0, 5.0, 10.0, 20.0], device=lightweight.device),
+        torch.tensor(
+            [0.0, 5.0, 10.0, 20.0, 30.0] * 2,
+            device=lightweight.device,
+        ),
     )
     assert valid.all()
     online_waveforms = torch.stack(
@@ -55,7 +58,7 @@ def test_real_muq_two_second_rvq_probe():
     )
     lightweight_tokens = lightweight.tokenize(online_waveforms)
     assert torch.equal(lightweight_tokens[0].cpu(), audio_tokens)
-    assert lightweight_tokens.shape == (8, 100)
+    assert lightweight_tokens.shape == (20, 100)
     cfg = {
         "model": {
             "architecture": "gpt2",
@@ -72,7 +75,7 @@ def test_real_muq_two_second_rvq_probe():
     model = AudioCausalLM(cfg, tokenizer.vocabulary).to(tokenizer.device)
     examples = []
     is_noisy = []
-    for pair in range(4):
+    for pair in range(10):
         for role, tokens in enumerate(
             lightweight_tokens[pair * 2 : pair * 2 + 2].cpu()
         ):
@@ -91,7 +94,8 @@ def test_real_muq_two_second_rvq_probe():
         tokenizer.vocabulary,
         512,
     )
-    assert batch["input_ids"].shape == (8, 108)
+    assert batch["input_ids"].shape == (20, 108)
+    assert int(batch["audio_target_mask"].sum()) == 2_000
     logits, hidden = model(
         batch["input_ids"].to(tokenizer.device),
         batch["attention_mask"].to(tokenizer.device),

@@ -5,7 +5,10 @@ import pytest
 import yaml
 
 from para_audio_id.audio_lm.tokenizer import TokenizerSpec
-from para_audio_id.audio_lm.training import validate_tc8_query_configuration
+from para_audio_id.audio_lm.training import (
+    validate_tc9_query_configuration,
+    validate_tc9_batch_configuration,
+)
 from para_audio_id.audio_lm.vocabulary import AudioLMVocabulary
 from para_audio_id.codes import assign_codes
 
@@ -20,8 +23,9 @@ def test_primary_config_is_audio_lm_and_matches_logical_batch():
     physical_documents = (
         cfg["train"]["tracks_per_microbatch"] * cfg["train"]["segments_per_track"]
     )
-    assert physical_documents == 8
-    assert physical_documents * cfg["trainer"]["accumulate_grad_batches"] == 64
+    assert physical_documents == 20
+    assert physical_documents * cfg["trainer"]["accumulate_grad_batches"] == 160
+    assert cfg["train"]["tracks_per_microbatch"] == 10
     assert cfg["train"]["deterministic"]
     assert cfg["data"]["segment_duration"] == 2.0
     assert cfg["tokenizer"]["sample_rate"] * cfg["data"]["segment_duration"] == 48_000
@@ -33,7 +37,7 @@ def test_primary_config_is_audio_lm_and_matches_logical_batch():
     assert cfg["train"]["checkpoint_interval"] == 500
     assert (
         cfg["train"]["schedule"]["protocol"]
-        == "two_second_online_random_crop_noise_consistency_v1"
+        == "token_budget_matched_two_second_noise_consistency_v1"
     )
     assert (
         cfg["train"]["schedule"]["loss_protocol"]
@@ -55,7 +59,7 @@ def test_primary_config_is_audio_lm_and_matches_logical_batch():
     assert not any(key.startswith("id_loss_") for key in cfg["train"])
 
 
-def test_tc8_startup_query_invariants_are_enforced():
+def test_tc9_startup_query_invariants_are_enforced():
     cfg = yaml.safe_load(
         (Path(__file__).parents[1] / "configs" / "fma_large.yaml").read_text()
     )
@@ -73,27 +77,41 @@ def test_tc8_startup_query_invariants_are_enforced():
         serialization="time_major_codebook_interleaved",
         preprocessing_version=1,
     )
-    query_spec = validate_tc8_query_configuration(
+    query_spec = validate_tc9_query_configuration(
         cfg, tokenizer_spec, AudioLMVocabulary()
     )
+    batch_spec = validate_tc9_batch_configuration(cfg, query_spec)
     assert query_spec["waveform_samples"] == 48_000
     assert query_spec["frames"] == 50
     assert query_spec["audio_targets"] == 100
     assert query_spec["digit_targets"] == 5
     assert query_spec["boundary_targets"] == 2
     assert query_spec["document_tokens"] == 108
+    assert batch_spec["documents_per_microbatch"] == 20
+    assert batch_spec["audio_targets_per_microbatch"] == 2_000
+    assert batch_spec["causal_tokens_per_microbatch"] == 2_160
+    assert batch_spec["waveform_seconds_per_microbatch"] == 40.0
+    assert batch_spec["tracks_per_optimizer_step"] == 80
+    assert batch_spec["documents_per_optimizer_step"] == 160
+    assert batch_spec["audio_targets_per_optimizer_step"] == 16_000
+    assert batch_spec["waveform_seconds_per_optimizer_step"] == 320.0
+
+    wrong_batch = deepcopy(cfg)
+    wrong_batch["train"]["tracks_per_microbatch"] = 4
+    with pytest.raises(ValueError, match="10 tracks per microbatch"):
+        validate_tc9_batch_configuration(wrong_batch, query_spec)
 
     wrong_duration = deepcopy(cfg)
     wrong_duration["data"]["segment_duration"] = 5.0
     with pytest.raises(ValueError, match="segment_duration=2.0"):
-        validate_tc8_query_configuration(
+        validate_tc9_query_configuration(
             wrong_duration, tokenizer_spec, AudioLMVocabulary()
         )
 
     wrong_weight = deepcopy(cfg)
     wrong_weight["train"]["id_digit_weight"] = 20.0
     with pytest.raises(ValueError, match="id_digit_weight=8"):
-        validate_tc8_query_configuration(
+        validate_tc9_query_configuration(
             wrong_weight, tokenizer_spec, AudioLMVocabulary()
         )
 

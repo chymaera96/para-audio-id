@@ -434,7 +434,7 @@ def evaluate(
     model, vocabulary, cfg, checkpoint = load_audio_lm(checkpoint_path, device)
     if (
         checkpoint.get("training_protocol")
-        == "two_second_online_random_crop_noise_consistency_v1"
+        == "token_budget_matched_two_second_noise_consistency_v1"
     ):
         return _evaluate_tc6_monitor_manifest(
             model,

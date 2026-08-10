@@ -41,7 +41,7 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
     catalogue = tmp_path / "catalogue.jsonl"
     rows = []
     track_ids = []
-    for index in range(4):
+    for index in range(10):
         path = f"{index}.wav"
         track_id = f"track-{index}"
         sf.write(audio_root / path, waveform, 8_000)
@@ -102,7 +102,7 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
             "audio_root": str(audio_root),
             "catalogue": str(catalogue),
             "training_tracks_manifest": str(manifest),
-            "max_training_tracks": 4,
+            "max_training_tracks": 10,
             "segment_duration": 2.0,
             "crop_retries": 4,
             "replacement_retries": 32,
@@ -119,7 +119,7 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
             "checkpoint_dir": str(tmp_path / "checkpoints"),
             "run_id": "smoke",
             "max_steps": 2,
-            "tracks_per_microbatch": 4,
+            "tracks_per_microbatch": 10,
             "segments_per_track": 2,
             "learning_rate": 3e-4,
             "betas": [0.9, 0.95],
@@ -130,7 +130,7 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
             "id_digit_weight": 8.0,
             "gradient_clip_norm": 1.0,
             "schedule": {
-                "protocol": "two_second_online_random_crop_noise_consistency_v1",
+                "protocol": "token_budget_matched_two_second_noise_consistency_v1",
                 "loss_protocol": "tc5_family_weighted_consistency_v2",
                 "clean_until_step": 20_000,
                 "ramp_until_step": 25_000,
@@ -179,7 +179,7 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
     assert checkpoint["global_step"] == 2
     assert (
         checkpoint["training_protocol"]
-        == "two_second_online_random_crop_noise_consistency_v1"
+        == "token_budget_matched_two_second_noise_consistency_v1"
     )
     assert checkpoint["loss_protocol"] == "tc5_family_weighted_consistency_v2"
     assert checkpoint["monitor_protocol"] == "compact_beam_monitor_v2"
@@ -206,6 +206,19 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
         "id_digit_weight": 8.0,
         "max_position_embeddings": 512,
     }
+    assert checkpoint["batch_spec"] == {
+        "tracks_per_microbatch": 10,
+        "documents_per_track": 2,
+        "documents_per_microbatch": 20,
+        "audio_targets_per_microbatch": 2_000,
+        "causal_tokens_per_microbatch": 2_160,
+        "waveform_seconds_per_microbatch": 40.0,
+        "gradient_accumulation_steps": 1,
+        "tracks_per_optimizer_step": 10,
+        "documents_per_optimizer_step": 20,
+        "audio_targets_per_optimizer_step": 2_000,
+        "waveform_seconds_per_optimizer_step": 40.0,
+    }
 
     invalid = tmp_path / "invalid.ckpt"
     checkpoint["training_protocol"] = "online_random_crop_noise_consistency_v1"
@@ -214,7 +227,7 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
         train(cfg, checkpoint=invalid)
 
 
-def test_tc8_wandb_keys_match_retained_tc6_schema():
+def test_tc9_wandb_keys_match_retained_tc6_schema():
     assert TRAIN_METRICS == {
         "clean_audio_loss",
         "digit_loss",

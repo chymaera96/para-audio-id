@@ -61,11 +61,11 @@ features or another codec.
 
 ## Historical offline tokenization utilities
 
-The repository still contains the older cache-preparation commands, but tc8
+The repository still contains the older cache-preparation commands, but tc9
 does not use canonical, shifted, or half-offset token stores for training or
 evaluation. They remain useful only when reproducing tc2–tc6 from Git history.
 
-tc8 needs only the established 10K identity manifest:
+tc9 needs only the established 10K identity manifest:
 
 ```bash
 test -f data/training_tracks_10k.json
@@ -78,11 +78,11 @@ hidden size 768, 12 heads, tied embeddings, and no dropout. The vocabulary has
 2,048 collision-free audio tokens, `[BOS]`, `[ID]`, ten dedicated digit tokens,
 and `[EOS]`.
 
-tc8 uses the exact established 10,000 identities but samples every two-second
+tc9 uses the exact established 10,000 identities but samples every two-second
 crop online. Each selected identity contributes two independently sampled clean
 crops, or an exact same-crop clean/noisy pair when noise is selected. Workers
 decode the final waveforms and one frozen lightweight MuQ call tokenizes all
-eight documents in each physical microbatch.
+twenty documents in each physical microbatch.
 
 ```text
 loss =
@@ -114,15 +114,17 @@ Noisy examples use fixed SNR-bin probabilities `0.40/0.30/0.20/0.10` for
 `0–5/5–10/10–20/20–30 dB`; 10% of noisy views are exactly 0 dB. The LR uses
 ordinary raw-step warm-up and cosine decay without gates, pauses, or recovery.
 
-The single-GPU logical batch is 32 tracks × 2 segments: a physical microbatch of
-four tracks × two segments with eight gradient-accumulation steps.
+The single-GPU logical batch is 80 tracks × 2 segments: a physical microbatch of
+ten tracks × two segments with eight gradient-accumulation steps. Each physical
+microbatch contains 2,000 audio targets and 40 seconds of waveform, matching
+tc7's five-second acoustic budget while retaining two-second queries.
 
 The run is exactly 70,000 optimizer steps. Checkpoints are saved every 500
 steps. For direct comparison with tc6, the same seeded 100-track cohort is
 evaluated using one balanced canonical, integer-shifted, and held-out
 half-offset crop per track. All three groups are evaluated clean and at
 0/5/10/20/30 dB at step zero, every 2,500 steps, and at completion. Evaluation
-crops are two seconds long and are decoded and tokenized online; tc8 still has
+crops are two seconds long and are decoded and tokenized online; tc9 still has
 no runtime token-store dependency. W&B uses the same compact metric names as
 tc6, while complete
 training metrics retain tc6's `_step` and `_epoch` suffixes. Complete beam
@@ -131,7 +133,7 @@ Top-1/5/10 and MRR results are appended to `probe_metrics.jsonl`.
 ```bash
 python train.py configs/fma_large.yaml \
   --devices 1 \
-  --run-id tc8 \
+  --run-id tc9 \
   --wandb-online
 ```
 
@@ -141,7 +143,7 @@ state:
 ```bash
 python train.py configs/fma_large.yaml \
   --devices 1 \
-  --run-id tc8 \
+  --run-id tc9 \
   --wandb-online \
   --resume
 ```
@@ -155,7 +157,7 @@ Checkpoints are written every 500 optimizer steps under:
 Checkpoints embed the vocabulary, exact cohort, random-crop and replacement
 policies, fixed monitor manifest, noise/tokenizer fingerprints, sampler state,
 RNG state, query specification, and code mapping. Resume is accepted only for
-compatible tc8 checkpoints; tc7 and all earlier checkpoints are rejected.
+compatible tc9 checkpoints; tc8 and all earlier checkpoints are rejected.
 
 PyTorch deterministic algorithms and seeded Python, NumPy, Torch, samplers, and
 workers are enabled. `deterministic_warn_only: true` reports CUDA operations for
@@ -168,8 +170,8 @@ manifest and tokenizes clean and noisy two-second query audio online:
 
 ```bash
 python evaluate.py \
-  /gpfs/scratch/acw723/para-audio-id/audio-lm-checkpoints/tc8/last.ckpt \
-  evaluation-tc8.json
+  /gpfs/scratch/acw723/para-audio-id/audio-lm-checkpoints/tc9/last.ckpt \
+  evaluation-tc9.json
 ```
 
 It reports clean and per-SNR greedy exact accuracy, beam Top-1/5/10, MRR, and

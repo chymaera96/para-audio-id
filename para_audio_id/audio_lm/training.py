@@ -41,7 +41,7 @@ from .noise import (
     mix_background_noise,
     noise_consistency_schedule,
     stable_uint64,
-    tc8_noise_consistency_schedule,
+    tc9_noise_consistency_schedule,
 )
 from .random_crops import (
     CROP_POLICY,
@@ -58,18 +58,22 @@ from .token_store import TokenStoreIndex
 from .tokenization import load_training_track_ids
 from .vocabulary import AudioLMVocabulary
 
-TRAINING_PROTOCOL = "two_second_online_random_crop_noise_consistency_v1"
+TRAINING_PROTOCOL = "token_budget_matched_two_second_noise_consistency_v1"
 LOSS_PROTOCOL = "tc5_family_weighted_consistency_v2"
 MONITOR_PROTOCOL = "compact_beam_monitor_v2"
-TC8_SEGMENT_DURATION = 2.0
-TC8_SAMPLE_RATE = 24_000
-TC8_FRAME_RATE = 25.0
-TC8_SELECTED_CODEBOOKS = 2
-TC8_AUDIO_TARGETS = 100
-TC8_DIGIT_TARGETS = 5
-TC8_BOUNDARY_TARGETS = 2
-TC8_DOCUMENT_TOKENS = 108
-TC8_ID_DIGIT_WEIGHT = 8.0
+TC9_SEGMENT_DURATION = 2.0
+TC9_SAMPLE_RATE = 24_000
+TC9_FRAME_RATE = 25.0
+TC9_SELECTED_CODEBOOKS = 2
+TC9_AUDIO_TARGETS = 100
+TC9_DIGIT_TARGETS = 5
+TC9_BOUNDARY_TARGETS = 2
+TC9_DOCUMENT_TOKENS = 108
+TC9_ID_DIGIT_WEIGHT = 8.0
+TC9_TRACKS_PER_MICROBATCH = 10
+TC9_SEGMENTS_PER_TRACK = 2
+TC9_DOCUMENTS_PER_MICROBATCH = 20
+TC9_AUDIO_TARGETS_PER_MICROBATCH = 2_000
 TRAIN_METRICS = {
     "clean_audio_loss",
     "digit_loss",
@@ -117,7 +121,7 @@ def tc6_probe_wandb_keys(snr_values: list[float]) -> set[str]:
     }
 
 
-def validate_tc8_query_configuration(
+def validate_tc9_query_configuration(
     cfg: dict,
     tokenizer_spec: TokenizerSpec,
     vocabulary: AudioLMVocabulary,
@@ -125,70 +129,70 @@ def validate_tc8_query_configuration(
     duration = float(cfg["data"]["segment_duration"])
     id_digit_weight = float(cfg["train"]["id_digit_weight"])
     max_positions = int(cfg["model"]["max_position_embeddings"])
-    if not math.isclose(duration, TC8_SEGMENT_DURATION):
+    if not math.isclose(duration, TC9_SEGMENT_DURATION):
         raise ValueError(
-            f"tc8 requires segment_duration={TC8_SEGMENT_DURATION}, got {duration}"
+            f"tc9 requires segment_duration={TC9_SEGMENT_DURATION}, got {duration}"
         )
-    if tokenizer_spec.sample_rate != TC8_SAMPLE_RATE:
+    if tokenizer_spec.sample_rate != TC9_SAMPLE_RATE:
         raise ValueError(
-            f"tc8 requires a {TC8_SAMPLE_RATE} Hz tokenizer, got "
+            f"tc9 requires a {TC9_SAMPLE_RATE} Hz tokenizer, got "
             f"{tokenizer_spec.sample_rate}"
         )
-    if not math.isclose(tokenizer_spec.frame_rate, TC8_FRAME_RATE):
+    if not math.isclose(tokenizer_spec.frame_rate, TC9_FRAME_RATE):
         raise ValueError(
-            f"tc8 requires {TC8_FRAME_RATE:g} MuQ frames/s, got "
+            f"tc9 requires {TC9_FRAME_RATE:g} MuQ frames/s, got "
             f"{tokenizer_spec.frame_rate:g}"
         )
-    if tokenizer_spec.selected_codebooks != TC8_SELECTED_CODEBOOKS:
+    if tokenizer_spec.selected_codebooks != TC9_SELECTED_CODEBOOKS:
         raise ValueError(
-            f"tc8 requires {TC8_SELECTED_CODEBOOKS} selected codebooks, got "
+            f"tc9 requires {TC9_SELECTED_CODEBOOKS} selected codebooks, got "
             f"{tokenizer_spec.selected_codebooks}"
         )
-    if not math.isclose(id_digit_weight, TC8_ID_DIGIT_WEIGHT):
+    if not math.isclose(id_digit_weight, TC9_ID_DIGIT_WEIGHT):
         raise ValueError(
-            f"tc8 requires id_digit_weight={TC8_ID_DIGIT_WEIGHT:g}, got "
+            f"tc9 requires id_digit_weight={TC9_ID_DIGIT_WEIGHT:g}, got "
             f"{id_digit_weight:g}"
         )
     if max_positions != 512:
         raise ValueError(
-            f"tc8 preserves max_position_embeddings=512, got {max_positions}"
+            f"tc9 preserves max_position_embeddings=512, got {max_positions}"
         )
     audio_targets = round(
         duration
         * tokenizer_spec.frame_rate
         * tokenizer_spec.selected_codebooks
     )
-    if audio_targets != TC8_AUDIO_TARGETS:
+    if audio_targets != TC9_AUDIO_TARGETS:
         raise ValueError(
-            f"tc8 requires {TC8_AUDIO_TARGETS} audio targets, got {audio_targets}"
+            f"tc9 requires {TC9_AUDIO_TARGETS} audio targets, got {audio_targets}"
         )
     example = {
         "audio_tokens": torch.zeros(audio_targets, dtype=torch.long),
         "code": "00000",
-        "track_id": "tc8-startup-probe",
+        "track_id": "tc9-startup-probe",
         "document_index": -1,
     }
     batch = collate_causal_documents([example], vocabulary, max_positions)
     digit_targets = int(batch["id_target_mask"].sum())
     boundary_targets = int(batch["boundary_target_mask"].sum())
     document_tokens = int(batch["attention_mask"].sum())
-    if digit_targets != TC8_DIGIT_TARGETS:
+    if digit_targets != TC9_DIGIT_TARGETS:
         raise ValueError(
-            f"tc8 requires {TC8_DIGIT_TARGETS} digit targets, got {digit_targets}"
+            f"tc9 requires {TC9_DIGIT_TARGETS} digit targets, got {digit_targets}"
         )
-    if boundary_targets != TC8_BOUNDARY_TARGETS:
+    if boundary_targets != TC9_BOUNDARY_TARGETS:
         raise ValueError(
-            f"tc8 requires {TC8_BOUNDARY_TARGETS} boundary targets, got "
+            f"tc9 requires {TC9_BOUNDARY_TARGETS} boundary targets, got "
             f"{boundary_targets}"
         )
-    if document_tokens != TC8_DOCUMENT_TOKENS:
+    if document_tokens != TC9_DOCUMENT_TOKENS:
         raise ValueError(
-            f"tc8 requires {TC8_DOCUMENT_TOKENS} document tokens, got "
+            f"tc9 requires {TC9_DOCUMENT_TOKENS} document tokens, got "
             f"{document_tokens}"
         )
     if document_tokens > max_positions:
         raise ValueError(
-            f"tc8 document length {document_tokens} exceeds context {max_positions}"
+            f"tc9 document length {document_tokens} exceeds context {max_positions}"
         )
     return {
         "segment_duration_seconds": duration,
@@ -203,6 +207,49 @@ def validate_tc8_query_configuration(
         "document_tokens": document_tokens,
         "id_digit_weight": id_digit_weight,
         "max_position_embeddings": max_positions,
+    }
+
+
+def validate_tc9_batch_configuration(cfg: dict, query_spec: dict) -> dict:
+    tracks = int(cfg["train"]["tracks_per_microbatch"])
+    segments = int(cfg["train"]["segments_per_track"])
+    accumulation = int(cfg["trainer"]["accumulate_grad_batches"])
+    if tracks != TC9_TRACKS_PER_MICROBATCH:
+        raise ValueError(
+            f"tc9 requires {TC9_TRACKS_PER_MICROBATCH} tracks per microbatch, "
+            f"got {tracks}"
+        )
+    if segments != TC9_SEGMENTS_PER_TRACK:
+        raise ValueError(
+            f"tc9 requires {TC9_SEGMENTS_PER_TRACK} documents per track, "
+            f"got {segments}"
+        )
+    documents = tracks * segments
+    audio_targets = documents * int(query_spec["audio_targets"])
+    causal_tokens = documents * int(query_spec["document_tokens"])
+    waveform_seconds = documents * float(query_spec["segment_duration_seconds"])
+    if documents != TC9_DOCUMENTS_PER_MICROBATCH:
+        raise ValueError(
+            f"tc9 requires {TC9_DOCUMENTS_PER_MICROBATCH} documents per "
+            f"microbatch, got {documents}"
+        )
+    if audio_targets != TC9_AUDIO_TARGETS_PER_MICROBATCH:
+        raise ValueError(
+            f"tc9 requires {TC9_AUDIO_TARGETS_PER_MICROBATCH} audio targets per "
+            f"microbatch, got {audio_targets}"
+        )
+    return {
+        "tracks_per_microbatch": tracks,
+        "documents_per_track": segments,
+        "documents_per_microbatch": documents,
+        "audio_targets_per_microbatch": audio_targets,
+        "causal_tokens_per_microbatch": causal_tokens,
+        "waveform_seconds_per_microbatch": waveform_seconds,
+        "gradient_accumulation_steps": accumulation,
+        "tracks_per_optimizer_step": tracks * accumulation,
+        "documents_per_optimizer_step": documents * accumulation,
+        "audio_targets_per_optimizer_step": audio_targets * accumulation,
+        "waveform_seconds_per_optimizer_step": waveform_seconds * accumulation,
     }
 
 
@@ -751,6 +798,7 @@ class AudioLMModule(pl.LightningModule):
         monitor_recipes: list[dict],
         noise_manifest: dict,
         query_spec: dict,
+        batch_spec: dict,
     ):
         super().__init__()
         self.cfg = cfg
@@ -763,6 +811,7 @@ class AudioLMModule(pl.LightningModule):
         self.monitor_recipes = monitor_recipes
         self.noise_manifest = noise_manifest
         self.query_spec = query_spec
+        self.batch_spec = batch_spec
         self.model = AudioCausalLM(cfg, vocabulary)
         self.online_tokenizer = None
         self._last_probe_step = -1
@@ -891,7 +940,7 @@ class AudioLMModule(pl.LightningModule):
             row["pair_role"] for row in crop_batch["metadata"]
         ]
         batch = prepared
-        schedule = tc8_noise_consistency_schedule(int(self.global_step))
+        schedule = tc9_noise_consistency_schedule(int(self.global_step))
         realized_noisy = int(batch["is_noisy"].sum())
         for name in crop_batch["snr_bins"]:
             if name is not None:
@@ -1253,7 +1302,7 @@ class AudioLMModule(pl.LightningModule):
             int(self.global_step) == 0
             and self.cfg["evaluation"].get("online_monitor_enabled", True)
         ):
-            self._generation_probe_tc8()
+            self._generation_probe_tc9()
 
     def _verify_cached_token_equivalence(self) -> None:
         count = int(
@@ -1310,13 +1359,13 @@ class AudioLMModule(pl.LightningModule):
             torch.cuda.reset_peak_memory_stats(self.device)
 
     def on_validation_epoch_end(self) -> None:
-        self._generation_probe_tc8()
+        self._generation_probe_tc9()
 
     def on_train_end(self) -> None:
         if self._last_probe_step != int(self.global_step):
-            self._generation_probe_tc8()
+            self._generation_probe_tc9()
 
-    def _generation_probe_tc8(self) -> None:
+    def _generation_probe_tc9(self) -> None:
         if not self.cfg["evaluation"].get("online_monitor_enabled", True):
             self._last_probe_step = int(self.global_step)
             return
@@ -1589,7 +1638,7 @@ class AudioLMModule(pl.LightningModule):
         unexpected = set(metrics) - allowed_probe_keys
         if unexpected:
             raise RuntimeError(
-                f"tc8 produced non-tc6 W&B probe keys: {sorted(unexpected)}"
+                f"tc9 produced non-tc6 W&B probe keys: {sorted(unexpected)}"
             )
         if self.logger is not None:
             self.logger.log_metrics(metrics, step=self.global_step)
@@ -1893,6 +1942,7 @@ class AudioLMModule(pl.LightningModule):
                 "monitor_recipes": self.monitor_recipes,
                 "background_noise_manifest": self.noise_manifest,
                 "query_spec": self.query_spec,
+                "batch_spec": self.batch_spec,
                 "documents_consumed": self.documents_consumed,
                 "tokens_consumed": self.tokens_consumed,
                 "last_probe_step": self._last_probe_step,
@@ -1946,6 +1996,8 @@ class AudioLMModule(pl.LightningModule):
             raise ValueError("Resume checkpoint background-noise assets do not match")
         if checkpoint.get("query_spec") != self.query_spec:
             raise ValueError("Resume checkpoint two-second query specification differs")
+        if checkpoint.get("batch_spec") != self.batch_spec:
+            raise ValueError("Resume checkpoint tc9 batch specification differs")
         if (
             checkpoint.get("training_corpus_fingerprint")
             != self.training_corpus_fingerprint
@@ -2063,7 +2115,7 @@ def train(cfg: dict, *, checkpoint: str | Path | None = None) -> None:
     }
     for key, expected in expected_schedule.items():
         if cfg["train"]["schedule"].get(key) != expected:
-            raise ValueError(f"tc8 schedule setting {key} must be {expected}")
+            raise ValueError(f"tc9 schedule setting {key} must be {expected}")
     seed = int(cfg["train"]["seed"])
     pl.seed_everything(seed, workers=True)
     torch.use_deterministic_algorithms(
@@ -2083,19 +2135,20 @@ def train(cfg: dict, *, checkpoint: str | Path | None = None) -> None:
         device=tokenizer_cfg.get("device", "cuda"),
         lightweight=True,
     )
-    query_spec = validate_tc8_query_configuration(
+    query_spec = validate_tc9_query_configuration(
         cfg, online_tokenizer.spec, online_tokenizer.vocabulary
     )
+    batch_spec = validate_tc9_batch_configuration(cfg, query_spec)
     startup_waveform = torch.zeros(
         (1, int(query_spec["waveform_samples"])),
         device=online_tokenizer.device,
     )
     startup_tokens = online_tokenizer.tokenize(startup_waveform)
-    expected_startup_shape = (1, TC8_AUDIO_TARGETS)
+    expected_startup_shape = (1, TC9_AUDIO_TARGETS)
     if tuple(startup_tokens.shape) != expected_startup_shape:
         raise ValueError(
-            "tc8 requires the loaded MuQ tokenizer to produce exactly "
-            f"{TC8_AUDIO_TARGETS} audio targets for a two-second waveform; "
+            "tc9 requires the loaded MuQ tokenizer to produce exactly "
+            f"{TC9_AUDIO_TARGETS} audio targets for a two-second waveform; "
             f"got {tuple(startup_tokens.shape)}"
         )
     datamodule = AudioLMDataModule(
@@ -2115,6 +2168,9 @@ def train(cfg: dict, *, checkpoint: str | Path | None = None) -> None:
     (directory / "query_spec.json").write_text(
         json.dumps(query_spec, indent=2, sort_keys=True) + "\n"
     )
+    (directory / "batch_spec.json").write_text(
+        json.dumps(batch_spec, indent=2, sort_keys=True) + "\n"
+    )
     module = AudioLMModule(
         cfg,
         datamodule.vocabulary,
@@ -2126,6 +2182,7 @@ def train(cfg: dict, *, checkpoint: str | Path | None = None) -> None:
         datamodule.monitor_recipes,
         datamodule.noise_assets.manifest(),
         query_spec,
+        batch_spec,
     )
     module.online_tokenizer = online_tokenizer
     logger = build_logger(cfg, directory)

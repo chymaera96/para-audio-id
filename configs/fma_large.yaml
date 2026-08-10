@@ -38,7 +38,7 @@ train:
   checkpoint_dir: /gpfs/scratch/acw723/para-audio-id/audio-lm-checkpoints
   run_id:
   max_steps: 70000
-  tracks_per_microbatch: 4
+  tracks_per_microbatch: 10
   segments_per_track: 2
   learning_rate: 3.0e-4
   betas: [0.9, 0.95]
@@ -49,7 +49,7 @@ train:
   id_digit_weight: 8.0
   gradient_clip_norm: 1.0
   schedule:
-    protocol: two_second_online_random_crop_noise_consistency_v1
+    protocol: token_budget_matched_two_second_noise_consistency_v1
     loss_protocol: tc5_family_weighted_consistency_v2
     clean_until_step: 20000
     ramp_until_step: 25000

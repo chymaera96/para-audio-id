@@ -99,7 +99,7 @@ def noise_consistency_schedule(
     )
 
 
-def tc8_noise_consistency_schedule(step: int) -> NoiseConsistencySchedule:
+def tc9_noise_consistency_schedule(step: int) -> NoiseConsistencySchedule:
     if step < 0:
         raise ValueError("Global step cannot be negative")
     if step < 20_000:

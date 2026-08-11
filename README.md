@@ -61,14 +61,15 @@ features or another codec.
 
 ## Historical offline tokenization utilities
 
-The repository still contains the older cache-preparation commands, but tc9
+The repository still contains the older cache-preparation commands, but tc11
 does not use canonical, shifted, or half-offset token stores for training or
 evaluation. They remain useful only when reproducing tc2–tc6 from Git history.
 
-tc9 needs only the established 10K identity manifest:
+tc11 needs a fresh seeded 25K identity manifest:
 
 ```bash
-test -f data/training_tracks_10k.json
+python prepare_training_cohort.py configs/fma_large.yaml
+test -f data/training_tracks_25k.json
 ```
 
 ## Training
@@ -78,11 +79,11 @@ hidden size 768, 12 heads, tied embeddings, and no dropout. The vocabulary has
 2,048 collision-free audio tokens, `[BOS]`, `[ID]`, ten dedicated digit tokens,
 and `[EOS]`.
 
-tc9 uses the exact established 10,000 identities but samples every two-second
-crop online. Each selected identity contributes two independently sampled clean
-crops, or an exact same-crop clean/noisy pair when noise is selected. Workers
-decode the final waveforms and one frozen lightweight MuQ call tokenizes all
-twenty documents in each physical microbatch.
+tc11 samples online two-second crops from a fresh 25,000-track cohort. Each
+identity contributes a clean anchor and one secondary view: a distinct clean
+crop, an exact same-crop background-noise view, an exact same-crop room-reverb
+view, or the combined noise-then-reverb view. One frozen lightweight MuQ call
+tokenizes all twenty final waveforms in each physical microbatch.
 
 ```text
 loss =
@@ -104,11 +105,14 @@ ratio despite the shorter query. The previous
 tc5 weighted-token loss is also logged as a detached comparison metric.
 Checkpoints record the `tc5_family_weighted_consistency_v2` loss protocol.
 
-| Raw steps | Noise probability | Consistency weight |
-| ---: | ---: | ---: |
-| 0–20K | 0 | 0 |
-| 20–25K | 0 → 0.75 | 0 → 0.10 |
-| 25–70K | 0.75 | 0.10 |
+| Raw steps | Clean | Noise | RIR | Noise + RIR | Consistency weight |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 0–50K | 1.00 | 0 | 0 | 0 | 0 |
+| 50–62.5K | 1-p | p: 0 → 0.75 | 0 | 0 | 0 → 0.10 |
+| 62.5–87.5K | 0.25 | 0.75 | 0 | 0 | 0.10 |
+| 87.5–100K | 0.25 | 0.75 → 0.55 | 0 → 0.20 | 0 | 0.10 |
+| 100–112.5K | 0.25 | 0.55 → 0.35 | 0.20 | 0 → 0.20 | 0.10 |
+| 112.5–175K | 0.25 | 0.35 | 0.20 | 0.20 | 0.10 |
 
 Noisy examples use fixed SNR-bin probabilities `0.40/0.30/0.20/0.10` for
 `0–5/5–10/10–20/20–30 dB`; 10% of noisy views are exactly 0 dB. The LR uses
@@ -119,21 +123,25 @@ ten tracks × two segments with eight gradient-accumulation steps. Each physical
 microbatch contains 2,000 audio targets and 40 seconds of waveform, matching
 tc7's five-second acoustic budget while retaining two-second queries.
 
-The run is exactly 70,000 optimizer steps. Checkpoints are saved every 500
+RIR uses full-wet causal convolution with two seconds of preceding audio;
+the prefix is discarded after convolution so reverberant tails from preceding
+music enter the query. Room IR train/test assets are source- and content-disjoint.
+
+The run is exactly 175,000 optimizer steps. Checkpoints are saved every 500
 steps. For direct comparison with tc6, the same seeded 100-track cohort is
 evaluated using one balanced canonical, integer-shifted, and held-out
 half-offset crop per track. All three groups are evaluated clean and at
 0/5/10/20/30 dB at step zero, every 2,500 steps, and at completion. Evaluation
-crops are two seconds long and are decoded and tokenized online; tc9 still has
-no runtime token-store dependency. W&B uses the same compact metric names as
-tc6, while complete
+crops are two seconds long and are decoded and tokenized online; tc11 still has
+no runtime token-store dependency. W&B keeps the tc6/tc9 compact metric names
+and adds aggregate RIR-only and noise+RIR beam Top-1, while complete
 training metrics retain tc6's `_step` and `_epoch` suffixes. Complete beam
 Top-1/5/10 and MRR results are appended to `probe_metrics.jsonl`.
 
 ```bash
 python train.py configs/fma_large.yaml \
   --devices 1 \
-  --run-id tc9 \
+  --run-id tc11 \
   --wandb-online
 ```
 
@@ -143,7 +151,7 @@ state:
 ```bash
 python train.py configs/fma_large.yaml \
   --devices 1 \
-  --run-id tc9 \
+  --run-id tc11 \
   --wandb-online \
   --resume
 ```
@@ -157,7 +165,7 @@ Checkpoints are written every 500 optimizer steps under:
 Checkpoints embed the vocabulary, exact cohort, random-crop and replacement
 policies, fixed monitor manifest, noise/tokenizer fingerprints, sampler state,
 RNG state, query specification, and code mapping. Resume is accepted only for
-compatible tc9 checkpoints; tc8 and all earlier checkpoints are rejected.
+compatible tc11 checkpoints; tc10 and all earlier checkpoints are rejected.
 
 PyTorch deterministic algorithms and seeded Python, NumPy, Torch, samplers, and
 workers are enabled. `deterministic_warn_only: true` reports CUDA operations for
@@ -166,12 +174,13 @@ which PyTorch cannot promise bitwise determinism instead of aborting a long run.
 ## Evaluation and inference
 
 Post-run evaluation uses the checkpoint's fixed 100-track, three-group monitor
-manifest and tokenizes clean and noisy two-second query audio online:
+manifest and tokenizes clean, noise-only, RIR-only, and combined two-second
+query audio online:
 
 ```bash
 python evaluate.py \
-  /gpfs/scratch/acw723/para-audio-id/audio-lm-checkpoints/tc9/last.ckpt \
-  evaluation-tc9.json
+  /gpfs/scratch/acw723/para-audio-id/audio-lm-checkpoints/tc11/last.ckpt \
+  evaluation-tc11.json
 ```
 
 It reports clean and per-SNR greedy exact accuracy, beam Top-1/5/10, MRR, and

@@ -30,6 +30,25 @@ class NoiseConsistencySchedule:
     phase: str
 
 
+@dataclass(frozen=True)
+class AugmentationSchedule:
+    clean_probability: float
+    noise_probability: float
+    rir_probability: float
+    noise_rir_probability: float
+    consistency_weight: float
+    snr_bin_probabilities: tuple[float, float, float, float] | None
+    phase: str
+
+    @property
+    def background_noise_probability(self) -> float:
+        return self.noise_probability + self.noise_rir_probability
+
+    @property
+    def room_ir_probability(self) -> float:
+        return self.rir_probability + self.noise_rir_probability
+
+
 def background_noise_schedule(step: int) -> NoiseSchedule:
     if step < 0:
         raise ValueError("Global step cannot be negative")
@@ -117,6 +136,56 @@ def tc9_noise_consistency_schedule(step: int) -> NoiseConsistencySchedule:
         0.10,
         (0.40, 0.30, 0.20, 0.10),
         "steady",
+    )
+
+
+def tc11_augmentation_schedule(step: int) -> AugmentationSchedule:
+    """Fixed 175K clean/noise/RIR curriculum for tc11."""
+    if step < 0:
+        raise ValueError("Global step cannot be negative")
+    snr_bins = (0.40, 0.30, 0.20, 0.10)
+    if step < 50_000:
+        return AugmentationSchedule(1.0, 0.0, 0.0, 0.0, 0.0, None, "clean")
+    if step < 62_500:
+        progress = (step - 50_000) / 12_500
+        noise = 0.75 * progress
+        return AugmentationSchedule(
+            1.0 - noise,
+            noise,
+            0.0,
+            0.0,
+            0.10 * progress,
+            snr_bins,
+            "noise_ramp",
+        )
+    if step < 87_500:
+        return AugmentationSchedule(
+            0.25, 0.75, 0.0, 0.0, 0.10, snr_bins, "noise_steady"
+        )
+    if step < 100_000:
+        progress = (step - 87_500) / 12_500
+        return AugmentationSchedule(
+            0.25,
+            0.75 - 0.20 * progress,
+            0.20 * progress,
+            0.0,
+            0.10,
+            snr_bins,
+            "rir_ramp",
+        )
+    if step < 112_500:
+        progress = (step - 100_000) / 12_500
+        return AugmentationSchedule(
+            0.25,
+            0.55 - 0.20 * progress,
+            0.20,
+            0.20 * progress,
+            0.10,
+            snr_bins,
+            "combined_ramp",
+        )
+    return AugmentationSchedule(
+        0.25, 0.35, 0.20, 0.20, 0.10, snr_bins, "consolidation"
     )
 
 
@@ -216,6 +285,71 @@ def deterministic_consistency_noise_parameters(
     return selected, snrs, bins
 
 
+def deterministic_augmentation_parameters(
+    keys: list[int],
+    *,
+    schedule: AugmentationSchedule,
+    seed: int,
+    step: int,
+    batch_idx: int,
+) -> tuple[list[str], list[float], list[str | None]]:
+    probabilities = (
+        schedule.clean_probability,
+        schedule.noise_probability,
+        schedule.rir_probability,
+        schedule.noise_rir_probability,
+    )
+    if any(value < 0.0 or value > 1.0 for value in probabilities):
+        raise ValueError("Augmentation probabilities must be between zero and one")
+    if not math.isclose(sum(probabilities), 1.0, abs_tol=1e-9):
+        raise ValueError("Augmentation probabilities must sum to one")
+    snr_probabilities = schedule.snr_bin_probabilities
+    if snr_probabilities is not None and not math.isclose(
+        sum(snr_probabilities), 1.0, abs_tol=1e-9
+    ):
+        raise ValueError("SNR-bin probabilities must sum to one")
+    categories = ("clean", "noise", "rir", "noise_rir")
+    selected: list[str] = []
+    snrs: list[float] = []
+    bins: list[str | None] = []
+    for pair, key in enumerate(keys):
+        draw = stable_uniform(seed, step, batch_idx, pair, key, "category")
+        cumulative = 0.0
+        category = categories[-1]
+        for name, probability in zip(categories, probabilities, strict=True):
+            cumulative += probability
+            if draw < cumulative:
+                category = name
+                break
+        selected.append(category)
+        if "noise" not in category:
+            snrs.append(0.0)
+            bins.append(None)
+            continue
+        if snr_probabilities is None:
+            raise ValueError("Noise categories require SNR-bin probabilities")
+        bin_draw = stable_uniform(seed, step, batch_idx, pair, key, "snr-bin")
+        cumulative = 0.0
+        bin_index = len(snr_probabilities) - 1
+        for index, probability in enumerate(snr_probabilities):
+            cumulative += probability
+            if bin_draw < cumulative:
+                bin_index = index
+                break
+        name, minimum, maximum = SNR_BINS[bin_index]
+        bins.append(name)
+        if name == "very_hard" and stable_uniform(
+            seed, step, batch_idx, pair, key, "exact-zero"
+        ) < 0.25:
+            snrs.append(0.0)
+        else:
+            position = stable_uniform(
+                seed, step, batch_idx, pair, key, "snr-within-bin"
+            )
+            snrs.append(minimum + position * (maximum - minimum))
+    return selected, snrs, bins
+
+
 class BackgroundNoiseAssets:
     def __init__(
         self,
@@ -287,22 +421,35 @@ class BackgroundNoiseAssets:
             "validation_fingerprint": self.validation_fingerprint,
         }
 
-    def load_training(self, key: object) -> np.ndarray:
-        return self._load(self.training_files, stable_uint64("train-noise", key))
-
-    def load_validation(self, key: object) -> np.ndarray:
+    def load_training(self, key: object, *, samples: int | None = None) -> np.ndarray:
         return self._load(
-            self.validation_files, stable_uint64("validation-noise", key)
+            self.training_files,
+            stable_uint64("train-noise", key),
+            samples=samples,
         )
 
-    def _load(self, files: list[Path], seed: int) -> np.ndarray:
+    def load_validation(
+        self, key: object, *, samples: int | None = None
+    ) -> np.ndarray:
+        return self._load(
+            self.validation_files,
+            stable_uint64("validation-noise", key),
+            samples=samples,
+        )
+
+    def _load(
+        self, files: list[Path], seed: int, *, samples: int | None = None
+    ) -> np.ndarray:
+        target_samples = self.samples if samples is None else int(samples)
+        if target_samples < 1:
+            raise ValueError("Requested background-noise length must be positive")
         for attempt in range(len(files)):
             path = files[(seed + attempt) % len(files)]
             try:
                 info = sf.info(path)
                 source_samples = round(info.duration * self.sample_rate)
-                if source_samples >= self.samples:
-                    maximum_start = source_samples - self.samples
+                if source_samples >= target_samples:
+                    maximum_start = source_samples - target_samples
                     offset_samples = (
                         stable_uint64(seed, attempt, "offset") % (maximum_start + 1)
                     )
@@ -310,7 +457,7 @@ class BackgroundNoiseAssets:
                         path,
                         sample_rate=self.sample_rate,
                         start=offset_samples / self.sample_rate,
-                        duration=self.samples / self.sample_rate,
+                        duration=target_samples / self.sample_rate,
                         pad=False,
                     )
                 else:
@@ -321,10 +468,10 @@ class BackgroundNoiseAssets:
                     )
                     if len(audio):
                         audio = np.tile(
-                            audio, math.ceil(self.samples / len(audio))
-                        )[: self.samples]
+                            audio, math.ceil(target_samples / len(audio))
+                        )[:target_samples]
                 if (
-                    len(audio) == self.samples
+                    len(audio) == target_samples
                     and np.isfinite(audio).all()
                     and float(np.sqrt(np.mean(np.square(audio)))) > 1e-8
                 ):

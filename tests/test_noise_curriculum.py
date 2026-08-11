@@ -8,11 +8,13 @@ from para_audio_id.audio_lm.noise import (
     NoiseConsistencySchedule,
     background_noise_schedule,
     deterministic_consistency_noise_parameters,
+    deterministic_augmentation_parameters,
     deterministic_noise_parameters,
     mix_background_noise,
     noise_consistency_schedule,
     stable_uniform,
     tc9_noise_consistency_schedule,
+    tc11_augmentation_schedule,
 )
 
 
@@ -255,3 +257,54 @@ def test_tc9_schedule_boundaries(step, probability, weight, phase):
     assert schedule.probability == pytest.approx(probability)
     assert schedule.consistency_weight == pytest.approx(weight)
     assert schedule.phase == phase
+
+
+@pytest.mark.parametrize(
+    ("step", "clean", "noise", "rir", "noise_rir", "weight"),
+    [
+        (0, 1.0, 0.0, 0.0, 0.0, 0.0),
+        (50_000, 1.0, 0.0, 0.0, 0.0, 0.0),
+        (56_250, 0.625, 0.375, 0.0, 0.0, 0.05),
+        (62_500, 0.25, 0.75, 0.0, 0.0, 0.10),
+        (87_500, 0.25, 0.75, 0.0, 0.0, 0.10),
+        (93_750, 0.25, 0.65, 0.10, 0.0, 0.10),
+        (100_000, 0.25, 0.55, 0.20, 0.0, 0.10),
+        (106_250, 0.25, 0.45, 0.20, 0.10, 0.10),
+        (112_500, 0.25, 0.35, 0.20, 0.20, 0.10),
+    ],
+)
+def test_tc11_schedule_boundaries(step, clean, noise, rir, noise_rir, weight):
+    schedule = tc11_augmentation_schedule(step)
+    assert schedule.clean_probability == pytest.approx(clean)
+    assert schedule.noise_probability == pytest.approx(noise)
+    assert schedule.rir_probability == pytest.approx(rir)
+    assert schedule.noise_rir_probability == pytest.approx(noise_rir)
+    assert schedule.consistency_weight == pytest.approx(weight)
+    assert sum(
+        (
+            schedule.clean_probability,
+            schedule.noise_probability,
+            schedule.rir_probability,
+            schedule.noise_rir_probability,
+        )
+    ) == pytest.approx(1.0)
+
+
+def test_tc11_augmentation_recipe_is_deterministic_and_only_noise_gets_snr():
+    schedule = tc11_augmentation_schedule(112_500)
+    first = deterministic_augmentation_parameters(
+        list(range(10_000)), schedule=schedule, seed=4, step=112_500, batch_idx=3
+    )
+    resumed = deterministic_augmentation_parameters(
+        list(range(10_000)), schedule=schedule, seed=4, step=112_500, batch_idx=3
+    )
+    categories, snrs, bins = first
+    assert first == resumed
+    assert all(
+        ("noise" in category) == (bin is not None)
+        for category, bin in zip(categories, bins, strict=True)
+    )
+    assert all(
+        ("noise" in category) or snr == 0.0
+        for category, snr in zip(categories, snrs, strict=True)
+    )

@@ -15,14 +15,15 @@ from ..audio import load_audio
 from ..catalogue import CatalogueRecord
 from .noise import (
     BackgroundNoiseAssets,
-    deterministic_consistency_noise_parameters,
+    deterministic_augmentation_parameters,
     mix_background_noise,
     stable_uint64,
-    tc9_noise_consistency_schedule,
+    tc11_augmentation_schedule,
 )
+from .rir import RoomImpulseResponseAssets, convolve_full_wet
 
 
-CROP_POLICY = "two_second_online_random_crop_24k_v1"
+CROP_POLICY = "tc11_two_second_online_random_crop_24k_v1"
 REPLACEMENT_POLICY = "deterministic_identity_replacement_v1"
 TC6_MONITOR_GRIDS = {
     "canonical": (0.0, 5.0, 10.0, 15.0, 20.0, 25.0),
@@ -169,31 +170,52 @@ class RandomEvaluationCollator:
         *,
         audio_root: str | Path,
         noise_assets: BackgroundNoiseAssets,
+        rir_assets: RoomImpulseResponseAssets,
         sample_rate: int,
+        past_context_duration: float,
         seed: int,
     ):
         self.audio_root = Path(audio_root)
         self.noise_assets = noise_assets
+        self.rir_assets = rir_assets
         self.sample_rate = int(sample_rate)
+        self.past_context_samples = round(
+            float(past_context_duration) * self.sample_rate
+        )
         self.seed = int(seed)
 
     def __call__(self, examples: list[dict]) -> dict:
         clean = []
         noise = []
+        room = []
+        noise_room = []
+        room_paths = []
         valid_examples = []
         skipped = []
         for row in examples:
             try:
-                waveform = load_audio(
-                    self.audio_root / row["source_path"],
-                    sample_rate=self.sample_rate,
-                    start=float(row["start"]),
-                    duration=float(row["crop_duration"]),
-                    pad=True,
-                )
-                expected = round(
+                start_sample = int(row["start_sample"])
+                crop_samples = round(
                     self.sample_rate * float(row["crop_duration"])
                 )
+                available_past = min(start_sample, self.past_context_samples)
+                context = load_audio(
+                    self.audio_root / row["source_path"],
+                    sample_rate=self.sample_rate,
+                    start=(start_sample - available_past) / self.sample_rate,
+                    duration=(available_past + crop_samples) / self.sample_rate,
+                    pad=True,
+                )
+                if available_past < self.past_context_samples:
+                    context = np.pad(
+                        context,
+                        (self.past_context_samples - available_past, 0),
+                    )
+                expected_context = self.past_context_samples + crop_samples
+                if len(context) != expected_context:
+                    raise ValueError("decoded evaluation context has invalid length")
+                waveform = context[-crop_samples:]
+                expected = crop_samples
                 rms = float(
                     np.sqrt(np.mean(np.square(waveform, dtype=np.float64)))
                 )
@@ -211,6 +233,29 @@ class RandomEvaluationCollator:
                         "fixed-evaluation-noise",
                     )
                 )
+                validation_context_noise = self.noise_assets.load_validation(
+                    stable_uint64(
+                        self.seed,
+                        row["track_id"],
+                        row["start_sample"],
+                        "fixed-evaluation-context-noise",
+                    ),
+                    samples=expected_context,
+                )
+                ir, ir_path = self.rir_assets.load_validation(
+                    stable_uint64(
+                        self.seed,
+                        row["track_id"],
+                        row["start_sample"],
+                        "fixed-evaluation-room-ir",
+                    )
+                )
+                reverberated = convolve_full_wet(
+                    context,
+                    ir,
+                    past_context_samples=self.past_context_samples,
+                    output_samples=crop_samples,
+                )
             except Exception as exc:
                 skipped.append(
                     {
@@ -225,6 +270,9 @@ class RandomEvaluationCollator:
                 continue
             clean.append(waveform)
             noise.append(validation_noise)
+            room.append(reverberated)
+            noise_room.append((context, validation_context_noise, ir))
+            room_paths.append(ir_path)
             valid_examples.append(row)
         samples = round(
             self.sample_rate
@@ -245,6 +293,13 @@ class RandomEvaluationCollator:
                 if noise
                 else np.empty((0, samples), dtype=np.float32)
             ),
+            "rir_waveforms": torch.from_numpy(
+                np.stack(room)
+                if room
+                else np.empty((0, samples), dtype=np.float32)
+            ),
+            "noise_rir_inputs": noise_room,
+            "rir_path": room_paths,
             "track_id": [row["track_id"] for row in valid_examples],
             "code": [row["code"] for row in valid_examples],
             "start_sample": [
@@ -332,8 +387,10 @@ class RandomCropCollator:
         records: list[CatalogueRecord],
         audio_root: str | Path,
         noise_assets: BackgroundNoiseAssets,
+        rir_assets: RoomImpulseResponseAssets,
         sample_rate: int,
         crop_duration: float,
+        past_context_duration: float,
         seed: int,
         reserved_starts: dict[str, set[int]],
         crop_retries: int = 4,
@@ -342,9 +399,15 @@ class RandomCropCollator:
         self.records = records
         self.audio_root = Path(audio_root)
         self.noise_assets = noise_assets
+        self.rir_assets = rir_assets
         self.sample_rate = int(sample_rate)
         self.crop_duration = float(crop_duration)
         self.crop_samples = round(self.sample_rate * self.crop_duration)
+        self.past_context_samples = round(
+            self.sample_rate * float(past_context_duration)
+        )
+        if self.past_context_samples < 1:
+            raise ValueError("Past reverberation context must be positive")
         self.seed = int(seed)
         self.reserved_starts = dict(reserved_starts)
         self.crop_retries = int(crop_retries)
@@ -387,7 +450,9 @@ class RandomCropCollator:
                     duration=self.crop_duration,
                     pad=True,
                 )
-                rms = float(np.sqrt(np.mean(np.square(waveform, dtype=np.float64))))
+                rms = float(
+                    np.sqrt(np.mean(np.square(waveform, dtype=np.float64)))
+                )
                 if (
                     len(waveform) != self.crop_samples
                     or not np.isfinite(waveform).all()
@@ -401,6 +466,30 @@ class RandomCropCollator:
             f"{record.path} failed {self.crop_retries} deterministic crop attempts: "
             f"{last_error}"
         )
+
+    def _load_context(
+        self, record: CatalogueRecord, *, start_sample: int
+    ) -> np.ndarray:
+        available_past = min(start_sample, self.past_context_samples)
+        context = load_audio(
+            self.audio_root / record.path,
+            sample_rate=self.sample_rate,
+            start=(start_sample - available_past) / self.sample_rate,
+            duration=(available_past + self.crop_samples) / self.sample_rate,
+            pad=True,
+        )
+        if available_past < self.past_context_samples:
+            context = np.pad(
+                context, (self.past_context_samples - available_past, 0)
+            )
+        expected = self.past_context_samples + self.crop_samples
+        if len(context) != expected or not np.isfinite(context).all():
+            raise ValueError("Decoded past-context waveform is invalid")
+        query = context[-self.crop_samples :]
+        rms = float(np.sqrt(np.mean(np.square(query, dtype=np.float64))))
+        if rms <= 1e-8:
+            raise ValueError("Decoded past-context query is silent")
+        return np.asarray(context, dtype=np.float32)
 
     def _replacement_candidates(
         self, original_index: int, *, optimizer_step: int, batch_idx: int, slot: int
@@ -421,7 +510,7 @@ class RandomCropCollator:
             raise ValueError("Random-crop batch has inconsistent sampler progress")
         optimizer_step = optimizer_steps.pop()
         batch_idx = batch_indices.pop()
-        schedule = tc9_noise_consistency_schedule(optimizer_step)
+        schedule = tc11_augmentation_schedule(optimizer_step)
         keys = [
             stable_uint64(
                 self.seed,
@@ -433,7 +522,7 @@ class RandomCropCollator:
             )
             for row in examples
         ]
-        selected, snrs, snr_bins = deterministic_consistency_noise_parameters(
+        categories, snrs, snr_bins = deterministic_augmentation_parameters(
             keys,
             schedule=schedule,
             seed=self.seed,
@@ -445,8 +534,8 @@ class RandomCropCollator:
         pairs = []
         failures = []
         replacements = []
-        for row, noisy, snr, snr_bin in zip(
-            examples, selected, snrs, snr_bins, strict=True
+        for row, category, snr, snr_bin in zip(
+            examples, categories, snrs, snr_bins, strict=True
         ):
             original_index = int(row["record_index"])
             candidate_indices = [original_index]
@@ -480,11 +569,8 @@ class RandomCropCollator:
                         pair_slot=int(row["pair_slot"]),
                         role=0,
                     )
-                    if noisy:
-                        second = first.copy()
-                        second_start = first_start
-                        second_attempts = first_attempts
-                    else:
+                    context = None
+                    if category == "clean":
                         second, second_start, second_attempts = self._load_role(
                             record,
                             optimizer_step=optimizer_step,
@@ -493,6 +579,14 @@ class RandomCropCollator:
                             role=1,
                             avoid_start=first_start,
                         )
+                    else:
+                        context = self._load_context(
+                            record, start_sample=first_start
+                        )
+                        first = context[-self.crop_samples :].copy()
+                        second = first.copy()
+                        second_start = first_start
+                        second_attempts = first_attempts
                     accepted = (
                         record,
                         first,
@@ -500,6 +594,7 @@ class RandomCropCollator:
                         first_start,
                         second_start,
                         first_attempts + second_attempts,
+                        context,
                     )
                     if candidate_index != original_index:
                         replacements.append(
@@ -525,7 +620,15 @@ class RandomCropCollator:
                     f"No valid deterministic replacement for pair slot "
                     f"{row['pair_slot']}"
                 )
-            record, first, second, first_start, second_start, retry_count = accepted
+            (
+                record,
+                first,
+                second,
+                first_start,
+                second_start,
+                retry_count,
+                context,
+            ) = accepted
             used_track_ids.add(record.track_id)
             pairs.append(
                 {
@@ -534,58 +637,91 @@ class RandomCropCollator:
                     "second": second,
                     "first_start": first_start,
                     "second_start": second_start,
-                    "is_noisy": bool(noisy),
+                    "category": category,
+                    "context": context,
                     "snr_db": float(snr),
                     "snr_bin": snr_bin,
+                    "rir_path": None,
                     "retry_count": retry_count,
                 }
             )
         decode_seconds = time.perf_counter() - decode_started
         augmentation_started = time.perf_counter()
-        noisy_pairs = [index for index, pair in enumerate(pairs) if pair["is_noisy"]]
-        if noisy_pairs:
-            signals = torch.from_numpy(
-                np.stack([pairs[index]["first"] for index in noisy_pairs])
-            )
-            noises = torch.from_numpy(
-                np.stack(
-                    [
-                        self.noise_assets.load_training(
-                            stable_uint64(
-                                self.seed,
-                                optimizer_step,
-                                batch_idx,
-                                index,
-                                pairs[index]["record"].track_id,
-                                "noise-file",
-                            )
+        context_samples = self.past_context_samples + self.crop_samples
+        for pair_index, pair in enumerate(pairs):
+            category = pair["category"]
+            if category == "clean":
+                continue
+            if category == "noise":
+                signal = torch.from_numpy(pair["first"]).unsqueeze(0)
+                noise = torch.from_numpy(
+                    self.noise_assets.load_training(
+                        stable_uint64(
+                            self.seed,
+                            optimizer_step,
+                            batch_idx,
+                            pair_index,
+                            pair["record"].track_id,
+                            "noise-file",
                         )
-                        for index in noisy_pairs
-                    ]
+                    )
+                ).unsqueeze(0)
+                mixed, valid = mix_background_noise(
+                    signal,
+                    noise,
+                    torch.tensor([pair["snr_db"]], dtype=torch.float32),
+                )
+                if not bool(valid[0]):
+                    raise RuntimeError("Validated random crop produced invalid noise")
+                pair["second"] = mixed[0].numpy()
+                continue
+            context = pair["context"]
+            if category == "noise_rir":
+                noise = self.noise_assets.load_training(
+                    stable_uint64(
+                        self.seed,
+                        optimizer_step,
+                        batch_idx,
+                        pair_index,
+                        pair["record"].track_id,
+                        "context-noise-file",
+                    ),
+                    samples=context_samples,
+                )
+                mixed, valid = mix_background_noise(
+                    torch.from_numpy(context).unsqueeze(0),
+                    torch.from_numpy(noise).unsqueeze(0),
+                    torch.tensor([pair["snr_db"]], dtype=torch.float32),
+                )
+                if not bool(valid[0]):
+                    raise RuntimeError("Validated context produced invalid noise")
+                context = mixed[0].numpy()
+            ir, rir_path = self.rir_assets.load_training(
+                stable_uint64(
+                    self.seed,
+                    optimizer_step,
+                    batch_idx,
+                    pair_index,
+                    pair["record"].track_id,
+                    "room-ir-file",
                 )
             )
-            requested = torch.tensor(
-                [pairs[index]["snr_db"] for index in noisy_pairs],
-                dtype=torch.float32,
+            pair["second"] = convolve_full_wet(
+                context,
+                ir,
+                past_context_samples=self.past_context_samples,
+                output_samples=self.crop_samples,
             )
-            mixed, valid = mix_background_noise(signals, noises, requested)
-            if not valid.all():
-                raise RuntimeError("Validated random crop produced invalid noise mixing")
-            for row_index, pair_index in enumerate(noisy_pairs):
-                pairs[pair_index]["second"] = mixed[row_index].numpy()
+            pair["rir_path"] = rir_path
         augmentation_seconds = time.perf_counter() - augmentation_started
         waveforms = []
         metadata = []
         for pair in pairs:
             record = pair["record"]
-            for role, waveform, start, is_noisy in (
+            degraded = pair["category"] != "clean"
+            for role, waveform, start, is_degraded in (
                 ("anchor", pair["first"], pair["first_start"], False),
-                (
-                    "secondary",
-                    pair["second"],
-                    pair["second_start"],
-                    pair["is_noisy"],
-                ),
+                ("secondary", pair["second"], pair["second_start"], degraded),
             ):
                 waveforms.append(waveform)
                 metadata.append(
@@ -598,7 +734,15 @@ class RandomCropCollator:
                         "start_sample": int(start),
                         "segment_duration": self.crop_duration,
                         "pair_role": role,
-                        "is_noisy": bool(is_noisy),
+                        "category": pair["category"] if is_degraded else "clean",
+                        "is_noisy": bool(is_degraded),
+                        "has_background_noise": bool(
+                            is_degraded and "noise" in pair["category"]
+                        ),
+                        "has_room_ir": bool(
+                            is_degraded and "rir" in pair["category"]
+                        ),
+                        "rir_path": pair["rir_path"] if is_degraded else None,
                     }
                 )
         return {
@@ -607,10 +751,22 @@ class RandomCropCollator:
             "planned_optimizer_step": int(optimizer_step),
             "planned_batch_idx": int(batch_idx),
             "schedule": asdict(schedule),
+            "categories": [pair["category"] for pair in pairs],
             "snr_bins": [
-                pair["snr_bin"] for pair in pairs if pair["is_noisy"]
+                pair["snr_bin"]
+                for pair in pairs
+                if "noise" in pair["category"]
             ],
-            "snrs": [pair["snr_db"] for pair in pairs if pair["is_noisy"]],
+            "snrs": [
+                pair["snr_db"]
+                for pair in pairs
+                if "noise" in pair["category"]
+            ],
+            "rir_paths": [
+                pair["rir_path"]
+                for pair in pairs
+                if "rir" in pair["category"]
+            ],
             "failed_crop_attempts": failures,
             "skipped_documents": 0,
             "replacements": replacements,

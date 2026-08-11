@@ -1,8 +1,10 @@
 import numpy as np
+import pytest
 import soundfile as sf
 
 from para_audio_id.catalogue import CatalogueRecord
 from para_audio_id.audio_lm.noise import BackgroundNoiseAssets
+from para_audio_id.audio_lm.rir import RoomImpulseResponseAssets, convolve_full_wet
 from para_audio_id.audio_lm.random_crops import (
     OnlineTrackBatchSampler,
     OnlineTrackDataset,
@@ -135,6 +137,10 @@ def test_clean_collator_produces_two_distinct_crops_per_identity(tmp_path):
     audio_root.mkdir()
     train_noise.mkdir()
     validation_noise.mkdir()
+    rir_train = tmp_path / "rir_train" / "OpenAIR" / "train-room"
+    rir_validation = tmp_path / "rir_validation" / "OpenAIR" / "test-room"
+    rir_train.mkdir(parents=True)
+    rir_validation.mkdir(parents=True)
     waveform = np.sin(
         2 * np.pi * 220 * np.arange(10 * 8_000, dtype=np.float32) / 8_000
     )
@@ -143,8 +149,15 @@ def test_clean_collator_produces_two_distinct_crops_per_identity(tmp_path):
         sf.write(audio_root / f"{index}.wav", waveform, 8_000)
     sf.write(train_noise / "train.wav", waveform[:40_000], 8_000)
     sf.write(validation_noise / "validation.wav", waveform[40_000:], 8_000)
+    impulse = np.zeros(800, dtype=np.float32)
+    impulse[0] = 1.0
+    sf.write(rir_train / "ir.wav", impulse, 8_000)
+    sf.write(rir_validation / "ir.wav", impulse[::-1], 8_000)
     assets = BackgroundNoiseAssets(
         train_noise, validation_noise, sample_rate=8_000, samples=16_000
+    )
+    rir_assets = RoomImpulseResponseAssets(
+        rir_train.parent.parent, rir_validation.parent.parent, sample_rate=8_000
     )
     dataset = OnlineTrackDataset(selected)
     sampler = OnlineTrackBatchSampler(
@@ -158,8 +171,10 @@ def test_clean_collator_produces_two_distinct_crops_per_identity(tmp_path):
         records=selected,
         audio_root=audio_root,
         noise_assets=assets,
+        rir_assets=rir_assets,
         sample_rate=8_000,
         crop_duration=2.0,
+        past_context_duration=2.0,
         seed=3,
         reserved_starts={},
     )(examples)
@@ -183,6 +198,10 @@ def test_noisy_pairs_share_start_and_bad_identity_is_replaced(tmp_path):
     audio_root.mkdir()
     train_noise.mkdir()
     validation_noise.mkdir()
+    rir_train = tmp_path / "rir_train" / "OpenAIR" / "train-room"
+    rir_validation = tmp_path / "rir_validation" / "OpenAIR" / "test-room"
+    rir_train.mkdir(parents=True)
+    rir_validation.mkdir(parents=True)
     waveform = np.sin(
         2 * np.pi * 220 * np.arange(10 * 8_000, dtype=np.float32) / 8_000
     )
@@ -191,14 +210,21 @@ def test_noisy_pairs_share_start_and_bad_identity_is_replaced(tmp_path):
         sf.write(audio_root / f"{index}.wav", waveform, 8_000)
     sf.write(train_noise / "train.wav", waveform[:40_000], 8_000)
     sf.write(validation_noise / "validation.wav", waveform[40_000:], 8_000)
+    impulse = np.zeros(800, dtype=np.float32)
+    impulse[0] = 1.0
+    sf.write(rir_train / "ir.wav", impulse, 8_000)
+    sf.write(rir_validation / "ir.wav", impulse[::-1], 8_000)
     assets = BackgroundNoiseAssets(
         train_noise, validation_noise, sample_rate=8_000, samples=16_000
+    )
+    rir_assets = RoomImpulseResponseAssets(
+        rir_train.parent.parent, rir_validation.parent.parent, sample_rate=8_000
     )
     dataset = OnlineTrackDataset(selected)
     examples = [
         {
             **dataset[index],
-            "optimizer_step": 25_000,
+            "optimizer_step": 62_500,
             "batch_idx": 0,
             "pair_slot": slot,
         }
@@ -208,8 +234,10 @@ def test_noisy_pairs_share_start_and_bad_identity_is_replaced(tmp_path):
         records=selected,
         audio_root=audio_root,
         noise_assets=assets,
+        rir_assets=rir_assets,
         sample_rate=8_000,
         crop_duration=2.0,
+        past_context_duration=2.0,
         seed=3,
         reserved_starts={},
     )(examples)
@@ -244,6 +272,35 @@ def test_short_track_starts_at_zero_and_is_padded(tmp_path):
     )
 
 
+def test_full_wet_convolution_uses_past_context_and_normalizes_peak():
+    context = np.zeros(16, dtype=np.float32)
+    context[7] = 1.0
+    ir = np.array([1.0, 0.5], dtype=np.float32)
+    result = convolve_full_wet(
+        context, ir, past_context_samples=8, output_samples=8
+    )
+    assert result.shape == (8,)
+    # The impulse is in past context, so only its causal tail reaches the query.
+    assert result[0] == np.float32(0.5)
+    assert np.max(np.abs(result)) == np.float32(0.5)
+    assert np.allclose(result[1:], 0.0, atol=1e-6)
+
+
+def test_room_ir_assets_reject_shared_room_or_identical_content(tmp_path):
+    train = tmp_path / "train" / "OpenAIR" / "room-a"
+    validation = tmp_path / "validation" / "OpenAIR" / "room-a"
+    train.mkdir(parents=True)
+    validation.mkdir(parents=True)
+    impulse = np.zeros(16, dtype=np.float32)
+    impulse[0] = 1.0
+    sf.write(train / "train.wav", impulse, 8_000)
+    sf.write(validation / "test.wav", impulse, 8_000)
+    with pytest.raises(ValueError, match="overlap"):
+        RoomImpulseResponseAssets(
+            train.parents[1], validation.parents[1], sample_rate=8_000
+        )
+
+
 def test_monitor_collator_skips_invalid_crop_without_aborting(tmp_path):
     audio_root = tmp_path / "audio"
     train_noise = tmp_path / "noise_train"
@@ -251,14 +308,25 @@ def test_monitor_collator_skips_invalid_crop_without_aborting(tmp_path):
     audio_root.mkdir()
     train_noise.mkdir()
     validation_noise.mkdir()
+    rir_train = tmp_path / "rir_train" / "OpenAIR" / "train-room"
+    rir_validation = tmp_path / "rir_validation" / "OpenAIR" / "test-room"
+    rir_train.mkdir(parents=True)
+    rir_validation.mkdir(parents=True)
     waveform = np.sin(
         2 * np.pi * 220 * np.arange(6 * 8_000, dtype=np.float32) / 8_000
     )
     sf.write(audio_root / "valid.wav", waveform, 8_000)
     sf.write(train_noise / "train.wav", waveform[:40_000], 8_000)
     sf.write(validation_noise / "validation.wav", waveform[:40_000], 8_000)
+    impulse = np.zeros(800, dtype=np.float32)
+    impulse[0] = 1.0
+    sf.write(rir_train / "ir.wav", impulse, 8_000)
+    sf.write(rir_validation / "ir.wav", impulse[::-1], 8_000)
     assets = BackgroundNoiseAssets(
         train_noise, validation_noise, sample_rate=8_000, samples=16_000
+    )
+    rir_assets = RoomImpulseResponseAssets(
+        rir_train.parent.parent, rir_validation.parent.parent, sample_rate=8_000
     )
     common = {
         "source_duration": 6.0,
@@ -270,7 +338,9 @@ def test_monitor_collator_skips_invalid_crop_without_aborting(tmp_path):
     batch = RandomEvaluationCollator(
         audio_root=audio_root,
         noise_assets=assets,
+        rir_assets=rir_assets,
         sample_rate=8_000,
+        past_context_duration=2.0,
         seed=3,
     )(
         [

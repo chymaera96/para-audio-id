@@ -16,6 +16,7 @@ should be taken from the corresponding W&B run or evaluation JSON.
 | `tc7` | Same 10K tracks | Continuous random five-second crops | 20 | 70K | Replaced fixed training grids with online crops |
 | `tc8` | Same 10K tracks | Continuous random two-second crops | 8 | 70K | Tests shorter queries at the same audio-to-ID loss ratio |
 | `tc9` | Same 10K tracks | Two-second crops, tc7-matched acoustic budget | 8 | 70K | Raises the physical batch from 8 to 20 documents |
+| `tc11` | Fresh seeded 25K tracks | Two-second online crops with clean/noise/RIR/combined secondary views | 8 | 175K | Adds full-IR past reverberation and scales the catalogue |
 
 Each entry is a from-scratch model unless explicitly documented otherwise.
 In particular, `tc4` is not initialized from `tc3`, `tc5` is not initialized
@@ -263,6 +264,26 @@ experiment therefore separates tc8's reduced training-data budget from the
 intrinsic ambiguity and reduced evidence of a two-second query. Its distinct
 `token_budget_matched_two_second_noise_consistency_v1` checkpoint protocol
 rejects tc8 and earlier checkpoints.
+
+## `tc11`: 25K noise-and-reverb consistency
+
+`tc11` is a new random initialization over a fresh seeded 25,000-track subset
+of the existing 100K catalogue and its unchanged five-digit code mapping. It
+keeps tc9's GPT-2-small-style model, two-second crops, 20-document physical
+batch, eight accumulation steps, and weighted objective
+`(100 audio + 40 digit + 2 boundary) / 142`.
+
+The secondary view follows a four-way 175K-step curriculum: clean through 50K,
+noise ramped to 0.75 through 62.5K, then RIR-only and noise+RIR mass introduced
+between 87.5K and 112.5K. Consistency ramps from zero to 0.1 over 50K–62.5K.
+RIR uses two seconds of preceding music, full-wet convolution with a complete
+held-out/train room IR as appropriate, peak normalization, and then discards
+the context prefix. Noise+RIR means noise is mixed before convolution.
+
+The existing tc6/tc9 W&B names remain unchanged. Two aggregate beam Top-1
+probes are added for RIR-only and noise+RIR; complete condition/SNR details are
+stored in probe JSONL and checkpoints. tc11 checkpoints are incompatible with
+all earlier protocols.
 
 ## Interpretation
 

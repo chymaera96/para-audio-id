@@ -63,6 +63,14 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
     noise_validation.mkdir()
     sf.write(noise_train / "train.wav", waveform[: 5 * 8_000], 8_000)
     sf.write(noise_validation / "validation.wav", waveform[: 5 * 8_000], 8_000)
+    rir_train = tmp_path / "rir_train" / "OpenAIR" / "train-room"
+    rir_validation = tmp_path / "rir_validation" / "OpenAIR" / "test-room"
+    rir_train.mkdir(parents=True)
+    rir_validation.mkdir(parents=True)
+    impulse = np.zeros(800, dtype=np.float32)
+    impulse[0] = 1.0
+    sf.write(rir_train / "ir.wav", impulse, 8_000)
+    sf.write(rir_validation / "ir.wav", impulse[::-1], 8_000)
 
     class FakeOnlineTokenizer:
         def __init__(self, *args, **kwargs):
@@ -110,6 +118,11 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
                 "training_root": str(noise_train),
                 "validation_root": str(noise_validation),
             },
+            "room_ir": {
+                "training_root": str(rir_train.parent.parent),
+                "validation_root": str(rir_validation.parent.parent),
+                "past_context_duration": 2.0,
+            },
         },
         "train": {
             "seed": 7,
@@ -130,11 +143,13 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
             "id_digit_weight": 8.0,
             "gradient_clip_norm": 1.0,
             "schedule": {
-                "protocol": "token_budget_matched_two_second_noise_consistency_v1",
+                "protocol": "online_random_crop_noise_rir_consistency_25k_v1",
                 "loss_protocol": "tc5_family_weighted_consistency_v2",
-                "clean_until_step": 20_000,
-                "ramp_until_step": 25_000,
-                "noise_probability": 0.75,
+                "clean_until_step": 50_000,
+                "noise_ramp_until_step": 62_500,
+                "noise_steady_until_step": 87_500,
+                "rir_ramp_until_step": 100_000,
+                "combined_ramp_until_step": 112_500,
                 "consistency_weight": 0.1,
                 "snr_bin_probabilities": [0.4, 0.3, 0.2, 0.1],
                 "exact_zero_fraction_in_first_bin": 0.25,
@@ -179,11 +194,12 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
     assert checkpoint["global_step"] == 2
     assert (
         checkpoint["training_protocol"]
-        == "token_budget_matched_two_second_noise_consistency_v1"
+        == "online_random_crop_noise_rir_consistency_25k_v1"
     )
     assert checkpoint["loss_protocol"] == "tc5_family_weighted_consistency_v2"
     assert checkpoint["monitor_protocol"] == "compact_beam_monitor_v2"
-    assert checkpoint["crop_policy"] == "two_second_online_random_crop_24k_v1"
+    assert checkpoint["crop_policy"] == "tc11_two_second_online_random_crop_24k_v1"
+    assert checkpoint["room_ir_manifest"]["training_files"] == 1
     assert len(checkpoint["monitor_recipes"]) == 6
     assert {
         row["view_type"] for row in checkpoint["monitor_recipes"]
@@ -221,7 +237,7 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
     }
 
     invalid = tmp_path / "invalid.ckpt"
-    checkpoint["training_protocol"] = "online_random_crop_noise_consistency_v1"
+    checkpoint["training_protocol"] = "token_budget_matched_two_second_noise_consistency_v1"
     torch.save(checkpoint, invalid)
     with pytest.raises(ValueError, match="different training protocol"):
         train(cfg, checkpoint=invalid)
@@ -272,4 +288,6 @@ def test_tc9_wandb_keys_match_retained_tc6_schema():
         "probe/noise/aggregate/beam_top1",
         "probe/noise/online_tokenization_seconds",
         "probe/clean/shifted/teacher_forced_exact_accuracy",
+        "probe/rir/aggregate/beam_top1",
+        "probe/noise_rir/aggregate/beam_top1",
     }

@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import nullcontext
 import json
 import math
+import numpy as np
 from pathlib import Path
 import random
 import time
@@ -25,6 +26,7 @@ from .generation import (
 from .losses import causal_audio_id_losses
 from .noise import BackgroundNoiseAssets, mix_background_noise
 from .random_crops import RandomEvaluationCollator, RandomEvaluationDataset
+from .rir import RoomImpulseResponseAssets, convolve_full_wet
 from .tokenizer import MuQRVQTokenizer
 from .token_store import TokenStoreIndex
 
@@ -102,6 +104,12 @@ def _evaluate_tc6_monitor_manifest(
             tokenizer.sample_rate * float(cfg["data"]["segment_duration"])
         ),
     )
+    rir_cfg = cfg["data"]["room_ir"]
+    rir_assets = RoomImpulseResponseAssets(
+        rir_cfg["training_root"],
+        rir_cfg["validation_root"],
+        sample_rate=tokenizer.sample_rate,
+    )
     loader = DataLoader(
         RandomEvaluationDataset(manifest),
         batch_size=int(cfg["evaluation"]["generation_batch_size"]),
@@ -109,7 +117,9 @@ def _evaluate_tc6_monitor_manifest(
         collate_fn=RandomEvaluationCollator(
             audio_root=cfg["data"]["audio_root"],
             noise_assets=assets,
+            rir_assets=rir_assets,
             sample_rate=tokenizer.sample_rate,
+            past_context_duration=float(rir_cfg["past_context_duration"]),
             seed=int(cfg["train"]["seed"]) + 1771,
         ),
     )
@@ -124,13 +134,9 @@ def _evaluate_tc6_monitor_manifest(
             if not len(clean):
                 continue
             noise = batch["noise_waveforms"].to(device)
-            variants = [
-                (
-                    None,
-                    clean,
-                    list(range(len(clean))),
-                )
-            ]
+            variants = [("clean", None, clean, list(range(len(clean))))]
+            room = batch["rir_waveforms"].to(device)
+            variants.append(("rir", None, room, list(range(len(room)))))
             for snr in snrs:
                 requested = torch.full((len(clean),), snr, device=device)
                 mixed, valid = mix_background_noise(clean, noise, requested)
@@ -147,8 +153,59 @@ def _evaluate_tc6_monitor_manifest(
                         }
                     )
                 if valid_indices:
-                    variants.append((snr, mixed[valid], valid_indices))
-            for snr, waveforms, indices in variants:
+                    variants.append(("noise", snr, mixed[valid], valid_indices))
+                contexts = torch.from_numpy(
+                    np.stack([item[0] for item in batch["noise_rir_inputs"]])
+                ).to(device)
+                context_noise = torch.from_numpy(
+                    np.stack([item[1] for item in batch["noise_rir_inputs"]])
+                ).to(device)
+                mixed_context, context_valid = mix_background_noise(
+                    contexts,
+                    context_noise,
+                    torch.full((len(contexts),), snr, device=device),
+                )
+                past_samples = round(
+                    float(rir_cfg["past_context_duration"]) * tokenizer.sample_rate
+                )
+                output_samples = round(
+                    float(cfg["data"]["segment_duration"]) * tokenizer.sample_rate
+                )
+                combined = []
+                combined_indices = []
+                for index in context_valid.nonzero(as_tuple=False).flatten().tolist():
+                    try:
+                        combined.append(
+                            convolve_full_wet(
+                                mixed_context[index].cpu().numpy(),
+                                batch["noise_rir_inputs"][index][2],
+                                past_context_samples=past_samples,
+                                output_samples=output_samples,
+                            )
+                        )
+                        combined_indices.append(index)
+                    except Exception as exc:
+                        skipped_queries.append(
+                            {
+                                "track_id": batch["track_id"][index],
+                                "code": batch["code"][index],
+                                "view_type": batch["view_type"][index],
+                                "start": batch["start"][index],
+                                "snr_db": snr,
+                                "condition": "noise_rir",
+                                "error": f"{type(exc).__name__}: {exc}",
+                            }
+                        )
+                if combined:
+                    variants.append(
+                        (
+                            "noise_rir",
+                            snr,
+                            torch.from_numpy(np.stack(combined)).to(device),
+                            combined_indices,
+                        )
+                    )
+            for condition, snr, waveforms, indices in variants:
                 tokens = tokenizer.tokenize(waveforms)
                 prompts = torch.stack(
                     [
@@ -170,7 +227,13 @@ def _evaluate_tc6_monitor_manifest(
                         "code": code,
                         "view_type": view_type,
                         "start": start,
+                        "condition": condition,
                         "snr_db": snr,
+                        "rir_path": (
+                            batch["rir_path"][index]
+                            if condition in {"rir", "noise_rir"}
+                            else None
+                        ),
                         "greedy": result.code,
                         "greedy_ended_with_eos": result.ended_with_eos,
                         "beam": [
@@ -182,7 +245,8 @@ def _evaluate_tc6_monitor_manifest(
                             for candidate in ranking
                         ],
                     }
-                    for track_id, code, view_type, start, result, ranking in zip(
+                    for index, track_id, code, view_type, start, result, ranking in zip(
+                        indices,
                         [batch["track_id"][index] for index in indices],
                         [batch["code"][index] for index in indices],
                         [batch["view_type"][index] for index in indices],
@@ -192,14 +256,18 @@ def _evaluate_tc6_monitor_manifest(
                         strict=True,
                     )
                 )
-    clean_rows = [row for row in rows if row["snr_db"] is None]
-    noisy_rows = [row for row in rows if row["snr_db"] is not None]
+    clean_rows = [row for row in rows if row["condition"] == "clean"]
+    noisy_rows = [row for row in rows if row["condition"] == "noise"]
+    rir_rows = [row for row in rows if row["condition"] == "rir"]
+    noise_rir_rows = [row for row in rows if row["condition"] == "noise_rir"]
     metrics = {
-        "cohort": "tc6_fixed_probe",
+        "cohort": "tc11_fixed_probe",
         "selected_tracks": len({row["track_id"] for row in manifest}),
         "generation_protocol": "five_autoregressive_digits_then_eos",
         "clean": _generation_metrics(clean_rows),
         "noise": _generation_metrics(noisy_rows),
+        "rir": _generation_metrics(rir_rows),
+        "noise_rir": _generation_metrics(noise_rir_rows),
         "by_view": {
             view_type: {
                 "clean": _generation_metrics(
@@ -219,11 +287,37 @@ def _evaluate_tc6_monitor_manifest(
             }
             for view_type in ("canonical", "shifted", "heldout")
         },
+        "rir_by_view": {
+            view_type: _generation_metrics(
+                [row for row in rir_rows if row["view_type"] == view_type]
+            )
+            for view_type in ("canonical", "shifted", "heldout")
+        },
+        "noise_rir_by_view": {
+            view_type: _generation_metrics(
+                [
+                    row
+                    for row in noise_rir_rows
+                    if row["view_type"] == view_type
+                ]
+            )
+            for view_type in ("canonical", "shifted", "heldout")
+        },
         "by_snr": {
             f"{snr:g}": _generation_metrics(
                 [
                     row
                     for row in noisy_rows
+                    if math.isclose(float(row["snr_db"]), snr)
+                ]
+            )
+            for snr in snrs
+        },
+        "noise_rir_by_snr": {
+            f"{snr:g}": _generation_metrics(
+                [
+                    row
+                    for row in noise_rir_rows
                     if math.isclose(float(row["snr_db"]), snr)
                 ]
             )
@@ -434,7 +528,7 @@ def evaluate(
     model, vocabulary, cfg, checkpoint = load_audio_lm(checkpoint_path, device)
     if (
         checkpoint.get("training_protocol")
-        == "token_budget_matched_two_second_noise_consistency_v1"
+        == "online_random_crop_noise_rir_consistency_25k_v1"
     ):
         return _evaluate_tc6_monitor_manifest(
             model,

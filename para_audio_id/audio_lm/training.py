@@ -42,7 +42,7 @@ from .noise import (
     mix_background_noise,
     noise_consistency_schedule,
     stable_uint64,
-    tc9_noise_consistency_schedule,
+    tc11_augmentation_schedule,
 )
 from .random_crops import (
     CROP_POLICY,
@@ -54,12 +54,13 @@ from .random_crops import (
     RandomEvaluationDataset,
     make_tc6_evaluation_manifest,
 )
+from .rir import RoomImpulseResponseAssets, convolve_full_wet
 from .tokenizer import MuQRVQTokenizer, TokenizerSpec
 from .token_store import TokenStoreIndex
 from .tokenization import load_training_track_ids
 from .vocabulary import AudioLMVocabulary
 
-TRAINING_PROTOCOL = "token_budget_matched_two_second_noise_consistency_v1"
+TRAINING_PROTOCOL = "online_random_crop_noise_rir_consistency_25k_v1"
 LOSS_PROTOCOL = "tc5_family_weighted_consistency_v2"
 MONITOR_PROTOCOL = "compact_beam_monitor_v2"
 TC9_SEGMENT_DURATION = 2.0
@@ -119,6 +120,8 @@ def tc6_probe_wandb_keys(snr_values: list[float]) -> set[str]:
         "probe/noise/aggregate/beam_top1",
         "probe/noise/online_tokenization_seconds",
         "probe/clean/shifted/teacher_forced_exact_accuracy",
+        "probe/rir/aggregate/beam_top1",
+        "probe/noise_rir/aggregate/beam_top1",
     }
 
 
@@ -661,6 +664,12 @@ class AudioLMDataModule(pl.LightningDataModule):
             sample_rate=sample_rate,
             samples=round(crop_duration * sample_rate),
         )
+        rir_cfg = data_cfg["room_ir"]
+        self.rir_assets = RoomImpulseResponseAssets(
+            rir_cfg["training_root"],
+            rir_cfg["validation_root"],
+            sample_rate=sample_rate,
+        )
         probe_count = min(
             int(self.cfg["evaluation"]["monitor_tracks"]), len(records)
         )
@@ -691,6 +700,8 @@ class AudioLMDataModule(pl.LightningDataModule):
             "code_mapping_fingerprint": self.code_mapping_fingerprint,
             "tokenizer_fingerprint": self.tokenizer_spec.fingerprint,
             "background_noise": self.noise_assets.manifest(),
+            "room_ir": self.rir_assets.manifest(),
+            "past_context_duration": float(rir_cfg["past_context_duration"]),
             "segment_duration": crop_duration,
         }
         self.training_corpus_fingerprint = hashlib.sha256(
@@ -730,8 +741,12 @@ class AudioLMDataModule(pl.LightningDataModule):
                 records=self.dataset.records,
                 audio_root=self.cfg["data"]["audio_root"],
                 noise_assets=self.noise_assets,
+                rir_assets=self.rir_assets,
                 sample_rate=int(self.tokenizer_spec.sample_rate),
                 crop_duration=float(self.cfg["data"]["segment_duration"]),
+                past_context_duration=float(
+                    self.cfg["data"]["room_ir"]["past_context_duration"]
+                ),
                 seed=int(self.cfg["train"]["seed"]),
                 reserved_starts=self.reserved_starts,
                 crop_retries=int(
@@ -767,7 +782,11 @@ class AudioLMDataModule(pl.LightningDataModule):
             collate_fn=RandomEvaluationCollator(
                 audio_root=self.cfg["data"]["audio_root"],
                 noise_assets=self.noise_assets,
+                rir_assets=self.rir_assets,
                 sample_rate=int(self.tokenizer_spec.sample_rate),
+                past_context_duration=float(
+                    self.cfg["data"]["room_ir"]["past_context_duration"]
+                ),
                 seed=int(self.cfg["train"]["seed"]) + 1771,
             ),
             **self._common_loader_args(),
@@ -804,6 +823,7 @@ class AudioLMModule(pl.LightningModule):
         training_corpus_fingerprint: str,
         monitor_recipes: list[dict],
         noise_manifest: dict,
+        rir_manifest: dict,
         query_spec: dict,
         batch_spec: dict,
     ):
@@ -817,6 +837,7 @@ class AudioLMModule(pl.LightningModule):
         self.training_corpus_fingerprint = training_corpus_fingerprint
         self.monitor_recipes = monitor_recipes
         self.noise_manifest = noise_manifest
+        self.rir_manifest = rir_manifest
         self.query_spec = query_spec
         self.batch_spec = batch_spec
         self.model = AudioCausalLM(cfg, vocabulary)
@@ -888,8 +909,8 @@ class AudioLMModule(pl.LightningModule):
         planned_step = int(batch["planned_optimizer_step"])
         actual_step = int(self.global_step)
         if planned_step != actual_step:
-            planned_schedule = tc9_noise_consistency_schedule(planned_step)
-            actual_schedule = tc9_noise_consistency_schedule(actual_step)
+            planned_schedule = tc11_augmentation_schedule(planned_step)
+            actual_schedule = tc11_augmentation_schedule(actual_step)
             if planned_schedule != actual_schedule:
                 raise RuntimeError(
                     "Resumed random-crop sampler crossed a curriculum boundary: "
@@ -963,24 +984,30 @@ class AudioLMModule(pl.LightningModule):
             row["pair_role"] for row in crop_batch["metadata"]
         ]
         batch = prepared
-        schedule = tc9_noise_consistency_schedule(int(self.global_step))
-        realized_noisy = int(batch["is_noisy"].sum())
+        schedule = tc11_augmentation_schedule(int(self.global_step))
+        realized_degraded = int(batch["is_noisy"].sum())
+        realized_background = sum(
+            row["has_background_noise"] for row in crop_batch["metadata"]
+        )
+        realized_rir = sum(row["has_room_ir"] for row in crop_batch["metadata"])
         for name in crop_batch["snr_bins"]:
             if name is not None:
                 self.snr_epoch_counts[name] += 1
         self.snr_epoch_counts["exact_zero"] += sum(
             math.isclose(float(snr), 0.0) for snr in crop_batch["snrs"]
         )
-        self.snr_epoch_counts["noisy_documents"] += realized_noisy
+        self.snr_epoch_counts["noisy_documents"] += realized_background
         self.snr_epoch_counts["skipped_documents"] += int(
             crop_batch["skipped_documents"]
         )
         augmentation = {
-            "scheduled_probability": float(schedule.probability),
+            "scheduled_probability": float(
+                schedule.background_noise_probability
+            ),
             "scheduled_consistency_weight": float(
                 schedule.consistency_weight
             ),
-            "realized_noisy_fraction": realized_noisy
+            "realized_noisy_fraction": realized_background
             / max(1, len(crop_batch["metadata"]) // 2),
             "mean_snr_db": (
                 sum(crop_batch["snrs"]) / len(crop_batch["snrs"])
@@ -1009,6 +1036,13 @@ class AudioLMModule(pl.LightningModule):
                 )
             ),
             "replacement_count": float(len(crop_batch["replacements"])),
+            "scheduled_rir_probability": float(
+                schedule.room_ir_probability
+            ),
+            "realized_rir_fraction": realized_rir
+            / max(1, len(crop_batch["metadata"]) // 2),
+            "realized_degraded_fraction": realized_degraded
+            / max(1, len(crop_batch["metadata"]) // 2),
         }
         for name, value in augmentation.items():
             if name not in AUGMENTATION_METRICS:
@@ -1117,6 +1151,17 @@ class AudioLMModule(pl.LightningModule):
                 },
                 "snrs": crop_batch["snrs"],
                 "snr_bins": crop_batch["snr_bins"],
+                "categories": crop_batch["categories"],
+                "rir_paths": crop_batch["rir_paths"],
+                "scheduled_category_probabilities": {
+                    "clean": schedule.clean_probability,
+                    "noise": schedule.noise_probability,
+                    "rir": schedule.rir_probability,
+                    "noise_rir": schedule.noise_rir_probability,
+                },
+                "realized_rir_fraction": augmentation[
+                    "realized_rir_fraction"
+                ],
                 "failed_crop_attempts": crop_batch[
                     "failed_crop_attempts"
                 ],
@@ -1418,6 +1463,7 @@ class AudioLMModule(pl.LightningModule):
                 if not len(clean):
                     continue
                 noise = batch["noise_waveforms"].to(self.device)
+                room = batch["rir_waveforms"].to(self.device)
                 started = time.perf_counter()
                 clean_tokens = self.online_tokenizer.tokenize(clean)
                 if self.device.type == "cuda":
@@ -1482,7 +1528,9 @@ class AudioLMModule(pl.LightningModule):
                         "target": code,
                         "view_type": view_type,
                         "start": start,
+                        "condition": "clean",
                         "snr_db": None,
+                        "rir_path": None,
                         "beam": beam,
                     }
                     for track_id, code, view_type, start, beam in zip(
@@ -1491,6 +1539,45 @@ class AudioLMModule(pl.LightningModule):
                         batch["view_type"],
                         batch["start"],
                         clean_beams,
+                        strict=True,
+                    )
+                )
+                started = time.perf_counter()
+                room_tokens = self.online_tokenizer.tokenize(room)
+                if self.device.type == "cuda":
+                    torch.cuda.synchronize(self.device)
+                tokenization_seconds += time.perf_counter() - started
+                room_beams = batched_beam_generate(
+                    self.model,
+                    prompts_from_audio_tokens(room_tokens, self.vocabulary),
+                    self.vocabulary,
+                    width=int(self.cfg["evaluation"]["beam_width"]),
+                )
+                rows.extend(
+                    {
+                        "track_id": track_id,
+                        "target": code,
+                        "view_type": view_type,
+                        "start": start,
+                        "condition": "rir",
+                        "snr_db": None,
+                        "rir_path": rir_path,
+                        "beam": beam,
+                    }
+                    for (
+                        track_id,
+                        code,
+                        view_type,
+                        start,
+                        rir_path,
+                        beam,
+                    ) in zip(
+                        batch["track_id"],
+                        batch["code"],
+                        batch["view_type"],
+                        batch["start"],
+                        batch["rir_path"],
+                        room_beams,
                         strict=True,
                     )
                 )
@@ -1536,7 +1623,9 @@ class AudioLMModule(pl.LightningModule):
                             "target": code,
                             "view_type": view_type,
                             "start": start,
+                            "condition": "noise",
                             "snr_db": snr,
+                            "rir_path": None,
                             "beam": beam,
                         }
                         for (
@@ -1566,6 +1655,94 @@ class AudioLMModule(pl.LightningModule):
                             strict=True,
                         )
                     )
+                    context_signal = torch.from_numpy(
+                        np.stack(
+                            [item[0] for item in batch["noise_rir_inputs"]]
+                        )
+                    ).to(self.device)
+                    context_noise = torch.from_numpy(
+                        np.stack(
+                            [item[1] for item in batch["noise_rir_inputs"]]
+                        )
+                    ).to(self.device)
+                    context_requested = torch.full(
+                        (len(context_signal),), snr, device=self.device
+                    )
+                    mixed_context, context_valid = mix_background_noise(
+                        context_signal, context_noise, context_requested
+                    )
+                    combined_waveforms = []
+                    combined_indices = []
+                    past_samples = round(
+                        float(
+                            self.cfg["data"]["room_ir"][
+                                "past_context_duration"
+                            ]
+                        )
+                        * int(self.tokenizer_spec.sample_rate)
+                    )
+                    output_samples = round(
+                        float(self.cfg["data"]["segment_duration"])
+                        * int(self.tokenizer_spec.sample_rate)
+                    )
+                    for index in context_valid.nonzero(
+                        as_tuple=False
+                    ).flatten().tolist():
+                        try:
+                            combined_waveforms.append(
+                                convolve_full_wet(
+                                    mixed_context[index].cpu().numpy(),
+                                    batch["noise_rir_inputs"][index][2],
+                                    past_context_samples=past_samples,
+                                    output_samples=output_samples,
+                                )
+                            )
+                            combined_indices.append(index)
+                        except Exception as exc:
+                            skipped_queries.append(
+                                {
+                                    "track_id": batch["track_id"][index],
+                                    "code": batch["code"][index],
+                                    "view_type": batch["view_type"][index],
+                                    "start": batch["start"][index],
+                                    "snr_db": snr,
+                                    "condition": "noise_rir",
+                                    "error": f"{type(exc).__name__}: {exc}",
+                                }
+                            )
+                    if combined_waveforms:
+                        started = time.perf_counter()
+                        combined_tokens = self.online_tokenizer.tokenize(
+                            torch.from_numpy(np.stack(combined_waveforms)).to(
+                                self.device
+                            )
+                        )
+                        if self.device.type == "cuda":
+                            torch.cuda.synchronize(self.device)
+                        tokenization_seconds += time.perf_counter() - started
+                        combined_beams = batched_beam_generate(
+                            self.model,
+                            prompts_from_audio_tokens(
+                                combined_tokens, self.vocabulary
+                            ),
+                            self.vocabulary,
+                            width=int(self.cfg["evaluation"]["beam_width"]),
+                        )
+                        rows.extend(
+                            {
+                                "track_id": batch["track_id"][index],
+                                "target": batch["code"][index],
+                                "view_type": batch["view_type"][index],
+                                "start": batch["start"][index],
+                                "condition": "noise_rir",
+                                "snr_db": snr,
+                                "rir_path": batch["rir_path"][index],
+                                "beam": beam,
+                            }
+                            for index, beam in zip(
+                                combined_indices, combined_beams, strict=True
+                            )
+                        )
         if was_training:
             self.model.train()
 
@@ -1594,10 +1771,16 @@ class AudioLMModule(pl.LightningModule):
             ) / count
             return result
 
-        clean_rows = [row for row in rows if row["snr_db"] is None]
-        noisy_rows = [row for row in rows if row["snr_db"] is not None]
+        clean_rows = [row for row in rows if row["condition"] == "clean"]
+        noisy_rows = [row for row in rows if row["condition"] == "noise"]
+        rir_rows = [row for row in rows if row["condition"] == "rir"]
+        noise_rir_rows = [
+            row for row in rows if row["condition"] == "noise_rir"
+        ]
         clean_summary = summarize(clean_rows)
         noisy_summary = summarize(noisy_rows)
+        rir_summary = summarize(rir_rows)
+        noise_rir_summary = summarize(noise_rir_rows)
         by_view = {
             view_type: {
                 "clean": summarize(
@@ -1638,6 +1821,14 @@ class AudioLMModule(pl.LightningModule):
             metrics["probe/noise/aggregate/beam_top1"] = noisy_summary[
                 "beam_top1"
             ]
+        if rir_summary:
+            metrics["probe/rir/aggregate/beam_top1"] = rir_summary[
+                "beam_top1"
+            ]
+        if noise_rir_summary:
+            metrics["probe/noise_rir/aggregate/beam_top1"] = (
+                noise_rir_summary["beam_top1"]
+            )
         if shifted_teacher_forced_count:
             metrics[
                 "probe/clean/shifted/teacher_forced_exact_accuracy"
@@ -1672,6 +1863,8 @@ class AudioLMModule(pl.LightningModule):
                 "view_type": row["view_type"],
                 "start": row["start"],
                 "snr_db": row["snr_db"],
+                "condition": row["condition"],
+                "rir_path": row["rir_path"],
                 "beam": [
                     {
                         "code": result.code,
@@ -1687,8 +1880,26 @@ class AudioLMModule(pl.LightningModule):
             "global_step": int(self.global_step),
             "clean": clean_summary,
             "noise": noisy_summary,
+            "rir": rir_summary,
+            "noise_rir": noise_rir_summary,
             "by_view": by_view,
             "by_snr": by_snr,
+            "rir_by_view": {
+                view_type: summarize(
+                    [row for row in rir_rows if row["view_type"] == view_type]
+                )
+                for view_type in ("canonical", "shifted", "heldout")
+            },
+            "noise_rir_by_snr": {
+                f"{snr:g}": summarize(
+                    [
+                        row
+                        for row in noise_rir_rows
+                        if math.isclose(float(row["snr_db"]), snr)
+                    ]
+                )
+                for snr in snr_values
+            },
             "tokenization_seconds": tokenization_seconds,
             "skipped_queries": skipped_queries,
             "queries": serializable_rows,
@@ -1964,6 +2175,7 @@ class AudioLMModule(pl.LightningModule):
                 "failed_crop_attempt_audit": self.failed_crop_attempt_audit,
                 "monitor_recipes": self.monitor_recipes,
                 "background_noise_manifest": self.noise_manifest,
+                "room_ir_manifest": self.rir_manifest,
                 "query_spec": self.query_spec,
                 "batch_spec": self.batch_spec,
                 "documents_consumed": self.documents_consumed,
@@ -2017,6 +2229,8 @@ class AudioLMModule(pl.LightningModule):
             raise ValueError("Resume checkpoint monitoring recipes do not match")
         if checkpoint.get("background_noise_manifest") != self.noise_manifest:
             raise ValueError("Resume checkpoint background-noise assets do not match")
+        if checkpoint.get("room_ir_manifest") != self.rir_manifest:
+            raise ValueError("Resume checkpoint room-IR assets do not match")
         if checkpoint.get("query_spec") != self.query_spec:
             raise ValueError("Resume checkpoint two-second query specification differs")
         if checkpoint.get("batch_spec") != self.batch_spec:
@@ -2128,17 +2342,6 @@ def train(cfg: dict, *, checkpoint: str | Path | None = None) -> None:
         raise ValueError(f"Training protocol must be {TRAINING_PROTOCOL}")
     if cfg["train"]["schedule"].get("loss_protocol") != LOSS_PROTOCOL:
         raise ValueError(f"Loss protocol must be {LOSS_PROTOCOL}")
-    expected_schedule = {
-        "clean_until_step": 20_000,
-        "ramp_until_step": 25_000,
-        "noise_probability": 0.75,
-        "consistency_weight": 0.10,
-        "snr_bin_probabilities": [0.40, 0.30, 0.20, 0.10],
-        "exact_zero_fraction_in_first_bin": 0.25,
-    }
-    for key, expected in expected_schedule.items():
-        if cfg["train"]["schedule"].get(key) != expected:
-            raise ValueError(f"tc9 schedule setting {key} must be {expected}")
     seed = int(cfg["train"]["seed"])
     pl.seed_everything(seed, workers=True)
     torch.use_deterministic_algorithms(
@@ -2188,6 +2391,10 @@ def train(cfg: dict, *, checkpoint: str | Path | None = None) -> None:
         json.dumps(datamodule.noise_assets.manifest(), indent=2, sort_keys=True)
         + "\n"
     )
+    (directory / "room_ir_manifest.json").write_text(
+        json.dumps(datamodule.rir_assets.manifest(), indent=2, sort_keys=True)
+        + "\n"
+    )
     (directory / "query_spec.json").write_text(
         json.dumps(query_spec, indent=2, sort_keys=True) + "\n"
     )
@@ -2204,6 +2411,7 @@ def train(cfg: dict, *, checkpoint: str | Path | None = None) -> None:
         datamodule.training_corpus_fingerprint,
         datamodule.monitor_recipes,
         datamodule.noise_assets.manifest(),
+        datamodule.rir_assets.manifest(),
         query_spec,
         batch_spec,
     )

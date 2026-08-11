@@ -1,4 +1,5 @@
 from copy import deepcopy
+import json
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,7 @@ from para_audio_id.audio_lm.training import (
 )
 from para_audio_id.audio_lm.vocabulary import AudioLMVocabulary
 from para_audio_id.codes import assign_codes
+from prepare_training_cohort import prepare_training_cohort
 
 
 def test_primary_config_is_audio_lm_and_matches_logical_batch():
@@ -30,21 +32,24 @@ def test_primary_config_is_audio_lm_and_matches_logical_batch():
     assert cfg["data"]["segment_duration"] == 2.0
     assert cfg["tokenizer"]["sample_rate"] * cfg["data"]["segment_duration"] == 48_000
     assert cfg["train"]["id_digit_weight"] == 8.0
-    assert cfg["data"]["max_training_tracks"] == 10_000
-    assert cfg["train"]["max_steps"] == 70_000
+    assert cfg["data"]["max_training_tracks"] == 25_000
+    assert cfg["train"]["max_steps"] == 175_000
     assert cfg["train"]["warmup_steps"] == 200
     assert cfg["train"]["evaluation_interval"] == 2_500
     assert cfg["train"]["checkpoint_interval"] == 500
     assert (
         cfg["train"]["schedule"]["protocol"]
-        == "token_budget_matched_two_second_noise_consistency_v1"
+        == "online_random_crop_noise_rir_consistency_25k_v1"
     )
     assert (
         cfg["train"]["schedule"]["loss_protocol"]
         == "tc5_family_weighted_consistency_v2"
     )
-    assert cfg["train"]["schedule"]["clean_until_step"] == 20_000
-    assert cfg["train"]["schedule"]["ramp_until_step"] == 25_000
+    assert cfg["train"]["schedule"]["clean_until_step"] == 50_000
+    assert cfg["train"]["schedule"]["noise_ramp_until_step"] == 62_500
+    assert cfg["train"]["schedule"]["noise_steady_until_step"] == 87_500
+    assert cfg["train"]["schedule"]["rir_ramp_until_step"] == 100_000
+    assert cfg["train"]["schedule"]["combined_ramp_until_step"] == 112_500
     assert cfg["evaluation"]["monitor_tracks"] == 100
     assert cfg["evaluation"]["noise_snr_db"] == [0, 5, 10, 20, 30]
     assert cfg["data"]["background_noise"]["training_root"].endswith(
@@ -53,6 +58,9 @@ def test_primary_config_is_audio_lm_and_matches_logical_batch():
     assert cfg["data"]["background_noise"]["validation_root"].endswith(
         "/bg_noise/test"
     )
+    assert cfg["data"]["room_ir"]["training_root"].endswith("/room_ir/train")
+    assert cfg["data"]["room_ir"]["validation_root"].endswith("/room_ir/test")
+    assert cfg["data"]["room_ir"]["past_context_duration"] == 2.0
     assert cfg["data"]["crop_retries"] == 4
     assert cfg["data"]["replacement_retries"] == 32
     assert not any("token_root" in key for key in cfg["data"])
@@ -122,3 +130,32 @@ def test_random_code_mapping_is_complete_unique_and_seeded():
     assert first == second
     assert len(set(first)) == 100_000
     assert all(len(code) == 5 for code in first)
+
+
+def test_fresh_training_cohort_is_seeded_and_preserves_catalogue_codes(tmp_path):
+    catalogue = tmp_path / "catalogue.jsonl"
+    rows = [
+        {
+            "path": f"{index}.mp3",
+            "track_id": f"track-{index:03d}",
+            "code": f"{index:05d}",
+            "duration": 30.0,
+        }
+        for index in range(30)
+    ]
+    catalogue.write_text("\n".join(json.dumps(row) for row in rows))
+    output = tmp_path / "cohort.json"
+    cfg = {
+        "data": {
+            "catalogue": str(catalogue),
+            "max_training_tracks": 25,
+            "training_tracks_manifest": str(output),
+        },
+        "train": {"seed": 1337},
+    }
+    first = prepare_training_cohort(cfg)
+    second = prepare_training_cohort(cfg)
+    assert first == second
+    assert len(first["track_ids"]) == 25
+    assert len(set(first["track_ids"])) == 25
+    assert first["protocol"] == "fresh_seeded_catalogue_cohort_v1"

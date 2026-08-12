@@ -12,10 +12,19 @@ def main() -> None:
     parser.add_argument("checkpoint", type=Path)
     parser.add_argument("output", type=Path)
     parser.add_argument(
+        "--protocol",
+        choices=("segment", "joint-beam"),
+        default="segment",
+        help="Use legacy segment evaluation or paper-facing joint-query decoding.",
+    )
+    parser.add_argument(
         "--cohort",
         choices=("probe", "training"),
-        default="probe",
-        help="Evaluate the fixed probe or every track embedded in the training subset.",
+        default=None,
+        help=(
+            "Evaluate the fixed probe or training cohort. Defaults to training for "
+            "joint-beam and probe for segment evaluation."
+        ),
     )
     parser.add_argument(
         "--expected-tracks",
@@ -34,6 +43,26 @@ def main() -> None:
         default=1337,
         help="Random-subset seed used with --sample-tracks (default: 1337).",
     )
+    parser.add_argument(
+        "--recipe-seed",
+        type=int,
+        default=1337,
+        help="Seed for joint-query starts and held-out room IRs (default: 1337).",
+    )
+    parser.add_argument(
+        "--query-lengths",
+        type=float,
+        nargs="+",
+        default=(2.0, 3.0, 5.0, 10.0),
+        help="Paper-facing query lengths in seconds.",
+    )
+    parser.add_argument(
+        "--conditions",
+        choices=("clean", "rir"),
+        nargs="+",
+        default=("clean", "rir"),
+        help="Paper-facing waveform conditions.",
+    )
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--beam-width", type=int, default=10)
     parser.add_argument(
@@ -45,7 +74,12 @@ def main() -> None:
     metrics = evaluate(
         args.checkpoint,
         output=args.output,
-        cohort=args.cohort,
+        protocol=args.protocol,
+        cohort=(
+            args.cohort
+            if args.cohort is not None
+            else ("training" if args.protocol == "joint-beam" else "probe")
+        ),
         expected_tracks=args.expected_tracks,
         max_tracks=args.max_tracks,
         sample_tracks=args.sample_tracks,
@@ -53,6 +87,9 @@ def main() -> None:
         device=args.device,
         beam_width=None if args.greedy_only else args.beam_width,
         generation_only=args.greedy_only,
+        recipe_seed=args.recipe_seed,
+        query_lengths=tuple(args.query_lengths),
+        conditions=tuple(args.conditions),
     )
     print(json.dumps(metrics, indent=2, sort_keys=True))
 

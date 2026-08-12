@@ -1,9 +1,17 @@
+import json
 import numpy as np
 import pytest
+import random
 import soundfile as sf
 
 from para_audio_id.catalogue import CatalogueRecord
 from para_audio_id.audio_lm.noise import BackgroundNoiseAssets
+from para_audio_id.audio_lm.evaluation import (
+    _joint_manifest_configuration,
+    _joint_metrics,
+    _load_joint_rows,
+    _load_or_create_joint_manifest,
+)
 from para_audio_id.audio_lm.rir import RoomImpulseResponseAssets, convolve_full_wet
 from para_audio_id.audio_lm.random_crops import (
     OnlineTrackBatchSampler,
@@ -284,6 +292,150 @@ def test_full_wet_convolution_uses_past_context_and_normalizes_peak():
     assert result[0] == np.float32(0.5)
     assert np.max(np.abs(result)) == np.float32(0.5)
     assert np.allclose(result[1:], 0.0, atol=1e-6)
+
+
+def test_joint_manifest_is_deterministic_and_backfills_bad_candidates(tmp_path):
+    sample_rate = 8_000
+    audio_root = tmp_path / "audio"
+    audio_root.mkdir()
+    selected_records = records(4, duration=12.0)
+    track_ids = [record.track_id for record in selected_records]
+    shuffled = track_ids.copy()
+    random.Random(7).shuffle(shuffled)
+    missing_track = shuffled[0]
+    waveform = np.sin(
+        2 * np.pi * 220 * np.arange(12 * sample_rate, dtype=np.float32)
+        / sample_rate
+    )
+    for record in selected_records:
+        if record.track_id != missing_track:
+            sf.write(audio_root / record.path, waveform, sample_rate)
+    catalogue = tmp_path / "catalogue.jsonl"
+    catalogue.write_text(
+        "\n".join(
+            json.dumps(
+                {
+                    "path": record.path,
+                    "track_id": record.track_id,
+                    "code": record.code,
+                    "duration": record.duration,
+                }
+            )
+            for record in selected_records
+        )
+    )
+    rir_train = tmp_path / "rir_train" / "OpenAIR" / "train-room"
+    rir_test = tmp_path / "rir_test" / "OpenAIR" / "test-room"
+    rir_train.mkdir(parents=True)
+    rir_test.mkdir(parents=True)
+    impulse = np.zeros(32, dtype=np.float32)
+    impulse[0] = 1.0
+    sf.write(rir_train / "train.wav", impulse, sample_rate)
+    test_ir = impulse.copy()
+    test_ir[1] = 0.5
+    sf.write(rir_test / "test.wav", test_ir, sample_rate)
+    rir_assets = RoomImpulseResponseAssets(
+        rir_train.parents[1], rir_test.parents[1], sample_rate=sample_rate
+    )
+    checkpoint = {
+        "training_track_ids": track_ids,
+        "validation_probe": [],
+        "tokenizer_fingerprint": "tokenizer",
+        "training_corpus_fingerprint": "corpus",
+        "global_step": 5,
+    }
+    configuration = _joint_manifest_configuration(
+        checkpoint_fingerprint="checkpoint",
+        checkpoint=checkpoint,
+        rir_manifest=rir_assets.manifest(),
+        cohort="training",
+        expected_tracks=4,
+        sample_tracks=2,
+        sample_seed=7,
+        recipe_seed=9,
+        query_lengths=(2.0, 3.0, 5.0, 10.0),
+        conditions=("clean", "rir"),
+        beam_width=10,
+        sample_rate=sample_rate,
+        window_seconds=2.0,
+        past_context_seconds=2.0,
+    )
+    cfg = {
+        "data": {"catalogue": str(catalogue), "audio_root": str(audio_root)}
+    }
+    path = tmp_path / "evaluation.manifest.json"
+    first = _load_or_create_joint_manifest(
+        path=path,
+        configuration=configuration,
+        checkpoint=checkpoint,
+        cfg=cfg,
+        rir_assets=rir_assets,
+    )
+    repeated = _load_or_create_joint_manifest(
+        path=path,
+        configuration=configuration,
+        checkpoint=checkpoint,
+        cfg=cfg,
+        rir_assets=rir_assets,
+    )
+    assert first == repeated
+    assert len(first["queries"]) == 2
+    assert len({row["track_id"] for row in first["queries"]}) == 2
+    assert first["excluded_candidates"][0]["track_id"] == missing_track
+    assert all(row["rir_path"] == "OpenAIR/test-room/test.wav" for row in first["queries"])
+    changed = {**configuration, "recipe_seed": 10}
+    with pytest.raises(ValueError, match="does not match"):
+        _load_or_create_joint_manifest(
+            path=path,
+            configuration=changed,
+            checkpoint=checkpoint,
+            cfg=cfg,
+            rir_assets=rir_assets,
+        )
+
+
+def test_joint_metrics_and_jsonl_resume_validation(tmp_path):
+    rows = [
+        {
+            "protocol_fingerprint": "fingerprint",
+            "status": "ok",
+            "track_id": "a",
+            "query_seconds": 2.0,
+            "condition": "clean",
+            "correct_rank": 1,
+            "latency_seconds": 1.0,
+        },
+        {
+            "protocol_fingerprint": "fingerprint",
+            "status": "ok",
+            "track_id": "b",
+            "query_seconds": 2.0,
+            "condition": "clean",
+            "correct_rank": 7,
+            "latency_seconds": 1.0,
+        },
+        {
+            "protocol_fingerprint": "fingerprint",
+            "status": "error",
+            "track_id": "c",
+            "query_seconds": 2.0,
+            "condition": "clean",
+            "latency_seconds": 0.5,
+        },
+    ]
+    path = tmp_path / "queries.jsonl"
+    path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+    restored = _load_joint_rows(path, fingerprint="fingerprint")
+    assert len(restored) == 3
+    metrics = _joint_metrics(list(restored.values()), selected_tracks=3)
+    assert metrics["evaluated_queries"] == 2
+    assert metrics["failed_queries"] == 1
+    assert metrics["beam_top1"] == 1 / 3
+    assert metrics["beam_top5"] == 1 / 3
+    assert metrics["beam_top10"] == 2 / 3
+    assert metrics["beam_mrr"] == pytest.approx((1 + 1 / 7) / 3)
+    with pytest.raises(ValueError, match="fingerprint mismatch"):
+        _load_joint_rows(path, fingerprint="other")
 
 
 def test_room_ir_assets_reject_shared_room_or_identical_content(tmp_path):

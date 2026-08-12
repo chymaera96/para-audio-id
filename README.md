@@ -173,18 +173,36 @@ which PyTorch cannot promise bitwise determinism instead of aborting a long run.
 
 ## Evaluation and inference
 
-Post-run evaluation uses the checkpoint's fixed 100-track, three-group monitor
-manifest and tokenizes clean, noise-only, RIR-only, and combined two-second
-query audio online:
+The paper-facing evaluation samples a deterministic 1,000-track subset from the
+checkpoint's 25K training cohort. It evaluates nested 2/3/5/10-second clean and
+held-out-room-IR queries using two-second windows with 50% overlap. Identifier
+log-probabilities are averaged across all windows at each shared beam prefix
+before pruning:
 
 ```bash
 python evaluate.py \
   /gpfs/scratch/acw723/para-audio-id/audio-lm-checkpoints/tc11/last.ckpt \
-  evaluation-tc11.json
+  evaluation-tc11-joint.json \
+  --protocol joint-beam
 ```
 
-It reports clean and per-SNR greedy exact accuracy, beam Top-1/5/10, MRR, and
-protocol validity.
+This defaults to the 25K training cohort, a seeded 1,000-track sample, recipe
+and sample seed `1337`, query lengths `2/3/5/10`, clean and RIR conditions,
+beam width 10, and CUDA. The corresponding flags remain available for smaller
+diagnostic evaluations.
+
+The command writes a JSON summary, paper-ready CSV, append-only query JSONL, and
+an immutable evaluation manifest. Matching reruns resume completed queries;
+checkpoint, tokenizer, IR-manifest, seed, or protocol mismatches fail. Metrics
+include beam Top-1/5/10, MRR, evaluated/failed counts, latency, and throughput
+for each duration and condition. Runtime failures count as retrieval misses in
+the accuracy and MRR denominator rather than being silently excluded.
+
+The earlier fixed 100-track clean/noise/RIR monitor remains available through
+the default `--protocol segment` behavior and is unchanged. Training keeps its
+own existing monitor path; the paper-facing path is invoked only by this
+standalone command.
+
 Batched generation receives only `[BOS] audio [ID]` and produces five digits plus
 `[EOS]`; it uses no teacher forcing or catalogue-derived valid-code constraint.
 

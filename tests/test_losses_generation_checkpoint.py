@@ -10,10 +10,15 @@ from para_audio_id.audio_lm.checkpoint import (
     validate_checkpoint_metadata,
 )
 from para_audio_id.audio_lm.dataset import collate_causal_documents
-from para_audio_id.audio_lm.evaluation import _generation_metrics, select_checkpoint_cohort
+from para_audio_id.audio_lm.evaluation import (
+    _generation_metrics,
+    joint_window_starts,
+    select_checkpoint_cohort,
+)
 from para_audio_id.audio_lm.generation import (
     batched_beam_generate,
     batched_greedy_generate,
+    batched_joint_beam_generate,
     beam_generate,
     greedy_generate,
 )
@@ -98,6 +103,77 @@ def test_generation_emits_exactly_five_digits_then_eos():
     batched_beam = batched_beam_generate(model, prompts, vocabulary, width=5)
     assert len(batched_greedy) == 2
     assert [len(results) for results in batched_beam] == [5, 5]
+
+
+def test_one_window_joint_beam_matches_regular_beam():
+    vocabulary = AudioLMVocabulary()
+    torch.manual_seed(17)
+    model = AudioCausalLM(tiny_config(), vocabulary).eval()
+    prompts = torch.tensor(
+        [
+            [vocabulary.bos_token_id, 1, 1025, vocabulary.id_token_id],
+            [vocabulary.bos_token_id, 7, 1031, vocabulary.id_token_id],
+        ]
+    )
+    regular = batched_beam_generate(model, prompts, vocabulary, width=10)
+    joint = batched_joint_beam_generate(
+        model, prompts[:, None, :], vocabulary, width=10
+    )
+    assert [[result.code for result in row] for row in joint] == [
+        [result.code for result in row] for row in regular
+    ]
+    for joint_row, regular_row in zip(joint, regular, strict=True):
+        assert [result.log_probability for result in joint_row] == pytest.approx(
+            [result.log_probability for result in regular_row], abs=1e-5
+        )
+
+
+def test_joint_beam_scores_are_mean_window_log_probabilities():
+    vocabulary = AudioLMVocabulary()
+    torch.manual_seed(18)
+    model = AudioCausalLM(tiny_config(), vocabulary).eval()
+    prompts = torch.tensor(
+        [
+            [vocabulary.bos_token_id, 1, 1025, vocabulary.id_token_id],
+            [vocabulary.bos_token_id, 9, 1033, vocabulary.id_token_id],
+        ]
+    )[None, :, :]
+    ranking = batched_joint_beam_generate(model, prompts, vocabulary, width=5)[0]
+    for candidate in ranking:
+        per_window = []
+        for prompt in prompts[0]:
+            sequence = prompt[None, :]
+            score = torch.tensor(0.0)
+            for digit in candidate.code:
+                log_probs = model(sequence)[
+                    :, -1, vocabulary.digit_offset : vocabulary.digit_offset + 10
+                ].log_softmax(dim=-1)
+                score += log_probs[0, int(digit)]
+                token = torch.tensor(
+                    [[vocabulary.digit_offset + int(digit)]], dtype=torch.long
+                )
+                sequence = torch.cat((sequence, token), dim=1)
+            score += model(sequence)[:, -1, :].log_softmax(dim=-1)[
+                0, vocabulary.eos_token_id
+            ]
+            per_window.append(score)
+        expected = torch.stack(per_window).mean()
+        assert candidate.log_probability == pytest.approx(float(expected), abs=1e-5)
+
+
+def test_joint_query_window_grid_uses_overlap_and_tail_alignment():
+    assert joint_window_starts(48_000, 48_000, 24_000) == [0]
+    assert joint_window_starts(72_000, 48_000, 24_000) == [0, 24_000]
+    assert joint_window_starts(120_000, 48_000, 24_000) == [
+        0,
+        24_000,
+        48_000,
+        72_000,
+    ]
+    assert joint_window_starts(240_000, 48_000, 24_000) == list(
+        range(0, 192_001, 24_000)
+    )
+    assert joint_window_starts(50_000, 48_000, 24_000) == [0, 2_000]
 
 
 def test_cached_greedy_matches_full_prefix_decoding():

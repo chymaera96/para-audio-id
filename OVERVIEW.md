@@ -290,18 +290,36 @@ probes are added for RIR-only and noise+RIR; complete condition/SNR details are
 stored in probe JSONL and checkpoints. tc11 checkpoints are incompatible with
 all earlier protocols.
 
+## `tc12`: earlier progressive noise and room reverberation
+
+`tc12` is the one-codebook, 25K successor to tc11. Every pair retains a clean
+anchor. The secondary view is clean through 10K; noise-only and RIR-only each
+ramp to 0.30 over 10K–30K; then clean falls to 0.10, noise rises to 0.35, and
+noise-plus-RIR rises to 0.25 by 60K. That distribution remains fixed through
+175K. Consistency ramps from zero to 0.1 over 10K–30K.
+
+Training IRs are ordered by post-peak 99%-energy decay duration. The eligible
+pool expands from the mildest third at 10K to the mildest two thirds at 30K and
+the complete range, including the longest-decay responses, at 60K. All RIR
+convolution remains full-wet with two seconds of preceding context.
+
+The learning rate warms from zero to `3e-4` over 500 steps, holds through 60K,
+falls linearly to `1.5e-4` at 140K, and follows a cosine curve to `1.5e-5` at
+175K. These boundaries scale with catalogue size in the same way as total
+training exposure; the stated values are the 25K tc12 schedule.
+
 ## Unified training profiles
 
 Current runs select the causal decoder (`small` or `medium`) and robustness
 schedule (`noise` or `noise-rir`) at launch. Catalogue size is selected in YAML
 and resolves a dedicated 10K, 25K, or 100K cohort manifest. Optimizer steps and
-curriculum transitions scale linearly from the 10K/70K-step reference, while
-warm-up, checkpointing, and monitoring intervals remain fixed.
+curriculum transitions scale linearly from the 10K/70K-step reference.
+Checkpointing and monitoring intervals remain fixed; tc12's warm-up and decay
+boundaries scale with catalogue exposure.
 
 New checkpoints store the fully resolved profile rather than relying on mutable
 CLI defaults. Historical tc9 (small/noise/10K), tc10 (medium/noise/10K), and
-tc11 (small/noise-RIR/25K) are recognized during evaluation; tc11 remains an
-exact resume source. Representation diagnostics now include the normalized
+tc11 (small/noise-RIR/25K) are recognized during evaluation. Representation diagnostics now include the normalized
 same-versus-different cosine margin alongside both raw cosine values.
 
 ## Interpretation

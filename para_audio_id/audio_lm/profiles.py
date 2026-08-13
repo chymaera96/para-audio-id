@@ -19,6 +19,8 @@ SUPPORTED_SELECTED_CODEBOOKS = (1, 2)
 ID_DIGIT_WEIGHT_PER_CODEBOOK = 4.0
 NEW_TRAINING_PROTOCOL = "online_random_crop_consistency_profile_v2"
 LOSS_PROTOCOL = "tc5_family_weighted_consistency_v2"
+TC12_CURRICULUM = "tc12_noise_rir_curriculum_v1"
+TC12_LR_POLICY = "tc12_warmup_hold_linear_cosine_v1"
 
 
 def cohort_manifest(database_size: int) -> str:
@@ -98,11 +100,10 @@ def schedule_profile(name: str, database_size: int) -> dict[str, Any]:
         }
     return {
         **common,
-        "clean_until_step": _scaled(20_000, database_size),
-        "noise_ramp_until_step": _scaled(25_000, database_size),
-        "noise_steady_until_step": _scaled(35_000, database_size),
-        "rir_ramp_until_step": _scaled(40_000, database_size),
-        "combined_ramp_until_step": _scaled(45_000, database_size),
+        "curriculum": TC12_CURRICULUM,
+        "clean_until_step": _scaled(4_000, database_size),
+        "degradation_ramp_until_step": _scaled(12_000, database_size),
+        "combined_ramp_until_step": _scaled(24_000, database_size),
     }
 
 
@@ -117,13 +118,22 @@ def decoder_profile(name: str) -> dict[str, Any]:
 def canonical_training_profile(
     *, database_size: int, decoder: str, schedule: str
 ) -> dict[str, Any]:
-    return {
+    profile = {
         "version": 2,
         "database_size": database_size,
         "training_tracks_manifest": cohort_manifest(database_size),
         "decoder": decoder_profile(decoder),
         "schedule": schedule_profile(schedule, database_size),
     }
+    if schedule == "noise-rir":
+        profile["learning_rate_schedule"] = {
+            "policy": TC12_LR_POLICY,
+            "warmup_steps": _scaled(200, database_size),
+            "hold_until_step": _scaled(24_000, database_size),
+            "linear_decay_until_step": _scaled(56_000, database_size),
+            "final_learning_rate_ratio": 0.05,
+        }
+    return profile
 
 
 def historical_checkpoint_profile(checkpoint: dict) -> dict[str, Any]:
@@ -231,13 +241,18 @@ def resolve_training_config(
     else:
         resolved_decoder = decoder or "small"
         resolved_schedule = schedule or "noise"
-    profile = canonical_training_profile(
-        database_size=database_size,
-        decoder=resolved_decoder,
-        schedule=resolved_schedule,
-    )
-    if resumed is not None and profile != resumed:
-        raise ValueError("Explicit training profile does not match resume checkpoint")
+    if resumed is not None:
+        if resolved_decoder != resumed["decoder"]["name"] or (
+            resolved_schedule != resumed["schedule"]["name"]
+        ):
+            raise ValueError("Explicit training profile does not match resume checkpoint")
+        profile = deepcopy(resumed)
+    else:
+        profile = canonical_training_profile(
+            database_size=database_size,
+            decoder=resolved_decoder,
+            schedule=resolved_schedule,
+        )
 
     tokenizer = cfg.setdefault("tokenizer", {})
     checkpoint_query = (
@@ -288,6 +303,20 @@ def resolve_training_config(
     train["schedule"] = {
         key: value for key, value in profile["schedule"].items() if key != "max_steps"
     }
+    lr_profile = profile.get("learning_rate_schedule")
+    if lr_profile is not None:
+        train["warmup_steps"] = int(lr_profile["warmup_steps"])
+        train["learning_rate_schedule"] = deepcopy(lr_profile)
+    elif checkpoint_payload is not None:
+        historical_train = checkpoint_payload.get("hyper_parameters", {}).get(
+            "train", {}
+        )
+        train["warmup_steps"] = int(
+            historical_train.get("warmup_steps", train.get("warmup_steps", 200))
+        )
+        train["learning_rate_schedule"] = {"policy": "legacy_warmup_cosine_v1"}
+    else:
+        train["learning_rate_schedule"] = {"policy": "legacy_warmup_cosine_v1"}
     cfg["resolved_training_profile"] = profile
     cfg["resolved_query_profile"] = query_profile
     return cfg

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from pathlib import Path
 
 import numpy as np
@@ -70,6 +71,10 @@ class RoomImpulseResponseAssets:
         self.validation_fingerprint = self._fingerprint(
             self.validation_root, self.validation_files
         )
+        self.training_files_by_severity = sorted(
+            self.training_files,
+            key=lambda path: (self._severity_score(path), path.as_posix()),
+        )
 
     @staticmethod
     def _files(root: Path) -> list[Path]:
@@ -105,6 +110,21 @@ class RoomImpulseResponseAssets:
             json.dumps(rows, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
 
+    @staticmethod
+    def _severity_score(path: Path) -> float:
+        """Estimate reverberation severity from post-peak energy-decay duration."""
+        audio, sample_rate = sf.read(path, dtype="float32", always_2d=True)
+        mono = np.asarray(audio.mean(axis=1), dtype=np.float64)
+        if not len(mono) or not np.isfinite(mono).all():
+            return math.inf
+        peak = int(np.argmax(np.abs(mono)))
+        tail_energy = np.square(mono[peak:])
+        total = float(tail_energy.sum())
+        if total <= 1e-16:
+            return math.inf
+        end = int(np.searchsorted(np.cumsum(tail_energy), 0.99 * total))
+        return end / float(sample_rate)
+
     def manifest(self) -> dict:
         return {
             "training_root": str(self.training_root),
@@ -113,13 +133,22 @@ class RoomImpulseResponseAssets:
             "validation_files": len(self.validation_files),
             "training_fingerprint": self.training_fingerprint,
             "validation_fingerprint": self.validation_fingerprint,
-            "policy": "full_wet_two_second_past_context_v1",
+            "policy": "full_wet_two_second_past_context_severity_ranked_v2",
+            "severity_measure": "post_peak_99_percent_energy_decay_seconds",
         }
 
-    def load_training(self, key: object) -> tuple[np.ndarray, str]:
+    def load_training(
+        self, key: object, *, severity_quantile: float = 1.0
+    ) -> tuple[np.ndarray, str]:
+        if not 0.0 < severity_quantile <= 1.0:
+            raise ValueError("RIR severity quantile must be in (0, 1]")
+        eligible = max(
+            1,
+            math.ceil(len(self.training_files_by_severity) * severity_quantile),
+        )
         return self._load(
             self.training_root,
-            self.training_files,
+            self.training_files_by_severity[:eligible],
             stable_uint64("train-room-ir", key),
         )
 

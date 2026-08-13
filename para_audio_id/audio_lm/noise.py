@@ -39,6 +39,7 @@ class AugmentationSchedule:
     consistency_weight: float
     snr_bin_probabilities: tuple[float, float, float, float] | None
     phase: str
+    rir_severity_quantile: float | None = None
 
     @property
     def background_noise_probability(self) -> float:
@@ -196,6 +197,54 @@ def resolved_augmentation_schedule(
     if step < 0:
         raise ValueError("Global step cannot be negative")
     name = schedule.get("name")
+    if schedule.get("curriculum") == "tc12_noise_rir_curriculum_v1":
+        clean_end = int(schedule["clean_until_step"])
+        degradation_end = int(schedule["degradation_ramp_until_step"])
+        combined_end = int(schedule["combined_ramp_until_step"])
+        snr_bins = tuple(
+            float(value) for value in schedule["snr_bin_probabilities"]
+        )
+        consistency = float(schedule["consistency_weight"])
+        if step < clean_end:
+            return AugmentationSchedule(
+                1.0, 0.0, 0.0, 0.0, 0.0, None, "clean", None
+            )
+        if step < degradation_end:
+            progress = (step - clean_end) / max(1, degradation_end - clean_end)
+            return AugmentationSchedule(
+                1.0 - 0.60 * progress,
+                0.30 * progress,
+                0.30 * progress,
+                0.0,
+                consistency * progress,
+                snr_bins,
+                "noise_rir_ramp",
+                (1.0 + progress) / 3.0,
+            )
+        if step < combined_end:
+            progress = (step - degradation_end) / max(
+                1, combined_end - degradation_end
+            )
+            return AugmentationSchedule(
+                0.40 - 0.30 * progress,
+                0.30 + 0.05 * progress,
+                0.30,
+                0.25 * progress,
+                consistency,
+                snr_bins,
+                "combined_ramp",
+                (2.0 + progress) / 3.0,
+            )
+        return AugmentationSchedule(
+            0.10,
+            0.35,
+            0.30,
+            0.25,
+            consistency,
+            snr_bins,
+            "full_distribution",
+            1.0,
+        )
     clean_end = int(schedule["clean_until_step"])
     ramp_end = int(schedule["noise_ramp_until_step"])
     snr_bins = tuple(float(value) for value in schedule["snr_bin_probabilities"])

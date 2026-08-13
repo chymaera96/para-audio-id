@@ -12,6 +12,7 @@ from para_audio_id.audio_lm.profiles import (
     resolve_training_config,
     schedule_profile,
 )
+from para_audio_id.audio_lm.training import learning_rate_multiplier
 
 
 @pytest.mark.parametrize(
@@ -30,9 +31,9 @@ def test_catalogue_profiles_scale_by_exposure(size, manifest, total, clean, ramp
     assert noise["noise_ramp_until_step"] == ramp
     rir = schedule_profile("noise-rir", size)
     assert rir["max_steps"] == total
-    assert rir["noise_steady_until_step"] == 35_000 * size // 10_000
-    assert rir["rir_ramp_until_step"] == 40_000 * size // 10_000
-    assert rir["combined_ramp_until_step"] == 45_000 * size // 10_000
+    assert rir["clean_until_step"] == 4_000 * size // 10_000
+    assert rir["degradation_ramp_until_step"] == 12_000 * size // 10_000
+    assert rir["combined_ramp_until_step"] == 24_000 * size // 10_000
 
 
 def test_profile_defaults_and_decoder_override():
@@ -171,15 +172,17 @@ def test_noise_schedule_never_emits_rir():
         assert resolved.noise_rir_probability == 0
 
 
-def test_25k_noise_rir_profile_exactly_matches_tc11_boundaries():
+def test_25k_noise_rir_profile_exactly_matches_tc12_boundaries():
     profile = schedule_profile("noise-rir", 25_000)
     expected = {
-        49_999: (1.0, 0.0, 0.0, 0.0),
-        62_500: (0.25, 0.75, 0.0, 0.0),
-        87_500: (0.25, 0.75, 0.0, 0.0),
-        100_000: (0.25, 0.55, 0.20, 0.0),
-        112_500: (0.25, 0.35, 0.20, 0.20),
-        175_000: (0.25, 0.35, 0.20, 0.20),
+        9_999: (1.0, 0.0, 0.0, 0.0),
+        10_000: (1.0, 0.0, 0.0, 0.0),
+        20_000: (0.70, 0.15, 0.15, 0.0),
+        30_000: (0.40, 0.30, 0.30, 0.0),
+        45_000: (0.25, 0.325, 0.30, 0.125),
+        60_000: (0.10, 0.35, 0.30, 0.25),
+        140_000: (0.10, 0.35, 0.30, 0.25),
+        175_000: (0.10, 0.35, 0.30, 0.25),
     }
     for step, probabilities in expected.items():
         resolved = resolved_augmentation_schedule(step, profile)
@@ -189,6 +192,38 @@ def test_25k_noise_rir_profile_exactly_matches_tc11_boundaries():
             resolved.rir_probability,
             resolved.noise_rir_probability,
         ) == pytest.approx(probabilities)
+
+
+def test_tc12_rir_severity_and_learning_rate_schedule():
+    profile = canonical_training_profile(
+        database_size=25_000, decoder="small", schedule="noise-rir"
+    )
+    schedule = profile["schedule"]
+    assert resolved_augmentation_schedule(
+        10_000, schedule
+    ).rir_severity_quantile == pytest.approx(1 / 3)
+    assert resolved_augmentation_schedule(
+        30_000, schedule
+    ).rir_severity_quantile == pytest.approx(2 / 3)
+    assert resolved_augmentation_schedule(
+        60_000, schedule
+    ).rir_severity_quantile == pytest.approx(1.0)
+    train = {
+        "max_steps": 175_000,
+        "warmup_steps": 500,
+        "learning_rate_schedule": profile["learning_rate_schedule"],
+    }
+    expected = {
+        0: 0.0,
+        250: 0.5,
+        500: 1.0,
+        60_000: 1.0,
+        100_000: 0.75,
+        140_000: 0.5,
+        175_000: 0.05,
+    }
+    for step, multiplier in expected.items():
+        assert learning_rate_multiplier(step, train) == pytest.approx(multiplier)
 
 
 def test_relative_cosine_margin_and_denominator_stabilization():

@@ -473,6 +473,32 @@ def test_room_ir_assets_reject_shared_room_or_identical_content(tmp_path):
         )
 
 
+def test_room_ir_training_selection_opens_severity_quantiles(tmp_path):
+    train = tmp_path / "train" / "OpenAIR" / "train-room"
+    validation = tmp_path / "validation" / "OpenAIR" / "validation-room"
+    train.mkdir(parents=True)
+    validation.mkdir(parents=True)
+    for name, tail in (("mild", 8), ("moderate", 80), ("wet", 800)):
+        response = np.zeros(1_000, dtype=np.float32)
+        response[0] = 1.0
+        response[1 : tail + 1] = np.linspace(0.5, 0.01, tail)
+        sf.write(train / f"{name}.wav", response, 8_000)
+    validation_ir = np.zeros(1_000, dtype=np.float32)
+    validation_ir[0] = 0.75
+    sf.write(validation / "validation.wav", validation_ir, 8_000)
+    assets = RoomImpulseResponseAssets(
+        train.parents[1], validation.parents[1], sample_rate=8_000
+    )
+    assert [path.stem for path in assets.training_files_by_severity] == [
+        "mild",
+        "moderate",
+        "wet",
+    ]
+    _, mild_path = assets.load_training("any-key", severity_quantile=1 / 3)
+    assert mild_path.endswith("mild.wav")
+    assert "severity_ranked_v2" in assets.manifest()["policy"]
+
+
 def test_monitor_collator_skips_invalid_crop_without_aborting(tmp_path):
     audio_root = tmp_path / "audio"
     train_noise = tmp_path / "noise_train"

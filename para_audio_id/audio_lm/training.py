@@ -108,6 +108,44 @@ AUGMENTATION_METRICS = {
 TRAIN_LOG_LEVELS = {"on_step": True, "on_epoch": True}
 
 
+def learning_rate_multiplier(step: int, train_cfg: dict) -> float:
+    max_steps = int(train_cfg["max_steps"])
+    warmup_steps = int(train_cfg["warmup_steps"])
+    if not 0 < warmup_steps < max_steps:
+        raise ValueError("warmup_steps must be between zero and max_steps")
+    policy = train_cfg.get("learning_rate_schedule", {}).get(
+        "policy", "legacy_warmup_cosine_v1"
+    )
+    if policy == "legacy_warmup_cosine_v1":
+        if step < warmup_steps:
+            return (step + 1) / warmup_steps
+        progress = (step - warmup_steps) / max(1, max_steps - warmup_steps)
+        return 0.5 * (
+            1 + math.cos(math.pi * min(max(progress, 0.0), 1.0))
+        )
+    if policy != "tc12_warmup_hold_linear_cosine_v1":
+        raise ValueError(f"Unknown learning-rate policy {policy!r}")
+    lr_cfg = train_cfg["learning_rate_schedule"]
+    hold_end = int(lr_cfg["hold_until_step"])
+    linear_end = int(lr_cfg["linear_decay_until_step"])
+    final_ratio = float(lr_cfg["final_learning_rate_ratio"])
+    if not warmup_steps < hold_end < linear_end < max_steps:
+        raise ValueError("Invalid tc12 learning-rate boundaries")
+    if not 0.0 < final_ratio < 0.5:
+        raise ValueError("tc12 final learning-rate ratio must be in (0, 0.5)")
+    if step < warmup_steps:
+        return step / warmup_steps
+    if step < hold_end:
+        return 1.0
+    if step < linear_end:
+        progress = (step - hold_end) / (linear_end - hold_end)
+        return 1.0 - 0.5 * progress
+    progress = min(max((step - linear_end) / (max_steps - linear_end), 0.0), 1.0)
+    return final_ratio + (0.5 - final_ratio) * 0.5 * (
+        1.0 + math.cos(math.pi * progress)
+    )
+
+
 def tc6_training_wandb_keys() -> set[str]:
     return {
         f"train/{name}_{level}"
@@ -2331,22 +2369,9 @@ class AudioLMModule(pl.LightningModule):
             betas=tuple(float(value) for value in train_cfg["betas"]),
             weight_decay=float(train_cfg["weight_decay"]),
         )
-        max_steps = int(train_cfg["max_steps"])
-        warmup_steps = int(train_cfg["warmup_steps"])
-        if not 0 < warmup_steps < max_steps:
-            raise ValueError("warmup_steps must be between zero and max_steps")
-
-        def schedule(step: int) -> float:
-            if step < warmup_steps:
-                return (step + 1) / warmup_steps
-            progress = (step - warmup_steps) / max(
-                1, max_steps - warmup_steps
-            )
-            return 0.5 * (
-                1 + math.cos(math.pi * min(max(progress, 0.0), 1.0))
-            )
-
-        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, schedule)
+        scheduler = torch.optim.lr_scheduler.LambdaLR(
+            optimizer, partial(learning_rate_multiplier, train_cfg=train_cfg)
+        )
         return {
             "optimizer": optimizer,
             "lr_scheduler": {"scheduler": scheduler, "interval": "step"},

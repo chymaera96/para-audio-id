@@ -713,7 +713,8 @@ class RandomCropCollator:
                     pair_index,
                     pair["record"].track_id,
                     "room-ir-file",
-                )
+                ),
+                severity_quantile=float(schedule.rir_severity_quantile or 1.0),
             )
             pair["second"] = convolve_full_wet(
                 context,

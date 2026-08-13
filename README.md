@@ -107,18 +107,24 @@ with one codebook. The previous
 tc5 weighted-token loss is also logged as a detached comparison metric.
 Checkpoints record the `tc5_family_weighted_consistency_v2` loss protocol.
 
-| Raw steps | Clean | Noise | RIR | Noise + RIR | Consistency weight |
+For the 25K tc12 run, the secondary-view curriculum is:
+
+| Raw steps | Clean | Noise | RIR | Noise + RIR | RIR severity |
 | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0–50K | 1.00 | 0 | 0 | 0 | 0 |
-| 50–62.5K | 1-p | p: 0 → 0.75 | 0 | 0 | 0 → 0.10 |
-| 62.5–87.5K | 0.25 | 0.75 | 0 | 0 | 0.10 |
-| 87.5–100K | 0.25 | 0.75 → 0.55 | 0 → 0.20 | 0 | 0.10 |
-| 100–112.5K | 0.25 | 0.55 → 0.35 | 0.20 | 0 → 0.20 | 0.10 |
-| 112.5–175K | 0.25 | 0.35 | 0.20 | 0.20 | 0.10 |
+| 0–10K | 1.00 | 0 | 0 | 0 | disabled |
+| 10–30K | 1.00 → 0.40 | 0 → 0.30 | 0 → 0.30 | 0 | mild → moderate |
+| 30–60K | 0.40 → 0.10 | 0.30 → 0.35 | 0.30 | 0 → 0.25 | expand to full range |
+| 60–175K | 0.10 | 0.35 | 0.30 | 0.25 | full range |
+
+Consistency ramps from 0 to 0.1 over 10K–30K and then remains at 0.1.
+RIR severity is ranked by post-peak 99%-energy decay duration. The eligible
+training pool expands from its mildest third, through two thirds at 30K, to all
+IRs at 60K. Convolution remains full-wet at every severity.
 
 Noisy examples use fixed SNR-bin probabilities `0.40/0.30/0.20/0.10` for
 `0–5/5–10/10–20/20–30 dB`; 10% of noisy views are exactly 0 dB. The LR uses
-ordinary raw-step warm-up and cosine decay without gates, pauses, or recovery.
+the tc12 25K schedule: linear warm-up over 500 steps to `3e-4`, hold through
+60K, linear decay to `1.5e-4` at 140K, then cosine decay to `1.5e-5` at 175K.
 
 The single-GPU logical batch is 80 tracks × 2 segments: a physical microbatch of
 ten tracks × two segments with eight gradient-accumulation steps. Each physical
@@ -150,8 +156,8 @@ Top-1/5/10 and MRR results are appended to `probe_metrics.jsonl`.
 python train.py configs/fma_large.yaml \
   --decoder small \
   --schedule noise-rir \
+  --run-id tc12 \
   --devices 1 \
-  --run-id tc11 \
   --wandb-online
 ```
 

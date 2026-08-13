@@ -33,9 +33,14 @@ From `tc2` onward, the system is a discrete-audio causal language model:
 
 - Audio is sampled at 24 kHz and tokenized using the frozen
   `OpenMuQ/MuQ-large-msd-iter` Mel-RVQ tokenizer.
-- The first two of MuQ's eight 1,024-entry codebooks are serialized in
+- Historical tc2–tc11 runs serialize the first two of MuQ's eight 1,024-entry codebooks in
   time-major, codebook-interleaved order. A five-second crop produces 125 frames
   and 250 audio tokens; tc8's two-second crop produces 50 frames and 100 tokens.
+- The current `mel-rvq` default selects only the first codebook. A two-second crop
+  therefore has 50 audio tokens, a 58-token causal document, and uses
+  `id_digit_weight: 4` to preserve the historical audio-to-identifier ratio.
+  Existing two-codebook checkpoints retain their embedded 2-codebook/weight-8
+  query profile when evaluated or resumed.
 - The vocabulary has 2,061 entries: 2,048 audio tokens, `[BOS]`, `[ID]`, ten
   digit tokens, and `[EOS]`.
 - The model is a randomly initialized GPT-2-style causal transformer: 12 layers,

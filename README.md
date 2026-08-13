@@ -7,7 +7,7 @@ fixed 100,000-track catalogue into its parameters. Each training document is:
 [BOS] audio-token-1 ... audio-token-N [ID] digit-1 ... digit-5 [EOS]
 ```
 
-Audio tokens are the first two Mel-RVQ codebooks from the frozen
+Audio tokens use the first Mel-RVQ codebook from the frozen
 `OpenMuQ/MuQ-large-msd-iter` checkpoint. The causal LM jointly predicts the audio
 sequence and the track's arbitrary five-digit code. Identification performs model
 generation only: it does not search fingerprints, embeddings, an ANN index, token
@@ -52,8 +52,8 @@ python probe_muq_tokenizer.py \
 
 The probe resolves and records an immutable Hugging Face revision, checks that the
 checkpoint contains eight 1,024-entry Mel-RVQ codebooks, proves MuQ's public target
-layout is block-major, verifies deterministic extraction, converts the first two
-codebooks to time-major tokens, and confirms the complete causal document fits the
+layout is block-major, verifies deterministic extraction, converts the selected
+codebook to time-major tokens, and confirms the complete causal document fits the
 512-token context.
 
 Failure is a hard blocker. The pipeline does not substitute rounded continuous
@@ -77,8 +77,8 @@ python prepare_training_cohort.py configs/fma_large.yaml
 ## Training
 
 The default causal LM is a randomly initialized 12-layer GPT-2-style decoder with
-hidden size 768, 12 heads, tied embeddings, and no dropout. The vocabulary has
-2,048 collision-free audio tokens, `[BOS]`, `[ID]`, ten dedicated digit tokens,
+hidden size 768, 12 heads, tied embeddings, and no dropout. The default vocabulary has
+1,024 collision-free audio tokens, `[BOS]`, `[ID]`, ten dedicated digit tokens,
 and `[EOS]`.
 
 Training samples online two-second crops from the configured cohort. Each
@@ -90,10 +90,10 @@ tokenizes all twenty final waveforms in each physical microbatch.
 ```text
 loss =
     (
-        100 * mean(clean audio-token CE)
-        + 40 * mean(all digit CE)
+        50 * mean(clean audio-token CE)
+        + 20 * mean(all digit CE)
         + 2 * mean(all boundary CE)
-    ) / 142
+    ) / 72
     + lambda_consistency * clean/noisy [ID]-state consistency
 ```
 
@@ -101,9 +101,9 @@ The consistency loss is one minus cosine similarity between normalized
 final-layer `[ID]` states. The clean state is detached for this term; the noisy
 state, transformer, and noisy input embeddings retain gradients. Each loss
 family is computed as a mean, then recombined with effective coefficients of
-approximately 0.704 audio, 0.282 digits, and 0.014 boundaries. Scaling the
-identifier digit weight from 20 to 8 preserves tc7's 2.5:1 audio-to-identifier
-ratio despite the shorter query. The previous
+approximately 0.694 audio, 0.278 digits, and 0.028 boundaries. An identifier
+digit weight of 4 preserves the established 2.5:1 audio-to-identifier ratio
+with one codebook. The previous
 tc5 weighted-token loss is also logged as a detached comparison metric.
 Checkpoints record the `tc5_family_weighted_consistency_v2` loss protocol.
 
@@ -122,8 +122,12 @@ ordinary raw-step warm-up and cosine decay without gates, pauses, or recovery.
 
 The single-GPU logical batch is 80 tracks × 2 segments: a physical microbatch of
 ten tracks × two segments with eight gradient-accumulation steps. Each physical
-microbatch contains 2,000 audio targets and 40 seconds of waveform, matching
-tc7's five-second acoustic budget while retaining two-second queries.
+microbatch contains 1,000 audio targets and 40 seconds of waveform.
+
+New runs use one codebook by default. Historical two-codebook checkpoints remain
+loadable and resumable because their tokenizer vocabulary and digit weight are
+restored from checkpoint metadata. `--codebooks 2` is available for an explicit
+new two-codebook run; it uses the historical digit weight of 8.
 
 RIR uses full-wet causal convolution with two seconds of preceding audio;
 the prefix is discarded after convolution so reverberant tails from preceding

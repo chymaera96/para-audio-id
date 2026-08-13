@@ -15,6 +15,12 @@ def main() -> None:
     parser.add_argument("--devices", type=int, default=None)
     parser.add_argument("--decoder", choices=("small", "medium"))
     parser.add_argument("--schedule", choices=("noise", "noise-rir"))
+    parser.add_argument(
+        "--codebooks",
+        type=int,
+        choices=(1, 2),
+        help="MuQ Mel-RVQ codebooks (new-run default comes from the config)",
+    )
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--ckpt-path", type=Path)
     args = parser.parse_args()
@@ -37,6 +43,7 @@ def main() -> None:
         devices=args.devices,
         decoder=args.decoder,
         schedule=args.schedule,
+        selected_codebooks=args.codebooks,
         checkpoint=checkpoint,
     )
     train(cfg, checkpoint=checkpoint)

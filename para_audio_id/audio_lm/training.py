@@ -52,6 +52,7 @@ from .profiles import (
     LOSS_PROTOCOL,
     NEW_TRAINING_PROTOCOL,
     historical_checkpoint_profile,
+    resolve_query_profile,
     resolve_training_config,
     validate_cohort_manifest,
 )
@@ -76,16 +77,13 @@ MONITOR_PROTOCOL = "compact_beam_monitor_v2"
 TC9_SEGMENT_DURATION = 2.0
 TC9_SAMPLE_RATE = 24_000
 TC9_FRAME_RATE = 25.0
-TC9_SELECTED_CODEBOOKS = 2
-TC9_AUDIO_TARGETS = 100
+SUPPORTED_SELECTED_CODEBOOKS = (1, 2)
+ID_DIGIT_WEIGHT_PER_CODEBOOK = 4.0
 TC9_DIGIT_TARGETS = 5
 TC9_BOUNDARY_TARGETS = 2
-TC9_DOCUMENT_TOKENS = 108
-TC9_ID_DIGIT_WEIGHT = 8.0
 TC9_TRACKS_PER_MICROBATCH = 10
 TC9_SEGMENTS_PER_TRACK = 2
 TC9_DOCUMENTS_PER_MICROBATCH = 20
-TC9_AUDIO_TARGETS_PER_MICROBATCH = 2_000
 TRAIN_METRICS = {
     "clean_audio_loss",
     "digit_loss",
@@ -158,15 +156,17 @@ def validate_tc9_query_configuration(
             f"tc9 requires {TC9_FRAME_RATE:g} MuQ frames/s, got "
             f"{tokenizer_spec.frame_rate:g}"
         )
-    if tokenizer_spec.selected_codebooks != TC9_SELECTED_CODEBOOKS:
+    selected_codebooks = int(tokenizer_spec.selected_codebooks)
+    if selected_codebooks not in SUPPORTED_SELECTED_CODEBOOKS:
         raise ValueError(
-            f"tc9 requires {TC9_SELECTED_CODEBOOKS} selected codebooks, got "
-            f"{tokenizer_spec.selected_codebooks}"
+            "two-second training supports selected_codebooks in "
+            f"{SUPPORTED_SELECTED_CODEBOOKS}, got {selected_codebooks}"
         )
-    if not math.isclose(id_digit_weight, TC9_ID_DIGIT_WEIGHT):
+    expected_id_digit_weight = ID_DIGIT_WEIGHT_PER_CODEBOOK * selected_codebooks
+    if not math.isclose(id_digit_weight, expected_id_digit_weight):
         raise ValueError(
-            f"tc9 requires id_digit_weight={TC9_ID_DIGIT_WEIGHT:g}, got "
-            f"{id_digit_weight:g}"
+            f"{selected_codebooks}-codebook training requires "
+            f"id_digit_weight={expected_id_digit_weight:g}, got {id_digit_weight:g}"
         )
     if max_positions != 512:
         raise ValueError(
@@ -177,10 +177,19 @@ def validate_tc9_query_configuration(
         * tokenizer_spec.frame_rate
         * tokenizer_spec.selected_codebooks
     )
-    if audio_targets != TC9_AUDIO_TARGETS:
+    expected_audio_targets = round(
+        TC9_SEGMENT_DURATION * TC9_FRAME_RATE * selected_codebooks
+    )
+    if audio_targets != expected_audio_targets:
         raise ValueError(
-            f"tc9 requires {TC9_AUDIO_TARGETS} audio targets, got {audio_targets}"
+            f"two-second training requires {expected_audio_targets} audio targets "
+            f"with {selected_codebooks} codebook(s), got {audio_targets}"
         )
+    if (
+        vocabulary.num_codebooks != selected_codebooks
+        or vocabulary.codebook_size != tokenizer_spec.codebook_size
+    ):
+        raise ValueError("Vocabulary does not match the selected MuQ codebooks")
     example = {
         "audio_tokens": torch.zeros(audio_targets, dtype=torch.long),
         "code": "00000",
@@ -200,9 +209,11 @@ def validate_tc9_query_configuration(
             f"tc9 requires {TC9_BOUNDARY_TARGETS} boundary targets, got "
             f"{boundary_targets}"
         )
-    if document_tokens != TC9_DOCUMENT_TOKENS:
+    expected_document_tokens = expected_audio_targets + 8
+    if document_tokens != expected_document_tokens:
         raise ValueError(
-            f"tc9 requires {TC9_DOCUMENT_TOKENS} document tokens, got "
+            f"two-second training requires {expected_document_tokens} document "
+            "tokens, got "
             f"{document_tokens}"
         )
     if document_tokens > max_positions:
@@ -247,11 +258,6 @@ def validate_tc9_batch_configuration(cfg: dict, query_spec: dict) -> dict:
         raise ValueError(
             f"tc9 requires {TC9_DOCUMENTS_PER_MICROBATCH} documents per "
             f"microbatch, got {documents}"
-        )
-    if audio_targets != TC9_AUDIO_TARGETS_PER_MICROBATCH:
-        raise ValueError(
-            f"tc9 requires {TC9_AUDIO_TARGETS_PER_MICROBATCH} audio targets per "
-            f"microbatch, got {audio_targets}"
         )
     return {
         "tracks_per_microbatch": tracks,
@@ -2191,6 +2197,7 @@ class AudioLMModule(pl.LightningModule):
                 "vocabulary": self.vocabulary.to_dict(),
                 "model_config": self.cfg["model"],
                 "resolved_training_profile": self.cfg["resolved_training_profile"],
+                "resolved_query_profile": self.cfg["resolved_query_profile"],
                 "code_mapping_fingerprint": self.code_mapping_fingerprint,
                 "validation_probe": self.validation_probe,
                 "training_track_ids": self.training_track_ids,
@@ -2244,6 +2251,11 @@ class AudioLMModule(pl.LightningModule):
             "resolved_training_profile"
         ]:
             raise ValueError("Resume checkpoint uses a different training profile")
+        if checkpoint.get("resolved_query_profile") is not None and (
+            checkpoint["resolved_query_profile"]
+            != self.cfg["resolved_query_profile"]
+        ):
+            raise ValueError("Resume checkpoint uses a different RVQ query profile")
         if checkpoint.get("loss_protocol") != LOSS_PROTOCOL:
             raise ValueError(
                 "Resume checkpoint uses a different loss protocol"
@@ -2371,6 +2383,10 @@ def build_logger(cfg: dict, directory: Path):
 def train(cfg: dict, *, checkpoint: str | Path | None = None) -> None:
     if "resolved_training_profile" not in cfg:
         cfg = resolve_training_config(cfg, checkpoint=checkpoint)
+    if "resolved_query_profile" not in cfg:
+        cfg["resolved_query_profile"] = resolve_query_profile(
+            int(cfg["tokenizer"]["selected_codebooks"])
+        )
     if cfg.get("architecture") != ARCHITECTURE:
         raise ValueError(f"Configuration architecture must be {ARCHITECTURE}")
     if cfg["train"]["schedule"].get("protocol") != TRAINING_PROTOCOL:
@@ -2413,11 +2429,12 @@ def train(cfg: dict, *, checkpoint: str | Path | None = None) -> None:
         device=online_tokenizer.device,
     )
     startup_tokens = online_tokenizer.tokenize(startup_waveform)
-    expected_startup_shape = (1, TC9_AUDIO_TARGETS)
+    expected_audio_targets = int(query_spec["audio_targets"])
+    expected_startup_shape = (1, expected_audio_targets)
     if tuple(startup_tokens.shape) != expected_startup_shape:
         raise ValueError(
-            "tc9 requires the loaded MuQ tokenizer to produce exactly "
-            f"{TC9_AUDIO_TARGETS} audio targets for a two-second waveform; "
+            "The loaded MuQ tokenizer must produce exactly "
+            f"{expected_audio_targets} audio targets for a two-second waveform; "
             f"got {tuple(startup_tokens.shape)}"
         )
     datamodule = AudioLMDataModule(

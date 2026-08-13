@@ -27,6 +27,7 @@ def with_overrides(
     devices: int | None = None,
     decoder: str | None = None,
     schedule: str | None = None,
+    selected_codebooks: int | None = None,
     checkpoint: str | Path | None = None,
 ) -> dict:
     cfg = deepcopy(config)
@@ -45,5 +46,9 @@ def with_overrides(
     from .audio_lm.profiles import resolve_training_config
 
     return resolve_training_config(
-        cfg, decoder=decoder, schedule=schedule, checkpoint=checkpoint
+        cfg,
+        decoder=decoder,
+        schedule=schedule,
+        selected_codebooks=selected_codebooks,
+        checkpoint=checkpoint,
     )

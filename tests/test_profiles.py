@@ -133,6 +133,36 @@ def test_resume_inherits_profile_and_rejects_explicit_override(tmp_path):
         resolve_training_config(base, decoder="medium", checkpoint=path)
 
 
+def test_resume_inherits_historical_two_codebook_query_profile(tmp_path):
+    profile = canonical_training_profile(
+        database_size=10_000, decoder="small", schedule="noise"
+    )
+    path = tmp_path / "two-codebook.ckpt"
+    torch.save(
+        {
+            "resolved_training_profile": profile,
+            "tokenizer_spec": {"selected_codebooks": 2},
+            "query_spec": {"id_digit_weight": 8.0},
+        },
+        path,
+    )
+    base = {
+        "tokenizer": {"selected_codebooks": 1},
+        "data": {"database_size": 10_000},
+        "model": {},
+        "train": {},
+    }
+    resolved = resolve_training_config(base, checkpoint=path)
+    assert resolved["tokenizer"]["selected_codebooks"] == 2
+    assert resolved["train"]["id_digit_weight"] == 8.0
+    assert resolved["resolved_query_profile"] == {
+        "selected_codebooks": 2,
+        "id_digit_weight": 8.0,
+    }
+    with pytest.raises(ValueError, match="codebook selection"):
+        resolve_training_config(base, selected_codebooks=1, checkpoint=path)
+
+
 def test_noise_schedule_never_emits_rir():
     profile = schedule_profile("noise", 100_000)
     for step in (0, 199_999, 200_000, 225_000, 250_000, 699_999):

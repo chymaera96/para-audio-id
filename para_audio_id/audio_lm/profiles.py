@@ -15,6 +15,8 @@ DECODER_PROFILES = {
     "medium": {"num_layers": 24, "hidden_size": 1024, "num_attention_heads": 16},
 }
 SCHEDULE_NAMES = ("noise", "noise-rir")
+SUPPORTED_SELECTED_CODEBOOKS = (1, 2)
+ID_DIGIT_WEIGHT_PER_CODEBOOK = 4.0
 NEW_TRAINING_PROTOCOL = "online_random_crop_consistency_profile_v2"
 LOSS_PROTOCOL = "tc5_family_weighted_consistency_v2"
 
@@ -165,17 +167,63 @@ def checkpoint_training_profile(path: str | Path) -> dict[str, Any]:
     return historical_checkpoint_profile(checkpoint)
 
 
+def _checkpoint_query_profile(checkpoint: dict[str, Any]) -> dict[str, Any] | None:
+    tokenizer = checkpoint.get("tokenizer_spec") or checkpoint.get(
+        "hyper_parameters", {}
+    ).get("tokenizer", {})
+    selected = tokenizer.get("selected_codebooks")
+    if selected is None:
+        return None
+    selected = int(selected)
+    query = checkpoint.get("query_spec", {})
+    train = checkpoint.get("hyper_parameters", {}).get("train", {})
+    weight = float(
+        query.get(
+            "id_digit_weight",
+            train.get(
+                "id_digit_weight", ID_DIGIT_WEIGHT_PER_CODEBOOK * selected
+            ),
+        )
+    )
+    return {
+        "selected_codebooks": selected,
+        "id_digit_weight": weight,
+    }
+
+
+def resolve_query_profile(selected_codebooks: int) -> dict[str, Any]:
+    if selected_codebooks not in SUPPORTED_SELECTED_CODEBOOKS:
+        raise ValueError(
+            "selected codebooks must be one of "
+            f"{SUPPORTED_SELECTED_CODEBOOKS}, got {selected_codebooks}"
+        )
+    return {
+        "selected_codebooks": selected_codebooks,
+        "id_digit_weight": ID_DIGIT_WEIGHT_PER_CODEBOOK * selected_codebooks,
+    }
+
+
 def resolve_training_config(
     config: dict[str, Any],
     *,
     decoder: str | None = None,
     schedule: str | None = None,
+    selected_codebooks: int | None = None,
     checkpoint: str | Path | None = None,
 ) -> dict[str, Any]:
     cfg = deepcopy(config)
     data = cfg.setdefault("data", {})
     database_size = int(data.get("database_size", data.get("max_training_tracks", 0)))
-    resumed = checkpoint_training_profile(checkpoint) if checkpoint is not None else None
+    checkpoint_payload = (
+        torch.load(checkpoint, map_location="cpu", weights_only=False)
+        if checkpoint is not None
+        else None
+    )
+    resumed = (
+        historical_checkpoint_profile(checkpoint_payload)
+        if checkpoint_payload is not None
+        else None
+    )
     if resumed is not None:
         database_size = int(resumed["database_size"])
         resolved_decoder = resumed["decoder"]["name"] if decoder is None else decoder
@@ -190,6 +238,35 @@ def resolve_training_config(
     )
     if resumed is not None and profile != resumed:
         raise ValueError("Explicit training profile does not match resume checkpoint")
+
+    tokenizer = cfg.setdefault("tokenizer", {})
+    checkpoint_query = (
+        _checkpoint_query_profile(checkpoint_payload)
+        if checkpoint_payload is not None
+        else None
+    )
+    if checkpoint_query is not None:
+        checkpoint_codebooks = int(checkpoint_query["selected_codebooks"])
+        if (
+            selected_codebooks is not None
+            and selected_codebooks != checkpoint_codebooks
+        ):
+            raise ValueError(
+                "Explicit codebook selection does not match resume checkpoint"
+            )
+        query_profile = resolve_query_profile(checkpoint_codebooks)
+        if checkpoint_query != query_profile:
+            raise ValueError(
+                "Resume checkpoint has an incompatible codebook/loss profile"
+            )
+    else:
+        configured_codebooks = int(tokenizer.get("selected_codebooks", 1))
+        query_profile = resolve_query_profile(
+            selected_codebooks
+            if selected_codebooks is not None
+            else configured_codebooks
+        )
+    tokenizer["selected_codebooks"] = query_profile["selected_codebooks"]
 
     data["database_size"] = database_size
     data["max_training_tracks"] = database_size
@@ -206,9 +283,11 @@ def resolve_training_config(
     model.update(profile["decoder"])
     model.pop("name", None)
     train = cfg.setdefault("train", {})
+    train["id_digit_weight"] = query_profile["id_digit_weight"]
     train["max_steps"] = profile["schedule"]["max_steps"]
     train["schedule"] = {
         key: value for key, value in profile["schedule"].items() if key != "max_steps"
     }
     cfg["resolved_training_profile"] = profile
+    cfg["resolved_query_profile"] = query_profile
     return cfg

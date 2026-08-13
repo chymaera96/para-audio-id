@@ -4,7 +4,7 @@ tokenizer:
   model_name: OpenMuQ/MuQ-large-msd-iter
   revision: main
   sample_rate: 24000
-  selected_codebooks: 2
+  selected_codebooks: 1
   device: cuda
 
 model:
@@ -45,7 +45,7 @@ train:
   warmup_steps: 200
   evaluation_interval: 2500
   checkpoint_interval: 500
-  id_digit_weight: 8.0
+  id_digit_weight: 4.0
   gradient_clip_norm: 1.0
   wandb:
     enabled: false

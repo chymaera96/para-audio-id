@@ -5,6 +5,7 @@ from copy import deepcopy
 import pytest
 import torch
 
+from para_audio_id.config import with_capacity_overrides
 from para_audio_id.audio_lm.losses import relative_cosine_margin
 from para_audio_id.audio_lm.noise import resolved_augmentation_schedule
 from para_audio_id.audio_lm.profiles import (
@@ -207,6 +208,30 @@ def test_capacity_decoder_profiles_and_defaults():
     assert tiny["model"]["num_attention_heads"] == 8
     medium = resolve_capacity_config(base, decoder="medium")
     assert medium["model"]["num_layers"] == 24
+
+
+def test_capacity_database_size_cli_override_resolves_manifest_and_steps():
+    base = {
+        "data": {"database_size": 10_000},
+        "model": {},
+        "train": {
+            "target_exposures": 560,
+            "tracks_per_microbatch": 10,
+            "wandb": {"enabled": False},
+        },
+        "trainer": {"accumulate_grad_batches": 8},
+    }
+    resolved = with_capacity_overrides(
+        base,
+        run_id="capacity-50k",
+        wandb_online=False,
+        database_size=50_000,
+    )
+    assert resolved["data"]["database_size"] == 50_000
+    assert resolved["data"]["training_tracks_manifest"] == (
+        "data/training_tracks_50k.json"
+    )
+    assert resolved["train"]["max_steps"] == 350_000
 
 
 def test_capacity_resume_rejects_corruption_checkpoint(tmp_path):

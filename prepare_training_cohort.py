@@ -60,8 +60,18 @@ def main() -> None:
     )
     parser.add_argument("config", type=Path)
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--database-size",
+        type=int,
+        choices=(10_000, 25_000, 50_000, 100_000),
+        help="Override data.database_size for capacity cohort preparation.",
+    )
     args = parser.parse_args()
     config = load_config(args.config)
+    if args.database_size is not None:
+        if "target_exposures" not in config.get("train", {}):
+            raise ValueError("--database-size is only supported by capacity configs")
+        config.setdefault("data", {})["database_size"] = args.database_size
     resolver = (
         resolve_capacity_config
         if "target_exposures" in config.get("train", {})

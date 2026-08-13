@@ -263,6 +263,19 @@ python diagnose.py configs/capacity.yaml \
   --wandb-online
 ```
 
+The YAML database size can be overridden consistently for preparation and
+training, for example:
+
+```bash
+python prepare_training_cohort.py configs/capacity.yaml --database-size 50000
+python diagnose.py configs/capacity.yaml \
+  --database-size 50000 \
+  --decoder small \
+  --run-id capacity-50k-small \
+  --devices 1 \
+  --wandb-online
+```
+
 Decoder choices are `tiny` (6 layers, width 512, 8 heads), `small` (12/768/12,
 the default), and `medium` (24/1024/16). At the default 560 average identity
 exposures, the four catalogue sizes resolve to 70K, 175K, 350K, and 700K

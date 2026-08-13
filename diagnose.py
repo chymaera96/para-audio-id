@@ -16,6 +16,11 @@ def main() -> None:
     parser.add_argument("--run-id")
     parser.add_argument("--devices", type=int, default=None)
     parser.add_argument("--decoder", choices=("tiny", "small", "medium"))
+    parser.add_argument(
+        "--database-size",
+        type=int,
+        choices=(10_000, 25_000, 50_000, 100_000),
+    )
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--ckpt-path", type=Path)
     args = parser.parse_args()
@@ -25,6 +30,7 @@ def main() -> None:
         run_id=args.run_id,
         wandb_online=args.wandb_online,
         devices=args.devices,
+        database_size=args.database_size,
     )
     checkpoint = args.ckpt_path
     if args.resume and checkpoint is None:
@@ -37,6 +43,7 @@ def main() -> None:
         wandb_online=args.wandb_online,
         devices=args.devices,
         decoder=args.decoder,
+        database_size=args.database_size,
         checkpoint=checkpoint,
     )
     train(cfg, checkpoint=checkpoint)

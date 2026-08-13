@@ -56,9 +56,12 @@ def with_capacity_overrides(
     wandb_online: bool,
     devices: int | None = None,
     decoder: str | None = None,
+    database_size: int | None = None,
     checkpoint: str | Path | None = None,
 ) -> dict[str, Any]:
     cfg = deepcopy(config)
+    if database_size is not None:
+        cfg.setdefault("data", {})["database_size"] = database_size
     wandb = cfg.setdefault("train", {}).setdefault("wandb", {})
     if wandb_online:
         wandb["enabled"] = True

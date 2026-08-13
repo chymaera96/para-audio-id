@@ -47,18 +47,22 @@ def validate_cohort_manifest(path: str | Path, records, expected_count: int) -> 
             "Run prepare_training_cohort.py first."
         )
     payload = json.loads(source.read_text())
-    if not isinstance(payload, dict):
-        raise ValueError("Training cohort must use the fingerprinted manifest format")
-    track_ids = payload.get("track_ids")
-    if (
+    legacy = isinstance(payload, list)
+    if not legacy and not isinstance(payload, dict):
+        raise ValueError("Training cohort must be a track-ID list or manifest object")
+    track_ids = payload if legacy else payload.get("track_ids")
+    metadata_invalid = not legacy and (
         payload.get("database_size", payload.get("count")) != expected_count
         or payload.get("count") != expected_count
+    )
+    if (
+        metadata_invalid
         or not isinstance(track_ids, list)
         or len(track_ids) != expected_count
         or len(set(track_ids)) != expected_count
     ):
         raise ValueError(f"Training cohort must contain {expected_count} unique IDs")
-    if payload.get("catalogue_fingerprint") != catalogue_fingerprint(records):
+    if not legacy and payload.get("catalogue_fingerprint") != catalogue_fingerprint(records):
         raise ValueError("Training cohort catalogue fingerprint does not match")
     by_track = {record.track_id: record for record in records}
     try:
@@ -68,7 +72,9 @@ def validate_cohort_manifest(path: str | Path, records, expected_count: int) -> 
     mapping = hashlib.sha256(
         "\n".join(f"{record.track_id}:{record.code}" for record in selected).encode()
     ).hexdigest()
-    if payload.get("code_mapping_fingerprint") != mapping:
+    if len({record.code for record in selected}) != expected_count:
+        raise ValueError("Training cohort catalogue codes are not unique")
+    if not legacy and payload.get("code_mapping_fingerprint") != mapping:
         raise ValueError("Training cohort code mapping fingerprint does not match")
     return track_ids
 

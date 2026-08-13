@@ -233,3 +233,34 @@ def test_capacity_datamodule_never_constructs_degradation_assets(tmp_path, monke
     datamodule.setup("fit")
     assert datamodule.noise_assets is None
     assert datamodule.rir_assets is None
+
+
+def test_legacy_track_id_manifest_is_reused_without_rewrite(tmp_path):
+    catalogue = tmp_path / "catalogue.jsonl"
+    rows = [
+        {
+            "path": f"{index}.mp3",
+            "track_id": f"track-{index:05d}",
+            "code": f"{index:05d}",
+            "duration": 30.0,
+        }
+        for index in range(10_000)
+    ]
+    catalogue.write_text("\n".join(json.dumps(row) for row in rows))
+    output = tmp_path / "training_tracks_10k.json"
+    track_ids = [row["track_id"] for row in rows]
+    output.write_text(json.dumps(track_ids, indent=2) + "\n")
+    original = output.read_bytes()
+    result = prepare_training_cohort(
+        {
+            "data": {
+                "catalogue": str(catalogue),
+                "max_training_tracks": 10_000,
+                "training_tracks_manifest": str(output),
+            },
+            "train": {"seed": 1337},
+        }
+    )
+    assert result["protocol"] == "legacy_track_id_list_v1"
+    assert result["reused_without_rewrite"]
+    assert output.read_bytes() == original

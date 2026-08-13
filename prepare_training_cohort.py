@@ -26,7 +26,15 @@ def prepare_training_cohort(cfg: dict, output: str | Path | None = None) -> dict
     destination = Path(output or data_cfg["training_tracks_manifest"])
     if destination.exists():
         validate_cohort_manifest(destination, records, count)
-        return json.loads(destination.read_text())
+        existing = json.loads(destination.read_text())
+        if isinstance(existing, list):
+            return {
+                "protocol": "legacy_track_id_list_v1",
+                "count": len(existing),
+                "track_ids": existing,
+                "reused_without_rewrite": True,
+            }
+        return existing
     ordered = sorted(records, key=lambda record: record.track_id)
     rng = np.random.default_rng(int(cfg["train"]["seed"]))
     indices = rng.choice(len(ordered), size=count, replace=False)

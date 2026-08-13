@@ -9,7 +9,12 @@ import numpy as np
 
 from para_audio_id.catalogue import load_catalogue
 from para_audio_id.config import load_config
-from para_audio_id.audio_lm.profiles import catalogue_fingerprint, resolve_training_config
+from para_audio_id.audio_lm.profiles import (
+    catalogue_fingerprint,
+    resolve_capacity_config,
+    resolve_training_config,
+    validate_cohort_manifest,
+)
 
 
 def prepare_training_cohort(cfg: dict, output: str | Path | None = None) -> dict:
@@ -18,6 +23,10 @@ def prepare_training_cohort(cfg: dict, output: str | Path | None = None) -> dict
     count = int(data_cfg["max_training_tracks"])
     if count > len(records):
         raise ValueError(f"Requested {count} tracks from a {len(records)}-track catalogue")
+    destination = Path(output or data_cfg["training_tracks_manifest"])
+    if destination.exists():
+        validate_cohort_manifest(destination, records, count)
+        return json.loads(destination.read_text())
     ordered = sorted(records, key=lambda record: record.track_id)
     rng = np.random.default_rng(int(cfg["train"]["seed"]))
     indices = rng.choice(len(ordered), size=count, replace=False)
@@ -25,7 +34,6 @@ def prepare_training_cohort(cfg: dict, output: str | Path | None = None) -> dict
     track_ids = [record.track_id for record in selected]
     if len(track_ids) != len(set(track_ids)) or len({record.code for record in selected}) != count:
         raise RuntimeError("Selected cohort does not have unique identities and codes")
-    destination = Path(output or data_cfg["training_tracks_manifest"])
     payload = {
         "protocol": "fresh_seeded_catalogue_cohort_v1",
         "seed": int(cfg["train"]["seed"]),
@@ -53,9 +61,13 @@ def main() -> None:
     parser.add_argument("config", type=Path)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
-    result = prepare_training_cohort(
-        resolve_training_config(load_config(args.config)), args.output
+    config = load_config(args.config)
+    resolver = (
+        resolve_capacity_config
+        if "target_exposures" in config.get("train", {})
+        else resolve_training_config
     )
+    result = prepare_training_cohort(resolver(config), args.output)
     print(json.dumps(result, indent=2, sort_keys=True))
 
 

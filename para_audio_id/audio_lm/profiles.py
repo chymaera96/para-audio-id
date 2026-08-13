@@ -9,13 +9,15 @@ from typing import Any
 import torch
 
 
-SUPPORTED_DATABASE_SIZES = (10_000, 25_000, 100_000)
+SUPPORTED_DATABASE_SIZES = (10_000, 25_000, 50_000, 100_000)
 DECODER_PROFILES = {
+    "tiny": {"num_layers": 6, "hidden_size": 512, "num_attention_heads": 8},
     "small": {"num_layers": 12, "hidden_size": 768, "num_attention_heads": 12},
     "medium": {"num_layers": 24, "hidden_size": 1024, "num_attention_heads": 16},
 }
 SCHEDULE_NAMES = ("noise", "noise-rir")
 NEW_TRAINING_PROTOCOL = "online_random_crop_consistency_profile_v2"
+CAPACITY_TRAINING_PROTOCOL = "online_random_crop_clean_capacity_v1"
 LOSS_PROTOCOL = "tc5_family_weighted_consistency_v2"
 
 
@@ -124,6 +126,38 @@ def canonical_training_profile(
     }
 
 
+def canonical_capacity_profile(
+    *,
+    database_size: int,
+    decoder: str,
+    target_exposures: int,
+    tracks_per_optimizer_step: int,
+) -> dict[str, Any]:
+    if target_exposures < 1 or tracks_per_optimizer_step < 1:
+        raise ValueError("Capacity exposures and batch size must be positive")
+    selections = database_size * target_exposures
+    if selections % tracks_per_optimizer_step:
+        raise ValueError(
+            "Capacity exposure target must resolve to a whole optimizer-step count"
+        )
+    return {
+        "version": 1,
+        "experiment": "clean_capacity",
+        "database_size": database_size,
+        "training_tracks_manifest": cohort_manifest(database_size),
+        "decoder": decoder_profile(decoder),
+        "schedule": {
+            "name": "clean",
+            "protocol": CAPACITY_TRAINING_PROTOCOL,
+            "loss_protocol": LOSS_PROTOCOL,
+            "max_steps": selections // tracks_per_optimizer_step,
+            "target_exposures": target_exposures,
+            "tracks_per_optimizer_step": tracks_per_optimizer_step,
+            "learning_rate_policy": "linear_warmup_then_constant_v1",
+        },
+    }
+
+
 def historical_checkpoint_profile(checkpoint: dict) -> dict[str, Any]:
     stored = checkpoint.get("resolved_training_profile")
     if stored is not None:
@@ -206,6 +240,51 @@ def resolve_training_config(
     model.update(profile["decoder"])
     model.pop("name", None)
     train = cfg.setdefault("train", {})
+    train["max_steps"] = profile["schedule"]["max_steps"]
+    train["schedule"] = {
+        key: value for key, value in profile["schedule"].items() if key != "max_steps"
+    }
+    cfg["resolved_training_profile"] = profile
+    return cfg
+
+
+def resolve_capacity_config(
+    config: dict[str, Any],
+    *,
+    decoder: str | None = None,
+    checkpoint: str | Path | None = None,
+) -> dict[str, Any]:
+    cfg = deepcopy(config)
+    data = cfg.setdefault("data", {})
+    train = cfg.setdefault("train", {})
+    trainer = cfg.setdefault("trainer", {})
+    configured_size = int(data.get("database_size", 0))
+    target_exposures = int(train.get("target_exposures", 560))
+    tracks_per_step = int(train["tracks_per_microbatch"]) * int(
+        trainer["accumulate_grad_batches"]
+    )
+    resumed = checkpoint_training_profile(checkpoint) if checkpoint is not None else None
+    if resumed is not None:
+        if resumed.get("experiment") != "clean_capacity":
+            raise ValueError("Capacity runs cannot resume a corruption-training checkpoint")
+        if configured_size != int(resumed["database_size"]):
+            raise ValueError("Configured database size does not match capacity checkpoint")
+        resolved_decoder = resumed["decoder"]["name"] if decoder is None else decoder
+    else:
+        resolved_decoder = decoder or "small"
+    profile = canonical_capacity_profile(
+        database_size=configured_size,
+        decoder=resolved_decoder,
+        target_exposures=target_exposures,
+        tracks_per_optimizer_step=tracks_per_step,
+    )
+    if resumed is not None and profile != resumed:
+        raise ValueError("Explicit capacity profile does not match resume checkpoint")
+    data["max_training_tracks"] = configured_size
+    data["training_tracks_manifest"] = profile["training_tracks_manifest"]
+    model = cfg.setdefault("model", {})
+    model.update(profile["decoder"])
+    model.pop("name", None)
     train["max_steps"] = profile["schedule"]["max_steps"]
     train["schedule"] = {
         key: value for key, value in profile["schedule"].items() if key != "max_steps"

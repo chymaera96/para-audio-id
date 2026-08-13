@@ -243,6 +243,45 @@ python identify.py \
 The five-digit exact random baseline is `1e-5`. A functioning pipeline is not
 evidence that catalogue acquisition succeeded.
 
+## Clean capacity diagnostics
+
+Capacity experiments use a separate entry point and configuration, leaving the
+tc9–tc11 corruption-training interface unchanged. They train on two distinct
+clean two-second random crops per identity, with no background-noise or RIR
+asset access and no consistency objective.
+
+Choose `data.database_size` from `10000`, `25000`, `50000`, or `100000` in
+`configs/capacity.yaml`, then prepare or validate its size-specific manifest:
+
+```bash
+python prepare_training_cohort.py configs/capacity.yaml
+
+python diagnose.py configs/capacity.yaml \
+  --decoder small \
+  --run-id capacity-10k-small \
+  --devices 1 \
+  --wandb-online
+```
+
+Decoder choices are `tiny` (6 layers, width 512, 8 heads), `small` (12/768/12,
+the default), and `medium` (24/1024/16). At the default 560 average identity
+exposures, the four catalogue sizes resolve to 70K, 175K, 350K, and 700K
+optimizer steps. The LR warms up linearly for 200 steps and then remains fixed
+at `3e-4`.
+
+Existing valid manifests are reused byte-for-byte; incompatible manifests fail
+rather than being overwritten. Capacity W&B logging retains the established
+clean training and clean probe names and omits undefined corruption metrics.
+Resume with:
+
+```bash
+python diagnose.py configs/capacity.yaml \
+  --run-id capacity-10k-small \
+  --devices 1 \
+  --wandb-online \
+  --resume
+```
+
 ## Tests
 
 ```bash

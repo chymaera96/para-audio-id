@@ -209,6 +209,46 @@ def test_clean_collator_produces_two_distinct_crops_per_identity(tmp_path):
         assert not batch["metadata"][offset + 1]["is_noisy"]
 
 
+def test_capacity_clean_collator_requires_no_degradation_assets(tmp_path):
+    audio_root = tmp_path / "audio"
+    audio_root.mkdir()
+    waveform = np.sin(
+        2 * np.pi * 220 * np.arange(10 * 8_000, dtype=np.float32) / 8_000
+    )
+    selected = records(4)
+    for index in range(4):
+        sf.write(audio_root / f"{index}.wav", waveform, 8_000)
+    dataset = OnlineTrackDataset(selected)
+    sampler = OnlineTrackBatchSampler(
+        dataset,
+        tracks_per_microbatch=4,
+        accumulation_steps=1,
+        seed=3,
+    )
+    examples = [dataset[index] for index in next(iter(sampler))]
+    batch = RandomCropCollator(
+        records=selected,
+        audio_root=audio_root,
+        noise_assets=None,
+        rir_assets=None,
+        schedule={"name": "clean"},
+        sample_rate=8_000,
+        crop_duration=2.0,
+        past_context_duration=0.0,
+        seed=3,
+        reserved_starts={},
+    )(examples)
+    assert batch["waveforms"].shape == (8, 16_000)
+    assert batch["categories"] == ["clean"] * 4
+    assert not batch["snrs"]
+    assert not batch["rir_paths"]
+    for offset in range(0, 8, 2):
+        anchor, secondary = batch["metadata"][offset : offset + 2]
+        assert anchor["track_id"] == secondary["track_id"]
+        assert anchor["start_sample"] != secondary["start_sample"]
+        assert not anchor["is_noisy"] and not secondary["is_noisy"]
+
+
 def test_noisy_pairs_share_start_and_bad_identity_is_replaced(tmp_path):
     audio_root = tmp_path / "audio"
     train_noise = tmp_path / "noise_train"

@@ -169,7 +169,7 @@ class RandomEvaluationCollator:
         self,
         *,
         audio_root: str | Path,
-        noise_assets: BackgroundNoiseAssets,
+        noise_assets: BackgroundNoiseAssets | None,
         rir_assets: RoomImpulseResponseAssets | None,
         sample_rate: int,
         past_context_duration: float,
@@ -225,23 +225,27 @@ class RandomEvaluationCollator:
                     or rms <= 1e-8
                 ):
                     raise ValueError("decoded crop is invalid or silent")
-                validation_noise = self.noise_assets.load_validation(
-                    stable_uint64(
-                        self.seed,
-                        row["track_id"],
-                        row["start_sample"],
-                        "fixed-evaluation-noise",
+                if self.noise_assets is not None:
+                    validation_noise = self.noise_assets.load_validation(
+                        stable_uint64(
+                            self.seed,
+                            row["track_id"],
+                            row["start_sample"],
+                            "fixed-evaluation-noise",
+                        )
                     )
-                )
-                validation_context_noise = self.noise_assets.load_validation(
-                    stable_uint64(
-                        self.seed,
-                        row["track_id"],
-                        row["start_sample"],
-                        "fixed-evaluation-context-noise",
-                    ),
-                    samples=expected_context,
-                )
+                    validation_context_noise = self.noise_assets.load_validation(
+                        stable_uint64(
+                            self.seed,
+                            row["track_id"],
+                            row["start_sample"],
+                            "fixed-evaluation-context-noise",
+                        ),
+                        samples=expected_context,
+                    )
+                else:
+                    validation_noise = np.empty(0, dtype=np.float32)
+                    validation_context_noise = np.empty(0, dtype=np.float32)
                 if self.rir_assets is not None:
                     ir, ir_path = self.rir_assets.load_validation(
                         stable_uint64(
@@ -295,7 +299,7 @@ class RandomEvaluationCollator:
             ),
             "noise_waveforms": torch.from_numpy(
                 np.stack(noise)
-                if noise
+                if noise and self.noise_assets is not None
                 else np.empty((0, samples), dtype=np.float32)
             ),
             "rir_waveforms": torch.from_numpy(
@@ -391,7 +395,7 @@ class RandomCropCollator:
         *,
         records: list[CatalogueRecord],
         audio_root: str | Path,
-        noise_assets: BackgroundNoiseAssets,
+        noise_assets: BackgroundNoiseAssets | None,
         rir_assets: RoomImpulseResponseAssets | None,
         schedule: dict,
         sample_rate: int,
@@ -660,6 +664,8 @@ class RandomCropCollator:
             if category == "clean":
                 continue
             if category == "noise":
+                if self.noise_assets is None:
+                    raise RuntimeError("Noise category selected without noise assets")
                 signal = torch.from_numpy(pair["first"]).unsqueeze(0)
                 noise = torch.from_numpy(
                     self.noise_assets.load_training(
@@ -684,6 +690,8 @@ class RandomCropCollator:
                 continue
             context = pair["context"]
             if category == "noise_rir":
+                if self.noise_assets is None:
+                    raise RuntimeError("Combined category selected without noise assets")
                 noise = self.noise_assets.load_training(
                     stable_uint64(
                         self.seed,

@@ -299,6 +299,19 @@ tc11 (small/noise-RIR/25K) are recognized during evaluation; tc11 remains an
 exact resume source. Representation diagnostics now include the normalized
 same-versus-different cosine margin alongside both raw cosine values.
 
+## Clean capacity series
+
+The `capacity` branch adds clean-only diagnostics through `diagnose.py`. These
+runs retain the two-second random-crop formulation and weighted identifier loss
+but remove corruption, consistency, and cosine-decay confounds. The LR reaches
+`3e-4` after 200 warm-up steps and stays fixed.
+
+The experiment grid combines 10K/25K/50K/100K catalogues with tiny/small/medium
+decoders. Every run receives 560 average identity exposures, resolving to
+70K/175K/350K/700K optimizer updates respectively. Validation retains only the
+existing clean canonical, shifted, and held-out probe headings so W&B results
+remain directly comparable without creating renamed plots.
+
 ## Interpretation
 
 The progression isolates eight questions:

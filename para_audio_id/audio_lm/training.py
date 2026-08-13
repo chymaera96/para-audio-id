@@ -34,6 +34,7 @@ from .generation import (
     prompts_from_audio_tokens,
 )
 from .losses import (
+    causal_audio_id_losses,
     causal_losses_by_view,
     noise_consistency_losses,
     relative_cosine_margin,
@@ -49,6 +50,7 @@ from .noise import (
     stable_uint64,
 )
 from .profiles import (
+    CAPACITY_TRAINING_PROTOCOL,
     LOSS_PROTOCOL,
     NEW_TRAINING_PROTOCOL,
     historical_checkpoint_profile,
@@ -108,6 +110,11 @@ AUGMENTATION_METRICS = {
     "online_tokenization_seconds",
 }
 TRAIN_LOG_LEVELS = {"on_step": True, "on_epoch": True}
+CAPACITY_TRAIN_METRICS = {
+    "clean_audio_loss",
+    "digit_loss",
+    "teacher_forced_exact_accuracy",
+}
 
 
 def tc6_training_wandb_keys() -> set[str]:
@@ -116,6 +123,36 @@ def tc6_training_wandb_keys() -> set[str]:
         for name in TRAIN_METRICS | {"loss"}
         for level in ("step", "epoch")
     }
+
+
+def capacity_training_wandb_keys() -> set[str]:
+    return {
+        f"train/{name}_{level}"
+        for name in CAPACITY_TRAIN_METRICS | {"loss"}
+        for level in ("step", "epoch")
+    }
+
+
+def capacity_probe_wandb_keys() -> set[str]:
+    return {
+        "probe/clean/canonical/beam_top1",
+        "probe/clean/shifted/beam_top1",
+        "probe/clean/heldout/beam_top1",
+        "probe/clean/shifted/teacher_forced_exact_accuracy",
+    }
+
+
+def learning_rate_multiplier(
+    step: int, *, warmup_steps: int, max_steps: int, constant_after_warmup: bool
+) -> float:
+    if not 0 < warmup_steps < max_steps:
+        raise ValueError("warmup_steps must be between zero and max_steps")
+    if step < warmup_steps:
+        return (step + 1) / warmup_steps
+    if constant_after_warmup:
+        return 1.0
+    progress = (step - warmup_steps) / max(1, max_steps - warmup_steps)
+    return 0.5 * (1 + math.cos(math.pi * min(max(progress, 0.0), 1.0)))
 
 
 def tc6_probe_wandb_keys(snr_values: list[float]) -> set[str]:
@@ -470,7 +507,7 @@ class LegacyAudioLMDataModule(pl.LightningDataModule):
             ):
                 raise ValueError(f"View-token store {root} uses different track codes")
         corpus_payload = {
-            "training_protocol": TRAINING_PROTOCOL,
+            "training_protocol": self.cfg["train"]["schedule"]["protocol"],
             "view_mode": view_mode,
             "track_ids": self.training_track_ids,
             "canonical_starts": data_cfg["canonical_starts"],
@@ -638,6 +675,8 @@ class AudioLMDataModule(pl.LightningDataModule):
     ):
         super().__init__()
         self.cfg = cfg
+        self.training_protocol = cfg["train"]["schedule"]["protocol"]
+        self.is_capacity = self.training_protocol == CAPACITY_TRAINING_PROTOCOL
         self.tokenizer_spec = tokenizer_spec
         self.vocabulary = vocabulary
 
@@ -652,6 +691,9 @@ class AudioLMDataModule(pl.LightningDataModule):
             catalogue,
             int(data_cfg["max_training_tracks"]),
         )
+        self.training_manifest_fingerprint = hashlib.sha256(
+            Path(data_cfg["training_tracks_manifest"]).read_bytes()
+        ).hexdigest()
         missing = [track_id for track_id in track_ids if track_id not in by_track]
         if missing:
             raise ValueError(
@@ -667,15 +709,21 @@ class AudioLMDataModule(pl.LightningDataModule):
         self.code_mapping_fingerprint = hashlib.sha256(
             "\n".join(mapping_rows).encode()
         ).hexdigest()
-        noise_cfg = data_cfg["background_noise"]
         crop_duration = float(data_cfg["segment_duration"])
         sample_rate = int(self.tokenizer_spec.sample_rate)
-        self.noise_assets = BackgroundNoiseAssets(
-            noise_cfg["training_root"],
-            noise_cfg["validation_root"],
-            sample_rate=sample_rate,
-            samples=round(crop_duration * sample_rate),
+        self.is_capacity = (
+            self.cfg["resolved_training_profile"].get("experiment")
+            == "clean_capacity"
         )
+        self.noise_assets = None
+        if not self.is_capacity:
+            noise_cfg = data_cfg["background_noise"]
+            self.noise_assets = BackgroundNoiseAssets(
+                noise_cfg["training_root"],
+                noise_cfg["validation_root"],
+                sample_rate=sample_rate,
+                samples=round(crop_duration * sample_rate),
+            )
         self.schedule_name = self.cfg["train"]["schedule"]["name"]
         rir_cfg = data_cfg.get("room_ir", {})
         self.rir_assets = None
@@ -707,14 +755,18 @@ class AudioLMDataModule(pl.LightningDataModule):
             )
         self.evaluation_dataset = RandomEvaluationDataset(self.monitor_recipes)
         corpus_payload = {
-            "training_protocol": TRAINING_PROTOCOL,
+            "training_protocol": self.training_protocol,
             "loss_protocol": LOSS_PROTOCOL,
             "crop_policy": CROP_POLICY,
             "replacement_policy": REPLACEMENT_POLICY,
             "track_ids": track_ids,
             "code_mapping_fingerprint": self.code_mapping_fingerprint,
             "tokenizer_fingerprint": self.tokenizer_spec.fingerprint,
-            "background_noise": self.noise_assets.manifest(),
+            "background_noise": (
+                self.noise_assets.manifest()
+                if self.noise_assets is not None
+                else None
+            ),
             "room_ir": (
                 self.rir_assets.manifest() if self.rir_assets is not None else None
             ),
@@ -842,20 +894,24 @@ class AudioLMModule(pl.LightningModule):
         code_mapping_fingerprint: str,
         validation_probe: list[str],
         training_track_ids: list[str],
+        training_manifest_fingerprint: str,
         training_corpus_fingerprint: str,
         monitor_recipes: list[dict],
-        noise_manifest: dict,
+        noise_manifest: dict | None,
         rir_manifest: dict | None,
         query_spec: dict,
         batch_spec: dict,
     ):
         super().__init__()
         self.cfg = cfg
+        self.training_protocol = cfg["train"]["schedule"]["protocol"]
+        self.is_capacity = self.training_protocol == CAPACITY_TRAINING_PROTOCOL
         self.vocabulary = vocabulary
         self.tokenizer_spec = tokenizer_spec
         self.code_mapping_fingerprint = code_mapping_fingerprint
         self.validation_probe = validation_probe
         self.training_track_ids = training_track_ids
+        self.training_manifest_fingerprint = training_manifest_fingerprint
         self.training_corpus_fingerprint = training_corpus_fingerprint
         self.monitor_recipes = monitor_recipes
         self.noise_manifest = noise_manifest
@@ -924,6 +980,77 @@ class AudioLMModule(pl.LightningModule):
             self.tokens_consumed += int(batch["attention_mask"].sum()) * int(
                 self.trainer.world_size
             )
+        return loss
+
+    def _capacity_training_step(
+        self, batch: dict, crop_batch: dict, batch_idx: int
+    ) -> torch.Tensor:
+        logits = self.model(batch["input_ids"], batch["attention_mask"])
+        results = causal_audio_id_losses(
+            logits,
+            batch["input_ids"],
+            batch["audio_target_mask"],
+            batch["id_target_mask"],
+            batch["boundary_target_mask"],
+            id_digit_weight=float(self.cfg["train"]["id_digit_weight"]),
+        )
+        metrics = {
+            "clean_audio_loss": results["audio_loss"],
+            "digit_loss": results["id_loss"],
+            "teacher_forced_exact_accuracy": results[
+                "teacher_forced_exact_accuracy"
+            ],
+        }
+        batch_size = int(batch["input_ids"].shape[0])
+        for name, value in metrics.items():
+            self.log(
+                f"train/{name}",
+                value,
+                **TRAIN_LOG_LEVELS,
+                prog_bar=name
+                in {"clean_audio_loss", "teacher_forced_exact_accuracy"},
+                sync_dist=True,
+                batch_size=batch_size,
+            )
+        loss = results["loss"]
+        self.log(
+            "train/loss",
+            loss,
+            **TRAIN_LOG_LEVELS,
+            sync_dist=True,
+            batch_size=batch_size,
+        )
+        self.documents_consumed += batch_size * int(self.trainer.world_size)
+        self.tokens_consumed += int(batch["attention_mask"].sum()) * int(
+            self.trainer.world_size
+        )
+        self.replacement_audit.extend(crop_batch["replacements"])
+        self.failed_crop_attempt_audit.extend(crop_batch["failed_crop_attempts"])
+        if (
+            self.trainer.is_global_zero
+            and int(self.global_step) % int(self.cfg["trainer"]["log_every_n_steps"])
+            == 0
+        ):
+            detail = {
+                "global_step": int(self.global_step),
+                "batch_idx": int(batch_idx),
+                "starts": [
+                    int(row["start_sample"]) for row in crop_batch["metadata"]
+                ],
+                "failed_crop_attempts": crop_batch["failed_crop_attempts"],
+                "replacements": crop_batch["replacements"],
+                "retry_count": int(crop_batch["retry_count"]),
+                "decode_seconds": float(crop_batch["decode_seconds"]),
+                "tokenization_seconds": float(crop_batch["tokenization_seconds"]),
+                "metrics": {
+                    name: float(value.detach().cpu())
+                    for name, value in {**metrics, "loss": loss}.items()
+                },
+            }
+            with (output_dir(self.cfg) / "training_metrics.jsonl").open(
+                "a", encoding="utf-8"
+            ) as handle:
+                handle.write(json.dumps(detail, sort_keys=True) + "\n")
         return loss
 
     def training_step(self, batch: dict, batch_idx: int) -> torch.Tensor:
@@ -1010,6 +1137,9 @@ class AudioLMModule(pl.LightningModule):
             row["pair_role"] for row in crop_batch["metadata"]
         ]
         batch = prepared
+        if self.is_capacity:
+            crop_batch["tokenization_seconds"] = tokenizer_seconds
+            return self._capacity_training_step(batch, crop_batch, batch_idx)
         schedule = resolved_augmentation_schedule(
             int(self.global_step), self.cfg["train"]["schedule"]
         )
@@ -1384,7 +1514,7 @@ class AudioLMModule(pl.LightningModule):
     def on_fit_start(self) -> None:
         if int(self.trainer.world_size) != 1:
             raise ValueError(
-                f"{TRAINING_PROTOCOL} currently requires one GPU"
+                f"{self.training_protocol} currently requires one GPU"
             )
         self.started_at = time.perf_counter()
         self.session_tokens_start = self.tokens_consumed
@@ -1467,7 +1597,181 @@ class AudioLMModule(pl.LightningModule):
         if self._last_probe_step != int(self.global_step):
             self._generation_probe_tc9()
 
+    def _generation_probe_capacity(self) -> None:
+        if not self.cfg["evaluation"].get("online_monitor_enabled", True):
+            self._last_probe_step = int(self.global_step)
+            return
+        if not self.trainer.is_global_zero or self.trainer.sanity_checking:
+            return
+        if self.online_tokenizer is None:
+            raise RuntimeError("Online MuQ tokenizer has not been initialized")
+        was_training = self.model.training
+        self.model.eval()
+        rows: list[dict] = []
+        skipped_queries: list[dict] = []
+        shifted_teacher_forced_correct = 0
+        shifted_teacher_forced_count = 0
+        tokenization_seconds = 0.0
+        with torch.inference_mode():
+            loader = tqdm(
+                self.trainer.datamodule.generation_dataloader(),
+                desc=f"clean capacity monitor step {int(self.global_step)}",
+                disable=not self.trainer.is_global_zero,
+            )
+            for batch in loader:
+                skipped_queries.extend(batch["skipped"])
+                clean = batch["clean_waveforms"].to(self.device)
+                if not len(clean):
+                    continue
+                started = time.perf_counter()
+                tokens = self.online_tokenizer.tokenize(clean)
+                if self.device.type == "cuda":
+                    torch.cuda.synchronize(self.device)
+                tokenization_seconds += time.perf_counter() - started
+                examples = [
+                    {
+                        "audio_tokens": audio_tokens.detach().cpu(),
+                        "code": code,
+                        "track_id": track_id,
+                        "document_index": -1,
+                        "view_type": view_type,
+                    }
+                    for audio_tokens, code, track_id, view_type in zip(
+                        tokens,
+                        batch["code"],
+                        batch["track_id"],
+                        batch["view_type"],
+                        strict=True,
+                    )
+                ]
+                documents = collate_causal_documents(
+                    examples,
+                    self.vocabulary,
+                    int(self.cfg["model"]["max_position_embeddings"]),
+                )
+                for name, value in list(documents.items()):
+                    if isinstance(value, torch.Tensor):
+                        documents[name] = value.to(self.device)
+                logits = self.model(
+                    documents["input_ids"], documents["attention_mask"]
+                )
+                predictions = logits[:, :-1].argmax(dim=-1)
+                targets = documents["input_ids"][:, 1:]
+                exact = (
+                    (predictions == targets) | ~documents["id_target_mask"]
+                ).all(dim=1)
+                shifted = torch.tensor(
+                    [view == "shifted" for view in batch["view_type"]],
+                    device=self.device,
+                    dtype=torch.bool,
+                )
+                shifted_teacher_forced_correct += int(exact[shifted].sum())
+                shifted_teacher_forced_count += int(shifted.sum())
+                beams = batched_beam_generate(
+                    self.model,
+                    prompts_from_audio_tokens(tokens, self.vocabulary),
+                    self.vocabulary,
+                    width=int(self.cfg["evaluation"]["beam_width"]),
+                )
+                rows.extend(
+                    {
+                        "track_id": track_id,
+                        "target": code,
+                        "view_type": view_type,
+                        "start": start,
+                        "beam": beam,
+                    }
+                    for track_id, code, view_type, start, beam in zip(
+                        batch["track_id"],
+                        batch["code"],
+                        batch["view_type"],
+                        batch["start"],
+                        beams,
+                        strict=True,
+                    )
+                )
+        if was_training:
+            self.model.train()
+
+        def summarize(selected: list[dict]) -> dict:
+            if not selected:
+                return {}
+            codes = [[result.code for result in row["beam"]] for row in selected]
+            return {
+                "queries": len(selected),
+                **{
+                    f"beam_top{width}": sum(
+                        row["target"] in ranking[:width]
+                        for row, ranking in zip(selected, codes, strict=True)
+                    )
+                    / len(selected)
+                    for width in (1, 5, 10)
+                },
+                "beam_mrr": sum(
+                    (
+                        1 / (ranking.index(row["target"]) + 1)
+                        if row["target"] in ranking
+                        else 0.0
+                    )
+                    for row, ranking in zip(selected, codes, strict=True)
+                )
+                / len(selected),
+            }
+
+        by_view = {
+            view: summarize([row for row in rows if row["view_type"] == view])
+            for view in ("canonical", "shifted", "heldout")
+        }
+        metrics = {
+            f"probe/clean/{view}/beam_top1": summary["beam_top1"]
+            for view, summary in by_view.items()
+            if summary
+        }
+        if shifted_teacher_forced_count:
+            metrics["probe/clean/shifted/teacher_forced_exact_accuracy"] = (
+                shifted_teacher_forced_correct / shifted_teacher_forced_count
+            )
+        unexpected = set(metrics) - capacity_probe_wandb_keys()
+        if unexpected:
+            raise RuntimeError(
+                f"Capacity monitor produced unexpected W&B keys: {sorted(unexpected)}"
+            )
+        if self.logger is not None:
+            self.logger.log_metrics(metrics, step=self.global_step)
+        payload = {
+            "global_step": int(self.global_step),
+            "clean": summarize(rows),
+            "by_view": by_view,
+            "tokenization_seconds": tokenization_seconds,
+            "skipped_queries": skipped_queries,
+            "rows": [
+                {
+                    "track_id": row["track_id"],
+                    "target": row["target"],
+                    "view_type": row["view_type"],
+                    "start": row["start"],
+                    "beam": [
+                        {
+                            "code": result.code,
+                            "log_probability": result.log_probability,
+                            "ended_with_eos": result.ended_with_eos,
+                        }
+                        for result in row["beam"]
+                    ],
+                }
+                for row in rows
+            ],
+        }
+        with (output_dir(self.cfg) / "probe_metrics.jsonl").open(
+            "a", encoding="utf-8"
+        ) as handle:
+            handle.write(json.dumps(payload, sort_keys=True) + "\n")
+        self._last_probe_step = int(self.global_step)
+
     def _generation_probe_tc9(self) -> None:
+        if self.is_capacity:
+            self._generation_probe_capacity()
+            return
         if not self.cfg["evaluation"].get("online_monitor_enabled", True):
             self._last_probe_step = int(self.global_step)
             return
@@ -2194,8 +2498,9 @@ class AudioLMModule(pl.LightningModule):
                 "code_mapping_fingerprint": self.code_mapping_fingerprint,
                 "validation_probe": self.validation_probe,
                 "training_track_ids": self.training_track_ids,
+                "training_manifest_fingerprint": self.training_manifest_fingerprint,
                 "training_corpus_fingerprint": self.training_corpus_fingerprint,
-                "training_protocol": TRAINING_PROTOCOL,
+                "training_protocol": self.training_protocol,
                 "loss_protocol": LOSS_PROTOCOL,
                 "monitor_protocol": MONITOR_PROTOCOL,
                 "schedule_config": self.cfg["train"]["schedule"],
@@ -2240,6 +2545,12 @@ class AudioLMModule(pl.LightningModule):
             raise ValueError("Resume checkpoint validation probe does not match")
         if checkpoint.get("training_track_ids") != self.training_track_ids:
             raise ValueError("Resume checkpoint training-track subset does not match")
+        saved_manifest_fingerprint = checkpoint.get("training_manifest_fingerprint")
+        if (
+            saved_manifest_fingerprint is not None
+            and saved_manifest_fingerprint != self.training_manifest_fingerprint
+        ):
+            raise ValueError("Resume checkpoint training manifest does not match")
         if historical_checkpoint_profile(checkpoint) != self.cfg[
             "resolved_training_profile"
         ]:
@@ -2321,17 +2632,12 @@ class AudioLMModule(pl.LightningModule):
         )
         max_steps = int(train_cfg["max_steps"])
         warmup_steps = int(train_cfg["warmup_steps"])
-        if not 0 < warmup_steps < max_steps:
-            raise ValueError("warmup_steps must be between zero and max_steps")
-
         def schedule(step: int) -> float:
-            if step < warmup_steps:
-                return (step + 1) / warmup_steps
-            progress = (step - warmup_steps) / max(
-                1, max_steps - warmup_steps
-            )
-            return 0.5 * (
-                1 + math.cos(math.pi * min(max(progress, 0.0), 1.0))
+            return learning_rate_multiplier(
+                step,
+                warmup_steps=warmup_steps,
+                max_steps=max_steps,
+                constant_after_warmup=self.is_capacity,
             )
 
         scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, schedule)
@@ -2373,8 +2679,9 @@ def train(cfg: dict, *, checkpoint: str | Path | None = None) -> None:
         cfg = resolve_training_config(cfg, checkpoint=checkpoint)
     if cfg.get("architecture") != ARCHITECTURE:
         raise ValueError(f"Configuration architecture must be {ARCHITECTURE}")
-    if cfg["train"]["schedule"].get("protocol") != TRAINING_PROTOCOL:
-        raise ValueError(f"Training protocol must be {TRAINING_PROTOCOL}")
+    protocol = cfg["train"]["schedule"].get("protocol")
+    if protocol not in {TRAINING_PROTOCOL, CAPACITY_TRAINING_PROTOCOL}:
+        raise ValueError("Training protocol is not supported by this trainer")
     if cfg["train"]["schedule"].get("loss_protocol") != LOSS_PROTOCOL:
         raise ValueError(f"Loss protocol must be {LOSS_PROTOCOL}")
     seed = int(cfg["train"]["seed"])
@@ -2430,10 +2737,11 @@ def train(cfg: dict, *, checkpoint: str | Path | None = None) -> None:
     (directory / "monitor_recipes.json").write_text(
         json.dumps(datamodule.monitor_recipes, indent=2, sort_keys=True) + "\n"
     )
-    (directory / "background_noise_manifest.json").write_text(
-        json.dumps(datamodule.noise_assets.manifest(), indent=2, sort_keys=True)
-        + "\n"
-    )
+    if datamodule.noise_assets is not None:
+        (directory / "background_noise_manifest.json").write_text(
+            json.dumps(datamodule.noise_assets.manifest(), indent=2, sort_keys=True)
+            + "\n"
+        )
     if datamodule.rir_assets is not None:
         (directory / "room_ir_manifest.json").write_text(
             json.dumps(datamodule.rir_assets.manifest(), indent=2, sort_keys=True)
@@ -2452,9 +2760,14 @@ def train(cfg: dict, *, checkpoint: str | Path | None = None) -> None:
         datamodule.code_mapping_fingerprint,
         datamodule.probe_track_ids,
         datamodule.dataset.track_ids,
+        datamodule.training_manifest_fingerprint,
         datamodule.training_corpus_fingerprint,
         datamodule.monitor_recipes,
-        datamodule.noise_assets.manifest(),
+        (
+            datamodule.noise_assets.manifest()
+            if datamodule.noise_assets is not None
+            else None
+        ),
         (
             datamodule.rir_assets.manifest()
             if datamodule.rir_assets is not None

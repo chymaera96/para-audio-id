@@ -1,15 +1,20 @@
 from __future__ import annotations
 
+from copy import deepcopy
+
 import pytest
 import torch
 
 from para_audio_id.audio_lm.losses import relative_cosine_margin
 from para_audio_id.audio_lm.noise import resolved_augmentation_schedule
 from para_audio_id.audio_lm.profiles import (
+    CAPACITY_TRAINING_PROTOCOL,
+    canonical_capacity_profile,
     canonical_training_profile,
     cohort_manifest,
     historical_checkpoint_profile,
     resolve_training_config,
+    resolve_capacity_config,
     schedule_profile,
 )
 
@@ -167,3 +172,84 @@ def test_relative_cosine_margin_and_denominator_stabilization():
     assert float(relative_cosine_margin(same, different)) == pytest.approx(0.6)
     stabilized = relative_cosine_margin(torch.tensor(1.0), torch.tensor(1.0))
     assert torch.isfinite(stabilized)
+
+
+@pytest.mark.parametrize(
+    ("size", "steps"),
+    [(10_000, 70_000), (25_000, 175_000), (50_000, 350_000), (100_000, 700_000)],
+)
+def test_capacity_profiles_resolve_560_exposures(size, steps):
+    profile = canonical_capacity_profile(
+        database_size=size,
+        decoder="small",
+        target_exposures=560,
+        tracks_per_optimizer_step=80,
+    )
+    assert profile["schedule"]["protocol"] == CAPACITY_TRAINING_PROTOCOL
+    assert profile["schedule"]["max_steps"] == steps
+    assert profile["training_tracks_manifest"] == (
+        f"data/training_tracks_{size // 1000}k.json"
+    )
+
+
+def test_capacity_decoder_profiles_and_defaults():
+    base = {
+        "data": {"database_size": 10_000},
+        "model": {},
+        "train": {"target_exposures": 560, "tracks_per_microbatch": 10},
+        "trainer": {"accumulate_grad_batches": 8},
+    }
+    default = resolve_capacity_config(base)
+    assert default["resolved_training_profile"]["decoder"]["name"] == "small"
+    tiny = resolve_capacity_config(base, decoder="tiny")
+    assert tiny["model"]["num_layers"] == 6
+    assert tiny["model"]["hidden_size"] == 512
+    assert tiny["model"]["num_attention_heads"] == 8
+    medium = resolve_capacity_config(base, decoder="medium")
+    assert medium["model"]["num_layers"] == 24
+
+
+def test_capacity_resume_rejects_corruption_checkpoint(tmp_path):
+    path = tmp_path / "checkpoint.ckpt"
+    torch.save(
+        {
+            "resolved_training_profile": canonical_training_profile(
+                database_size=10_000, decoder="small", schedule="noise"
+            )
+        },
+        path,
+    )
+    base = {
+        "data": {"database_size": 10_000},
+        "model": {},
+        "train": {"target_exposures": 560, "tracks_per_microbatch": 10},
+        "trainer": {"accumulate_grad_batches": 8},
+    }
+    with pytest.raises(ValueError, match="cannot resume"):
+        resolve_capacity_config(base, checkpoint=path)
+
+
+def test_capacity_resume_inherits_decoder_and_rejects_mismatch(tmp_path):
+    profile = canonical_capacity_profile(
+        database_size=10_000,
+        decoder="tiny",
+        target_exposures=560,
+        tracks_per_optimizer_step=80,
+    )
+    path = tmp_path / "capacity.ckpt"
+    torch.save({"resolved_training_profile": profile}, path)
+    base = {
+        "data": {"database_size": 10_000},
+        "model": {},
+        "train": {"target_exposures": 560, "tracks_per_microbatch": 10},
+        "trainer": {"accumulate_grad_batches": 8},
+    }
+    resumed = resolve_capacity_config(base, checkpoint=path)
+    assert resumed["resolved_training_profile"] == profile
+    assert resumed["model"]["num_layers"] == 6
+    with pytest.raises(ValueError, match="does not match resume checkpoint"):
+        resolve_capacity_config(base, decoder="small", checkpoint=path)
+    wrong_database = deepcopy(base)
+    wrong_database["data"]["database_size"] = 25_000
+    with pytest.raises(ValueError, match="database size"):
+        resolve_capacity_config(wrong_database, checkpoint=path)

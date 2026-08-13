@@ -100,14 +100,18 @@ def _evaluate_tc6_monitor_manifest(
 ) -> dict:
     manifest = checkpoint["monitor_recipes"]
     tokenizer = _checkpoint_tokenizer(checkpoint, device)
-    noise_cfg = cfg["data"]["background_noise"]
-    assets = BackgroundNoiseAssets(
-        noise_cfg["training_root"],
-        noise_cfg["validation_root"],
-        sample_rate=tokenizer.sample_rate,
-        samples=round(
-            tokenizer.sample_rate * float(cfg["data"]["segment_duration"])
-        ),
+    noise_cfg = cfg["data"].get("background_noise")
+    assets = (
+        BackgroundNoiseAssets(
+            noise_cfg["training_root"],
+            noise_cfg["validation_root"],
+            sample_rate=tokenizer.sample_rate,
+            samples=round(
+                tokenizer.sample_rate * float(cfg["data"]["segment_duration"])
+            ),
+        )
+        if noise_cfg is not None
+        else None
     )
     rir_cfg = cfg["data"].get("room_ir")
     rir_assets = (
@@ -134,7 +138,11 @@ def _evaluate_tc6_monitor_manifest(
             seed=int(cfg["train"]["seed"]) + 1771,
         ),
     )
-    snrs = [float(value) for value in cfg["evaluation"]["noise_snr_db"]]
+    snrs = (
+        [float(value) for value in cfg["evaluation"]["noise_snr_db"]]
+        if assets is not None
+        else []
+    )
     rows = []
     skipped_queries = []
     started = time.perf_counter()
@@ -144,12 +152,12 @@ def _evaluate_tc6_monitor_manifest(
             clean = batch["clean_waveforms"].to(device)
             if not len(clean):
                 continue
-            noise = batch["noise_waveforms"].to(device)
             variants = [("clean", None, clean, list(range(len(clean))))]
             room = batch["rir_waveforms"].to(device)
             if rir_assets is not None:
                 variants.append(("rir", None, room, list(range(len(room)))))
             for snr in snrs:
+                noise = batch["noise_waveforms"].to(device)
                 requested = torch.full((len(clean),), snr, device=device)
                 mixed, valid = mix_background_noise(clean, noise, requested)
                 valid_indices = valid.nonzero(as_tuple=False).flatten().tolist()
@@ -1162,6 +1170,7 @@ def evaluate(
         "token_budget_matched_two_second_noise_consistency_v1",
         "online_random_crop_noise_consistency_v1",
         "online_random_crop_consistency_profile_v2",
+        "online_random_crop_clean_capacity_v1",
     }:
         return _evaluate_tc6_monitor_manifest(
             model,

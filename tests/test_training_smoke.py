@@ -10,6 +10,9 @@ from para_audio_id.audio_lm.tokenizer import TokenizerSpec
 from para_audio_id.audio_lm.profiles import catalogue_fingerprint
 from para_audio_id.audio_lm.training import (
     AUGMENTATION_METRICS,
+    capacity_probe_wandb_keys,
+    capacity_training_wandb_keys,
+    learning_rate_multiplier,
     TRAIN_LOG_LEVELS,
     TRAIN_METRICS,
     tc6_probe_wandb_keys,
@@ -340,3 +343,44 @@ def test_tc9_wandb_keys_match_retained_tc6_schema():
         "probe/rir/aggregate/beam_top1",
         "probe/noise_rir/aggregate/beam_top1",
     }
+
+
+def test_capacity_learning_rate_is_constant_after_warmup():
+    assert learning_rate_multiplier(
+        0, warmup_steps=200, max_steps=70_000, constant_after_warmup=True
+    ) == pytest.approx(1 / 200)
+    assert learning_rate_multiplier(
+        199, warmup_steps=200, max_steps=70_000, constant_after_warmup=True
+    ) == 1.0
+    for step in (200, 20_000, 69_999, 70_000):
+        assert learning_rate_multiplier(
+            step,
+            warmup_steps=200,
+            max_steps=70_000,
+            constant_after_warmup=True,
+        ) == 1.0
+
+
+def test_capacity_wandb_schema_keeps_names_and_omits_degradation_metrics():
+    assert capacity_training_wandb_keys() == {
+        "train/loss_step",
+        "train/loss_epoch",
+        "train/clean_audio_loss_step",
+        "train/clean_audio_loss_epoch",
+        "train/digit_loss_step",
+        "train/digit_loss_epoch",
+        "train/teacher_forced_exact_accuracy_step",
+        "train/teacher_forced_exact_accuracy_epoch",
+    }
+    assert capacity_probe_wandb_keys() == {
+        "probe/clean/canonical/beam_top1",
+        "probe/clean/shifted/beam_top1",
+        "probe/clean/heldout/beam_top1",
+        "probe/clean/shifted/teacher_forced_exact_accuracy",
+    }
+    forbidden = {"noise", "rir", "consistency", "cosine", "augmentation"}
+    assert not any(
+        fragment in key
+        for key in capacity_training_wandb_keys() | capacity_probe_wandb_keys()
+        for fragment in forbidden
+    )

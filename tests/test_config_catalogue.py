@@ -7,7 +7,9 @@ import yaml
 
 from para_audio_id.audio_lm.tokenizer import TokenizerSpec
 from para_audio_id.audio_lm.profiles import resolve_training_config
+from para_audio_id.audio_lm.profiles import resolve_capacity_config
 from para_audio_id.audio_lm.training import (
+    AudioLMDataModule,
     validate_tc9_query_configuration,
     validate_tc9_batch_configuration,
 )
@@ -155,8 +157,79 @@ def test_fresh_training_cohort_is_seeded_and_preserves_catalogue_codes(tmp_path)
         "train": {"seed": 1337},
     }
     first = prepare_training_cohort(cfg)
+    original_bytes = output.read_bytes()
     second = prepare_training_cohort(cfg)
     assert first == second
+    assert output.read_bytes() == original_bytes
     assert len(first["track_ids"]) == 10_000
     assert len(set(first["track_ids"])) == 10_000
     assert first["protocol"] == "fresh_seeded_catalogue_cohort_v1"
+
+    broken = json.loads(output.read_text())
+    broken["count"] = 9_999
+    output.write_text(json.dumps(broken))
+    with pytest.raises(ValueError, match="10,000 unique IDs|10000 unique IDs"):
+        prepare_training_cohort(cfg)
+
+
+def test_capacity_datamodule_never_constructs_degradation_assets(tmp_path, monkeypatch):
+    catalogue = tmp_path / "catalogue.jsonl"
+    rows = [
+        {
+            "path": f"{index}.mp3",
+            "track_id": f"track-{index:05d}",
+            "code": f"{index:05d}",
+            "duration": 30.0,
+        }
+        for index in range(10_000)
+    ]
+    catalogue.write_text("\n".join(json.dumps(row) for row in rows))
+    manifest = tmp_path / "training_tracks_10k.json"
+    cfg = resolve_capacity_config(
+        {
+            "data": {
+                "database_size": 10_000,
+                "catalogue": str(catalogue),
+                "audio_root": str(tmp_path),
+                "segment_duration": 2.0,
+            },
+            "model": {},
+            "train": {
+                "seed": 1337,
+                "target_exposures": 560,
+                "tracks_per_microbatch": 10,
+            },
+            "trainer": {"accumulate_grad_batches": 8},
+            "evaluation": {"monitor_tracks": 100},
+        }
+    )
+    cfg["data"]["training_tracks_manifest"] = str(manifest)
+    prepare_training_cohort(cfg, manifest)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("capacity setup accessed degradation assets")
+
+    monkeypatch.setattr(
+        "para_audio_id.audio_lm.training.BackgroundNoiseAssets", forbidden
+    )
+    monkeypatch.setattr(
+        "para_audio_id.audio_lm.training.RoomImpulseResponseAssets", forbidden
+    )
+    spec = TokenizerSpec(
+        architecture="muq_mel_rvq",
+        model_name="test",
+        revision="test",
+        package_version="test",
+        sample_rate=24_000,
+        frame_rate=25.0,
+        waveform_normalization="none_before_muq_internal_preprocessing",
+        num_available_codebooks=8,
+        selected_codebooks=2,
+        codebook_size=1024,
+        serialization="time_major_codebook_interleaved",
+        preprocessing_version=1,
+    )
+    datamodule = AudioLMDataModule(cfg, spec, AudioLMVocabulary())
+    datamodule.setup("fit")
+    assert datamodule.noise_assets is None
+    assert datamodule.rir_assets is None

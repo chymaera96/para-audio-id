@@ -196,6 +196,8 @@ def resolved_augmentation_schedule(
     if step < 0:
         raise ValueError("Global step cannot be negative")
     name = schedule.get("name")
+    if name == "clean":
+        return AugmentationSchedule(1.0, 0.0, 0.0, 0.0, 0.0, None, "clean")
     clean_end = int(schedule["clean_until_step"])
     ramp_end = int(schedule["noise_ramp_until_step"])
     snr_bins = tuple(float(value) for value in schedule["snr_bin_probabilities"])

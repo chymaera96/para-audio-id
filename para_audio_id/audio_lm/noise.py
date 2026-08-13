@@ -189,6 +189,71 @@ def tc11_augmentation_schedule(step: int) -> AugmentationSchedule:
     )
 
 
+def resolved_augmentation_schedule(
+    step: int, schedule: dict
+) -> AugmentationSchedule:
+    """Resolve the selected robustness curriculum at an optimizer step."""
+    if step < 0:
+        raise ValueError("Global step cannot be negative")
+    name = schedule.get("name")
+    clean_end = int(schedule["clean_until_step"])
+    ramp_end = int(schedule["noise_ramp_until_step"])
+    snr_bins = tuple(float(value) for value in schedule["snr_bin_probabilities"])
+    consistency = float(schedule["consistency_weight"])
+    if step < clean_end:
+        return AugmentationSchedule(1.0, 0.0, 0.0, 0.0, 0.0, None, "clean")
+    if step < ramp_end:
+        progress = (step - clean_end) / max(1, ramp_end - clean_end)
+        noise = 0.75 * progress
+        return AugmentationSchedule(
+            1.0 - noise,
+            noise,
+            0.0,
+            0.0,
+            consistency * progress,
+            snr_bins,
+            "noise_ramp",
+        )
+    if name == "noise":
+        return AugmentationSchedule(
+            0.25, 0.75, 0.0, 0.0, consistency, snr_bins, "noise_steady"
+        )
+    if name != "noise-rir":
+        raise ValueError(f"Unknown resolved schedule {name!r}")
+    noise_end = int(schedule["noise_steady_until_step"])
+    rir_end = int(schedule["rir_ramp_until_step"])
+    combined_end = int(schedule["combined_ramp_until_step"])
+    if step < noise_end:
+        return AugmentationSchedule(
+            0.25, 0.75, 0.0, 0.0, consistency, snr_bins, "noise_steady"
+        )
+    if step < rir_end:
+        progress = (step - noise_end) / max(1, rir_end - noise_end)
+        return AugmentationSchedule(
+            0.25,
+            0.75 - 0.20 * progress,
+            0.20 * progress,
+            0.0,
+            consistency,
+            snr_bins,
+            "rir_ramp",
+        )
+    if step < combined_end:
+        progress = (step - rir_end) / max(1, combined_end - rir_end)
+        return AugmentationSchedule(
+            0.25,
+            0.55 - 0.20 * progress,
+            0.20,
+            0.20 * progress,
+            consistency,
+            snr_bins,
+            "combined_ramp",
+        )
+    return AugmentationSchedule(
+        0.25, 0.35, 0.20, 0.20, consistency, snr_bins, "consolidation"
+    )
+
+
 def stable_uint64(*values: object) -> int:
     payload = ":".join(str(value) for value in values).encode()
     return int.from_bytes(hashlib.sha256(payload).digest()[:8], "big")

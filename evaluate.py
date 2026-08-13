@@ -66,6 +66,16 @@ def main() -> None:
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--beam-width", type=int, default=10)
     parser.add_argument(
+        "--rir-training-root",
+        type=Path,
+        help="Optional room-IR training root used to verify held-out separation.",
+    )
+    parser.add_argument(
+        "--rir-validation-root",
+        type=Path,
+        help="Optional held-out room-IR root for joint-beam RIR evaluation.",
+    )
+    parser.add_argument(
         "--greedy-only",
         action="store_true",
         help="Run only unconstrained five-digit autoregressive greedy evaluation.",
@@ -90,6 +100,8 @@ def main() -> None:
         recipe_seed=args.recipe_seed,
         query_lengths=tuple(args.query_lengths),
         conditions=tuple(args.conditions),
+        rir_training_root=args.rir_training_root,
+        rir_validation_root=args.rir_validation_root,
     )
     print(json.dumps(metrics, indent=2, sort_keys=True))
 

@@ -61,15 +61,17 @@ features or another codec.
 
 ## Historical offline tokenization utilities
 
-The repository still contains the older cache-preparation commands, but tc11
+The repository still contains the older cache-preparation commands, but current training
 does not use canonical, shifted, or half-offset token stores for training or
 evaluation. They remain useful only when reproducing tc2–tc6 from Git history.
 
-tc11 needs a fresh seeded 25K identity manifest:
+Set `data.database_size` to `10000`, `25000`, or `100000`, then prepare that
+size-specific identity manifest. This never overwrites a different-size manifest:
 
 ```bash
 python prepare_training_cohort.py configs/fma_large.yaml
-test -f data/training_tracks_25k.json
+# Writes training_tracks_10k.json, training_tracks_25k.json, or
+# training_tracks_100k.json according to data.database_size.
 ```
 
 ## Training
@@ -79,7 +81,7 @@ hidden size 768, 12 heads, tied embeddings, and no dropout. The vocabulary has
 2,048 collision-free audio tokens, `[BOS]`, `[ID]`, ten dedicated digit tokens,
 and `[EOS]`.
 
-tc11 samples online two-second crops from a fresh 25,000-track cohort. Each
+Training samples online two-second crops from the configured cohort. Each
 identity contributes a clean anchor and one secondary view: a distinct clean
 crop, an exact same-crop background-noise view, an exact same-crop room-reverb
 view, or the combined noise-then-reverb view. One frozen lightweight MuQ call
@@ -127,8 +129,10 @@ RIR uses full-wet causal convolution with two seconds of preceding audio;
 the prefix is discarded after convolution so reverberant tails from preceding
 music enter the query. Room IR train/test assets are source- and content-disjoint.
 
-The run is exactly 175,000 optimizer steps. Checkpoints are saved every 500
-steps. For direct comparison with tc6, the same seeded 100-track cohort is
+The 10K catalogue is the exposure reference: 10K, 25K, and 100K runs use 70K,
+175K, and 700K optimizer steps respectively, with every curriculum boundary
+scaled by the same factor. Checkpoints remain every 500 steps and monitoring
+remains every 2,500 steps. For direct comparison with tc6, the same seeded 100-track cohort is
 evaluated using one balanced canonical, integer-shifted, and held-out
 half-offset crop per track. All three groups are evaluated clean and at
 0/5/10/20/30 dB at step zero, every 2,500 steps, and at completion. Evaluation
@@ -140,10 +144,21 @@ Top-1/5/10 and MRR results are appended to `probe_metrics.jsonl`.
 
 ```bash
 python train.py configs/fma_large.yaml \
+  --decoder small \
+  --schedule noise-rir \
   --devices 1 \
   --run-id tc11 \
   --wandb-online
 ```
+
+`--decoder` accepts `small` (12×768, 12 heads; default) or `medium`
+(24×1024, 16 heads). `--schedule` accepts `noise` (default) or `noise-rir`.
+A noise-only run does not discover, validate, fingerprint, or decode room-IR
+assets. The resolved profile is embedded in every checkpoint.
+
+When degraded pairs exist, W&B logs `train/relative_cosine_margin_step` and
+`train/relative_cosine_margin_epoch`, defined as
+`(same_track_cosine - different_track_cosine) / (1 - different_track_cosine)`.
 
 Resume the exact saved model, optimizer, scheduler, loop, sampler pass, and RNG
 state:
@@ -156,16 +171,21 @@ python train.py configs/fma_large.yaml \
   --resume
 ```
 
+On resume, omit `--decoder` and `--schedule` to recover both from the checkpoint.
+An incompatible explicit override fails before model construction.
+
 Checkpoints are written every 500 optimizer steps under:
 
 ```text
 /gpfs/scratch/acw723/para-audio-id/audio-lm-checkpoints/<run-id>/
 ```
 
-Checkpoints embed the vocabulary, exact cohort, random-crop and replacement
+Checkpoints embed the vocabulary, exact cohort, resolved profile, random-crop and replacement
 policies, fixed monitor manifest, noise/tokenizer fingerprints, sampler state,
 RNG state, query specification, and code mapping. Resume is accepted only for
-compatible tc11 checkpoints; tc10 and all earlier checkpoints are rejected.
+compatible profile checkpoints. Legacy tc11 maps to the equivalent
+25K/small/noise-RIR profile and remains resumable. tc9-small and tc10-medium
+remain loadable for evaluation but are not training initialization sources.
 
 PyTorch deterministic algorithms and seeded Python, NumPy, Torch, samplers, and
 workers are enabled. `deterministic_warn_only: true` reports CUDA operations for
@@ -174,7 +194,7 @@ which PyTorch cannot promise bitwise determinism instead of aborting a long run.
 ## Evaluation and inference
 
 The paper-facing evaluation samples a deterministic 1,000-track subset from the
-checkpoint's 25K training cohort. It evaluates nested 2/3/5/10-second clean and
+checkpoint's embedded training cohort. It evaluates nested 2/3/5/10-second clean and
 held-out-room-IR queries using two-second windows with 50% overlap. Identifier
 log-probabilities are averaged across all windows at each shared beam prefix
 before pruning:
@@ -186,10 +206,15 @@ python evaluate.py \
   --protocol joint-beam
 ```
 
-This defaults to the 25K training cohort, a seeded 1,000-track sample, recipe
+This derives catalogue size and decoder dimensions from the checkpoint and
+defaults to a seeded 1,000-track sample, recipe
 and sample seed `1337`, query lengths `2/3/5/10`, clean and RIR conditions,
 beam width 10, and CUDA. The corresponding flags remain available for smaller
 diagnostic evaluations.
+
+Use `--conditions clean` for tc9, tc10, or tc11 without touching RIR assets.
+`--conditions clean rir` adds held-out room convolution. Historical checkpoints
+can use `--rir-training-root` and `--rir-validation-root` overrides.
 
 The command writes a JSON summary, paper-ready CSV, append-only query JSONL, and
 an immutable evaluation manifest. Matching reruns resume completed queries;

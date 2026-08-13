@@ -9,16 +9,7 @@ import numpy as np
 
 from para_audio_id.catalogue import load_catalogue
 from para_audio_id.config import load_config
-
-
-def catalogue_fingerprint(records) -> str:
-    payload = [
-        {"track_id": record.track_id, "code": record.code, "path": record.path}
-        for record in sorted(records, key=lambda record: record.track_id)
-    ]
-    return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+from para_audio_id.audio_lm.profiles import catalogue_fingerprint, resolve_training_config
 
 
 def prepare_training_cohort(cfg: dict, output: str | Path | None = None) -> dict:
@@ -38,6 +29,7 @@ def prepare_training_cohort(cfg: dict, output: str | Path | None = None) -> dict
     payload = {
         "protocol": "fresh_seeded_catalogue_cohort_v1",
         "seed": int(cfg["train"]["seed"]),
+        "database_size": count,
         "count": count,
         "catalogue_fingerprint": catalogue_fingerprint(records),
         "track_ids": track_ids,
@@ -61,7 +53,9 @@ def main() -> None:
     parser.add_argument("config", type=Path)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
-    result = prepare_training_cohort(load_config(args.config), args.output)
+    result = prepare_training_cohort(
+        resolve_training_config(load_config(args.config)), args.output
+    )
     print(json.dumps(result, indent=2, sort_keys=True))
 
 

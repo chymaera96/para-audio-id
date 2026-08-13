@@ -25,6 +25,9 @@ def with_overrides(
     run_id: str | None,
     wandb_online: bool,
     devices: int | None = None,
+    decoder: str | None = None,
+    schedule: str | None = None,
+    checkpoint: str | Path | None = None,
 ) -> dict:
     cfg = deepcopy(config)
     wandb = cfg.setdefault("train", {}).setdefault("wandb", {})
@@ -39,4 +42,8 @@ def with_overrides(
             raise ValueError(f"devices must be positive, got {devices}")
         cfg.setdefault("trainer", {})["devices"] = devices
         cfg["trainer"]["strategy"] = "auto"
-    return cfg
+    from .audio_lm.profiles import resolve_training_config
+
+    return resolve_training_config(
+        cfg, decoder=decoder, schedule=schedule, checkpoint=checkpoint
+    )

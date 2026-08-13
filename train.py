@@ -13,20 +13,32 @@ def main() -> None:
     parser.add_argument("--wandb-online", action="store_true")
     parser.add_argument("--run-id")
     parser.add_argument("--devices", type=int, default=None)
+    parser.add_argument("--decoder", choices=("small", "medium"))
+    parser.add_argument("--schedule", choices=("noise", "noise-rir"))
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--ckpt-path", type=Path)
     args = parser.parse_args()
-    cfg = with_overrides(
-        load_config(args.config),
+    base_cfg = load_config(args.config)
+    run_cfg = with_overrides(
+        base_cfg,
         run_id=args.run_id,
         wandb_online=args.wandb_online,
         devices=args.devices,
     )
     checkpoint = args.ckpt_path
     if args.resume and checkpoint is None:
-        checkpoint = checkpoint_dir(cfg) / "last.ckpt"
+        checkpoint = checkpoint_dir(run_cfg) / "last.ckpt"
     if checkpoint is not None and not checkpoint.exists():
         raise FileNotFoundError(checkpoint)
+    cfg = with_overrides(
+        base_cfg,
+        run_id=args.run_id,
+        wandb_online=args.wandb_online,
+        devices=args.devices,
+        decoder=args.decoder,
+        schedule=args.schedule,
+        checkpoint=checkpoint,
+    )
     train(cfg, checkpoint=checkpoint)
 
 

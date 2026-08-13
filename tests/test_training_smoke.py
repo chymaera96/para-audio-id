@@ -1,3 +1,4 @@
+import hashlib
 import json
 
 import numpy as np
@@ -6,6 +7,7 @@ import soundfile as sf
 import torch
 
 from para_audio_id.audio_lm.tokenizer import TokenizerSpec
+from para_audio_id.audio_lm.profiles import catalogue_fingerprint
 from para_audio_id.audio_lm.training import (
     AUGMENTATION_METRICS,
     TRAIN_LOG_LEVELS,
@@ -15,6 +17,7 @@ from para_audio_id.audio_lm.training import (
     train,
 )
 from para_audio_id.audio_lm.vocabulary import AudioLMVocabulary
+from para_audio_id.catalogue import load_catalogue
 
 
 def test_one_step_training_smoke(tmp_path, monkeypatch):
@@ -56,7 +59,23 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
         track_ids.append(track_id)
     catalogue.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
     manifest = tmp_path / "training_tracks.json"
-    manifest.write_text(json.dumps(track_ids))
+    records = load_catalogue(catalogue)
+    manifest.write_text(
+        json.dumps(
+            {
+                "protocol": "fresh_seeded_catalogue_cohort_v1",
+                "seed": 7,
+                "count": 10,
+                "catalogue_fingerprint": catalogue_fingerprint(records),
+                "track_ids": track_ids,
+                "code_mapping_fingerprint": hashlib.sha256(
+                    "\n".join(
+                        f"{record.track_id}:{record.code}" for record in records
+                    ).encode()
+                ).hexdigest(),
+            }
+        )
+    )
     noise_train = tmp_path / "noise_train"
     noise_validation = tmp_path / "noise_validation"
     noise_train.mkdir()
@@ -110,6 +129,7 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
             "audio_root": str(audio_root),
             "catalogue": str(catalogue),
             "training_tracks_manifest": str(manifest),
+            "database_size": 10,
             "max_training_tracks": 10,
             "segment_duration": 2.0,
             "crop_retries": 4,
@@ -143,7 +163,8 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
             "id_digit_weight": 8.0,
             "gradient_clip_norm": 1.0,
             "schedule": {
-                "protocol": "online_random_crop_noise_rir_consistency_25k_v1",
+                "name": "noise-rir",
+                "protocol": "online_random_crop_consistency_profile_v2",
                 "loss_protocol": "tc5_family_weighted_consistency_v2",
                 "clean_until_step": 50_000,
                 "noise_ramp_until_step": 62_500,
@@ -155,6 +176,31 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
                 "exact_zero_fraction_in_first_bin": 0.25,
             },
             "wandb": {"enabled": False},
+        },
+        "resolved_training_profile": {
+            "version": 2,
+            "database_size": 10,
+            "training_tracks_manifest": str(manifest),
+            "decoder": {
+                "name": "small",
+                "num_layers": 1,
+                "hidden_size": 32,
+                "num_attention_heads": 4,
+            },
+            "schedule": {
+                "name": "noise-rir",
+                "protocol": "online_random_crop_consistency_profile_v2",
+                "loss_protocol": "tc5_family_weighted_consistency_v2",
+                "max_steps": 2,
+                "clean_until_step": 50_000,
+                "noise_ramp_until_step": 62_500,
+                "noise_steady_until_step": 87_500,
+                "rir_ramp_until_step": 100_000,
+                "combined_ramp_until_step": 112_500,
+                "consistency_weight": 0.1,
+                "snr_bin_probabilities": [0.4, 0.3, 0.2, 0.1],
+                "exact_zero_fraction_in_first_bin": 0.25,
+            },
         },
         "evaluation": {
             "online_monitor_enabled": False,
@@ -194,7 +240,7 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
     assert checkpoint["global_step"] == 2
     assert (
         checkpoint["training_protocol"]
-        == "online_random_crop_noise_rir_consistency_25k_v1"
+        == "online_random_crop_consistency_profile_v2"
     )
     assert checkpoint["loss_protocol"] == "tc5_family_weighted_consistency_v2"
     assert checkpoint["monitor_protocol"] == "compact_beam_monitor_v2"
@@ -237,9 +283,9 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
     }
 
     invalid = tmp_path / "invalid.ckpt"
-    checkpoint["training_protocol"] = "token_budget_matched_two_second_noise_consistency_v1"
+    checkpoint["resolved_training_profile"]["decoder"]["name"] = "medium"
     torch.save(checkpoint, invalid)
-    with pytest.raises(ValueError, match="different training protocol"):
+    with pytest.raises(ValueError, match="different training profile"):
         train(cfg, checkpoint=invalid)
 
 
@@ -250,6 +296,7 @@ def test_tc9_wandb_keys_match_retained_tc6_schema():
         "consistency_loss",
         "same_track_cosine",
         "different_track_cosine",
+        "relative_cosine_margin",
         "teacher_forced_exact_accuracy",
     }
     assert AUGMENTATION_METRICS == {
@@ -271,6 +318,8 @@ def test_tc9_wandb_keys_match_retained_tc6_schema():
         "train/same_track_cosine_epoch",
         "train/different_track_cosine_step",
         "train/different_track_cosine_epoch",
+        "train/relative_cosine_margin_step",
+        "train/relative_cosine_margin_epoch",
         "train/teacher_forced_exact_accuracy_step",
         "train/teacher_forced_exact_accuracy_epoch",
         "train/loss_step",

@@ -285,6 +285,20 @@ probes are added for RIR-only and noise+RIR; complete condition/SNR details are
 stored in probe JSONL and checkpoints. tc11 checkpoints are incompatible with
 all earlier protocols.
 
+## Unified training profiles
+
+Current runs select the causal decoder (`small` or `medium`) and robustness
+schedule (`noise` or `noise-rir`) at launch. Catalogue size is selected in YAML
+and resolves a dedicated 10K, 25K, or 100K cohort manifest. Optimizer steps and
+curriculum transitions scale linearly from the 10K/70K-step reference, while
+warm-up, checkpointing, and monitoring intervals remain fixed.
+
+New checkpoints store the fully resolved profile rather than relying on mutable
+CLI defaults. Historical tc9 (small/noise/10K), tc10 (medium/noise/10K), and
+tc11 (small/noise-RIR/25K) are recognized during evaluation; tc11 remains an
+exact resume source. Representation diagnostics now include the normalized
+same-versus-different cosine margin alongside both raw cosine values.
+
 ## Interpretation
 
 The progression isolates eight questions:

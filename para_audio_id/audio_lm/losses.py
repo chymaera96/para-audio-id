@@ -6,6 +6,18 @@ import torch
 import torch.nn.functional as F
 
 
+def relative_cosine_margin(
+    same_track_cosine: torch.Tensor,
+    different_track_cosine: torch.Tensor,
+    *,
+    epsilon: float = 1e-8,
+) -> torch.Tensor:
+    """Normalize the same/different cosine gap by remaining cosine headroom."""
+    return (same_track_cosine - different_track_cosine) / (
+        1.0 - different_track_cosine
+    ).clamp_min(epsilon)
+
+
 def masked_cross_entropy(
     shifted_logits: torch.Tensor, shifted_targets: torch.Tensor, mask: torch.Tensor
 ) -> torch.Tensor:

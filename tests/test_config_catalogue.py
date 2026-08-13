@@ -6,6 +6,7 @@ import pytest
 import yaml
 
 from para_audio_id.audio_lm.tokenizer import TokenizerSpec
+from para_audio_id.audio_lm.profiles import resolve_training_config
 from para_audio_id.audio_lm.training import (
     validate_tc9_query_configuration,
     validate_tc9_batch_configuration,
@@ -16,8 +17,10 @@ from prepare_training_cohort import prepare_training_cohort
 
 
 def test_primary_config_is_audio_lm_and_matches_logical_batch():
-    cfg = yaml.safe_load(
-        (Path(__file__).parents[1] / "configs" / "fma_large.yaml").read_text()
+    cfg = resolve_training_config(
+        yaml.safe_load(
+            (Path(__file__).parents[1] / "configs" / "fma_large.yaml").read_text()
+        )
     )
     assert cfg["architecture"] == "audio_lm_v1"
     assert cfg["tokenizer"]["selected_codebooks"] == 2
@@ -37,19 +40,15 @@ def test_primary_config_is_audio_lm_and_matches_logical_batch():
     assert cfg["train"]["warmup_steps"] == 200
     assert cfg["train"]["evaluation_interval"] == 2_500
     assert cfg["train"]["checkpoint_interval"] == 500
-    assert (
-        cfg["train"]["schedule"]["protocol"]
-        == "online_random_crop_noise_rir_consistency_25k_v1"
-    )
+    assert cfg["resolved_training_profile"]["decoder"]["name"] == "small"
+    assert cfg["train"]["schedule"]["name"] == "noise"
     assert (
         cfg["train"]["schedule"]["loss_protocol"]
         == "tc5_family_weighted_consistency_v2"
     )
     assert cfg["train"]["schedule"]["clean_until_step"] == 50_000
     assert cfg["train"]["schedule"]["noise_ramp_until_step"] == 62_500
-    assert cfg["train"]["schedule"]["noise_steady_until_step"] == 87_500
-    assert cfg["train"]["schedule"]["rir_ramp_until_step"] == 100_000
-    assert cfg["train"]["schedule"]["combined_ramp_until_step"] == 112_500
+    assert "noise_steady_until_step" not in cfg["train"]["schedule"]
     assert cfg["evaluation"]["monitor_tracks"] == 100
     assert cfg["evaluation"]["noise_snr_db"] == [0, 5, 10, 20, 30]
     assert cfg["data"]["background_noise"]["training_root"].endswith(
@@ -68,8 +67,10 @@ def test_primary_config_is_audio_lm_and_matches_logical_batch():
 
 
 def test_tc9_startup_query_invariants_are_enforced():
-    cfg = yaml.safe_load(
-        (Path(__file__).parents[1] / "configs" / "fma_large.yaml").read_text()
+    cfg = resolve_training_config(
+        yaml.safe_load(
+            (Path(__file__).parents[1] / "configs" / "fma_large.yaml").read_text()
+        )
     )
     tokenizer_spec = TokenizerSpec(
         architecture="muq_mel_rvq",
@@ -141,14 +142,14 @@ def test_fresh_training_cohort_is_seeded_and_preserves_catalogue_codes(tmp_path)
             "code": f"{index:05d}",
             "duration": 30.0,
         }
-        for index in range(30)
+        for index in range(10_000)
     ]
     catalogue.write_text("\n".join(json.dumps(row) for row in rows))
     output = tmp_path / "cohort.json"
     cfg = {
         "data": {
             "catalogue": str(catalogue),
-            "max_training_tracks": 25,
+            "max_training_tracks": 10_000,
             "training_tracks_manifest": str(output),
         },
         "train": {"seed": 1337},
@@ -156,6 +157,6 @@ def test_fresh_training_cohort_is_seeded_and_preserves_catalogue_codes(tmp_path)
     first = prepare_training_cohort(cfg)
     second = prepare_training_cohort(cfg)
     assert first == second
-    assert len(first["track_ids"]) == 25
-    assert len(set(first["track_ids"])) == 25
+    assert len(first["track_ids"]) == 10_000
+    assert len(set(first["track_ids"])) == 10_000
     assert first["protocol"] == "fresh_seeded_catalogue_cohort_v1"

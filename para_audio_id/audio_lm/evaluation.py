@@ -29,6 +29,7 @@ from .generation import (
 )
 from .losses import causal_audio_id_losses
 from .noise import BackgroundNoiseAssets, mix_background_noise, stable_uint64
+from .profiles import historical_checkpoint_profile
 from .random_crops import RandomEvaluationCollator, RandomEvaluationDataset
 from .rir import RoomImpulseResponseAssets, convolve_full_wet
 from .tokenizer import MuQRVQTokenizer
@@ -108,11 +109,15 @@ def _evaluate_tc6_monitor_manifest(
             tokenizer.sample_rate * float(cfg["data"]["segment_duration"])
         ),
     )
-    rir_cfg = cfg["data"]["room_ir"]
-    rir_assets = RoomImpulseResponseAssets(
-        rir_cfg["training_root"],
-        rir_cfg["validation_root"],
-        sample_rate=tokenizer.sample_rate,
+    rir_cfg = cfg["data"].get("room_ir")
+    rir_assets = (
+        RoomImpulseResponseAssets(
+            rir_cfg["training_root"],
+            rir_cfg["validation_root"],
+            sample_rate=tokenizer.sample_rate,
+        )
+        if rir_cfg is not None
+        else None
     )
     loader = DataLoader(
         RandomEvaluationDataset(manifest),
@@ -123,7 +128,9 @@ def _evaluate_tc6_monitor_manifest(
             noise_assets=assets,
             rir_assets=rir_assets,
             sample_rate=tokenizer.sample_rate,
-            past_context_duration=float(rir_cfg["past_context_duration"]),
+            past_context_duration=(
+                float(rir_cfg["past_context_duration"]) if rir_cfg else 0.0
+            ),
             seed=int(cfg["train"]["seed"]) + 1771,
         ),
     )
@@ -140,7 +147,8 @@ def _evaluate_tc6_monitor_manifest(
             noise = batch["noise_waveforms"].to(device)
             variants = [("clean", None, clean, list(range(len(clean))))]
             room = batch["rir_waveforms"].to(device)
-            variants.append(("rir", None, room, list(range(len(room)))))
+            if rir_assets is not None:
+                variants.append(("rir", None, room, list(range(len(room)))))
             for snr in snrs:
                 requested = torch.full((len(clean),), snr, device=device)
                 mixed, valid = mix_background_noise(clean, noise, requested)
@@ -158,6 +166,8 @@ def _evaluate_tc6_monitor_manifest(
                     )
                 if valid_indices:
                     variants.append(("noise", snr, mixed[valid], valid_indices))
+                if rir_assets is None:
+                    continue
                 contexts = torch.from_numpy(
                     np.stack([item[0] for item in batch["noise_rir_inputs"]])
                 ).to(device)
@@ -609,7 +619,7 @@ def _joint_manifest_configuration(
     *,
     checkpoint_fingerprint: str,
     checkpoint: dict,
-    rir_manifest: dict,
+    rir_manifest: dict | None,
     cohort: str,
     expected_tracks: int | None,
     sample_tracks: int,
@@ -630,7 +640,9 @@ def _joint_manifest_configuration(
         "training_corpus_fingerprint": checkpoint.get(
             "training_corpus_fingerprint"
         ),
-        "room_ir_validation_fingerprint": rir_manifest["validation_fingerprint"],
+        "room_ir_validation_fingerprint": (
+            rir_manifest["validation_fingerprint"] if rir_manifest else None
+        ),
         "cohort": cohort,
         "expected_tracks": expected_tracks,
         "sample_tracks": sample_tracks,
@@ -652,7 +664,7 @@ def _load_or_create_joint_manifest(
     configuration: dict,
     checkpoint: dict,
     cfg: dict,
-    rir_assets: RoomImpulseResponseAssets,
+    rir_assets: RoomImpulseResponseAssets | None,
 ) -> dict:
     if path.exists():
         manifest = json.loads(path.read_text())
@@ -706,11 +718,15 @@ def _load_or_create_joint_manifest(
                 pad=False,
             )
             _valid_waveform(waveform, maximum_samples)
-            _, rir_path = rir_assets.load_validation(
-                stable_uint64(
-                    configuration["recipe_seed"], track_id, "paper-room-ir"
+            rir_path = None
+            if "rir" in configuration["conditions"]:
+                if rir_assets is None:
+                    raise RuntimeError("RIR evaluation requested without RIR assets")
+                _, rir_path = rir_assets.load_validation(
+                    stable_uint64(
+                        configuration["recipe_seed"], track_id, "paper-room-ir"
+                    )
                 )
-            )
             recipes.append(
                 {
                     "track_id": record.track_id,
@@ -835,11 +851,10 @@ def _evaluate_joint_beam(
     conditions: tuple[str, ...],
     device: str,
     beam_width: int,
+    rir_training_root: str | Path | None,
+    rir_validation_root: str | Path | None,
 ) -> dict:
-    if checkpoint.get("training_protocol") != (
-        "online_random_crop_noise_rir_consistency_25k_v1"
-    ):
-        raise ValueError("Joint-beam paper evaluation requires a tc11 checkpoint")
+    profile = historical_checkpoint_profile(checkpoint)
     if beam_width != 10:
         raise ValueError("Paper-facing joint-beam evaluation requires beam_width=10")
     if cohort != "training":
@@ -861,16 +876,26 @@ def _evaluate_joint_beam(
         raise ValueError("Paper-facing joint-beam evaluation requires 2-second windows")
     if any(length < window_seconds for length in query_lengths):
         raise ValueError("Every query length must be at least two seconds")
-    past_seconds = float(cfg["data"]["room_ir"]["past_context_duration"])
-    rir_cfg = cfg["data"]["room_ir"]
-    rir_assets = RoomImpulseResponseAssets(
-        rir_cfg["training_root"],
-        rir_cfg["validation_root"],
-        sample_rate=tokenizer.sample_rate,
-    )
-    rir_manifest = rir_assets.manifest()
-    if checkpoint.get("room_ir_manifest") != rir_manifest:
-        raise ValueError("Validation room-IR assets do not match the tc11 checkpoint")
+    rir_cfg = cfg["data"].get("room_ir", {})
+    past_seconds = float(rir_cfg.get("past_context_duration", 2.0))
+    rir_assets = None
+    rir_manifest = None
+    if "rir" in conditions:
+        training_root = rir_training_root or rir_cfg.get(
+            "training_root",
+            "/gpfs/scratch/acw723/audio-degradation-data/degradation_24k/room_ir/train",
+        )
+        validation_root = rir_validation_root or rir_cfg.get(
+            "validation_root",
+            "/gpfs/scratch/acw723/audio-degradation-data/degradation_24k/room_ir/test",
+        )
+        rir_assets = RoomImpulseResponseAssets(
+            training_root, validation_root, sample_rate=tokenizer.sample_rate
+        )
+        rir_manifest = rir_assets.manifest()
+        saved_manifest = checkpoint.get("room_ir_manifest")
+        if saved_manifest is not None and saved_manifest != rir_manifest:
+            raise ValueError("Validation room-IR assets do not match the checkpoint")
 
     summary_path, csv_path, query_path, manifest_path = _joint_output_paths(output)
     checkpoint_fingerprint = _checkpoint_file_fingerprint(checkpoint_path)
@@ -947,6 +972,8 @@ def _evaluate_joint_beam(
                                     query_samples=query_samples,
                                     past_samples=past_samples,
                                 )
+                                if rir_assets is None:
+                                    raise RuntimeError("RIR assets are unavailable")
                                 ir, rir_path = rir_assets.load_validation(
                                     stable_uint64(
                                         recipe_seed,
@@ -1071,6 +1098,7 @@ def _evaluate_joint_beam(
         "manifest_fingerprint": manifest["fingerprint"],
         "configuration": configuration,
         "selected_tracks": len(manifest["queries"]),
+        "checkpoint_profile": profile,
         "excluded_candidates": len(manifest["excluded_candidates"]),
         "metrics": metrics,
     }
@@ -1095,6 +1123,8 @@ def evaluate(
     recipe_seed: int = 1337,
     query_lengths: tuple[float, ...] = (2.0, 3.0, 5.0, 10.0),
     conditions: tuple[str, ...] = ("clean", "rir"),
+    rir_training_root: str | Path | None = None,
+    rir_validation_root: str | Path | None = None,
 ) -> dict:
     model, vocabulary, cfg, checkpoint = load_audio_lm(checkpoint_path, device)
     if protocol == "joint-beam":
@@ -1110,7 +1140,11 @@ def evaluate(
             checkpoint,
             output=output,
             cohort=cohort,
-            expected_tracks=25_000 if expected_tracks is None else expected_tracks,
+            expected_tracks=(
+                len(checkpoint["training_track_ids"])
+                if expected_tracks is None
+                else expected_tracks
+            ),
             sample_tracks=1000 if sample_tracks is None else sample_tracks,
             sample_seed=sample_seed,
             recipe_seed=recipe_seed,
@@ -1118,13 +1152,17 @@ def evaluate(
             conditions=tuple(conditions),
             device=device,
             beam_width=10 if beam_width is None else beam_width,
+            rir_training_root=rir_training_root,
+            rir_validation_root=rir_validation_root,
         )
     if protocol != "segment":
         raise ValueError(f"Unknown evaluation protocol {protocol!r}")
-    if (
-        checkpoint.get("training_protocol")
-        == "online_random_crop_noise_rir_consistency_25k_v1"
-    ):
+    if checkpoint.get("training_protocol") in {
+        "online_random_crop_noise_rir_consistency_25k_v1",
+        "token_budget_matched_two_second_noise_consistency_v1",
+        "online_random_crop_noise_consistency_v1",
+        "online_random_crop_consistency_profile_v2",
+    }:
         return _evaluate_tc6_monitor_manifest(
             model,
             vocabulary,

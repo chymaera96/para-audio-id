@@ -17,8 +17,8 @@ from .noise import (
     BackgroundNoiseAssets,
     deterministic_augmentation_parameters,
     mix_background_noise,
+    resolved_augmentation_schedule,
     stable_uint64,
-    tc11_augmentation_schedule,
 )
 from .rir import RoomImpulseResponseAssets, convolve_full_wet
 
@@ -170,7 +170,7 @@ class RandomEvaluationCollator:
         *,
         audio_root: str | Path,
         noise_assets: BackgroundNoiseAssets,
-        rir_assets: RoomImpulseResponseAssets,
+        rir_assets: RoomImpulseResponseAssets | None,
         sample_rate: int,
         past_context_duration: float,
         seed: int,
@@ -242,20 +242,25 @@ class RandomEvaluationCollator:
                     ),
                     samples=expected_context,
                 )
-                ir, ir_path = self.rir_assets.load_validation(
-                    stable_uint64(
-                        self.seed,
-                        row["track_id"],
-                        row["start_sample"],
-                        "fixed-evaluation-room-ir",
+                if self.rir_assets is not None:
+                    ir, ir_path = self.rir_assets.load_validation(
+                        stable_uint64(
+                            self.seed,
+                            row["track_id"],
+                            row["start_sample"],
+                            "fixed-evaluation-room-ir",
+                        )
                     )
-                )
-                reverberated = convolve_full_wet(
-                    context,
-                    ir,
-                    past_context_samples=self.past_context_samples,
-                    output_samples=crop_samples,
-                )
+                    reverberated = convolve_full_wet(
+                        context,
+                        ir,
+                        past_context_samples=self.past_context_samples,
+                        output_samples=crop_samples,
+                    )
+                else:
+                    ir = np.empty(0, dtype=np.float32)
+                    ir_path = None
+                    reverberated = np.empty(0, dtype=np.float32)
             except Exception as exc:
                 skipped.append(
                     {
@@ -295,7 +300,7 @@ class RandomEvaluationCollator:
             ),
             "rir_waveforms": torch.from_numpy(
                 np.stack(room)
-                if room
+                if room and self.rir_assets is not None
                 else np.empty((0, samples), dtype=np.float32)
             ),
             "noise_rir_inputs": noise_room,
@@ -387,7 +392,8 @@ class RandomCropCollator:
         records: list[CatalogueRecord],
         audio_root: str | Path,
         noise_assets: BackgroundNoiseAssets,
-        rir_assets: RoomImpulseResponseAssets,
+        rir_assets: RoomImpulseResponseAssets | None,
+        schedule: dict,
         sample_rate: int,
         crop_duration: float,
         past_context_duration: float,
@@ -400,13 +406,14 @@ class RandomCropCollator:
         self.audio_root = Path(audio_root)
         self.noise_assets = noise_assets
         self.rir_assets = rir_assets
+        self.schedule = dict(schedule)
         self.sample_rate = int(sample_rate)
         self.crop_duration = float(crop_duration)
         self.crop_samples = round(self.sample_rate * self.crop_duration)
         self.past_context_samples = round(
             self.sample_rate * float(past_context_duration)
         )
-        if self.past_context_samples < 1:
+        if self.rir_assets is not None and self.past_context_samples < 1:
             raise ValueError("Past reverberation context must be positive")
         self.seed = int(seed)
         self.reserved_starts = dict(reserved_starts)
@@ -510,7 +517,7 @@ class RandomCropCollator:
             raise ValueError("Random-crop batch has inconsistent sampler progress")
         optimizer_step = optimizer_steps.pop()
         batch_idx = batch_indices.pop()
-        schedule = tc11_augmentation_schedule(optimizer_step)
+        schedule = resolved_augmentation_schedule(optimizer_step, self.schedule)
         keys = [
             stable_uint64(
                 self.seed,
@@ -696,6 +703,8 @@ class RandomCropCollator:
                 if not bool(valid[0]):
                     raise RuntimeError("Validated context produced invalid noise")
                 context = mixed[0].numpy()
+            if self.rir_assets is None:
+                raise RuntimeError("RIR category selected without room-IR assets")
             ir, rir_path = self.rir_assets.load_training(
                 stable_uint64(
                     self.seed,

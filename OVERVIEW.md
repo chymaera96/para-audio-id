@@ -306,8 +306,8 @@ runs retain the two-second random-crop formulation and weighted identifier loss
 but remove corruption, consistency, and cosine-decay confounds. The LR reaches
 `3e-4` after 200 warm-up steps and stays fixed.
 
-The physical batch is fixed at 80 identities (160 clean documents) with no
-gradient accumulation. This retains exactly 80 identity selections per
+The physical microbatch is fixed at 40 identities (80 clean documents) with
+two-step gradient accumulation. This retains exactly 80 identity selections per
 optimizer update and therefore leaves every exposure and optimizer-step count
 unchanged from the earlier `10 tracks × accumulation 8` implementation.
 

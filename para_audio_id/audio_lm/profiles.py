@@ -19,8 +19,8 @@ SCHEDULE_NAMES = ("noise", "noise-rir")
 NEW_TRAINING_PROTOCOL = "online_random_crop_consistency_profile_v2"
 CAPACITY_TRAINING_PROTOCOL = "online_random_crop_clean_capacity_v1"
 LOSS_PROTOCOL = "tc5_family_weighted_consistency_v2"
-CAPACITY_TRACKS_PER_MICROBATCH = 80
-CAPACITY_ACCUMULATE_GRAD_BATCHES = 1
+CAPACITY_TRACKS_PER_MICROBATCH = 40
+CAPACITY_ACCUMULATE_GRAD_BATCHES = 2
 
 
 def cohort_manifest(database_size: int) -> str:
@@ -275,8 +275,8 @@ def resolve_capacity_config(
         or accumulation != CAPACITY_ACCUMULATE_GRAD_BATCHES
     ):
         raise ValueError(
-            "Capacity diagnostics require 80 tracks per microbatch and "
-            "accumulate_grad_batches=1"
+            "Capacity diagnostics require 40 tracks per microbatch and "
+            "accumulate_grad_batches=2"
         )
     tracks_per_step = tracks_per_microbatch * accumulation
     resumed = checkpoint_training_profile(checkpoint) if checkpoint is not None else None

@@ -197,8 +197,8 @@ def test_capacity_decoder_profiles_and_defaults():
     base = {
         "data": {"database_size": 10_000},
         "model": {},
-        "train": {"target_exposures": 560, "tracks_per_microbatch": 80},
-        "trainer": {"accumulate_grad_batches": 1},
+        "train": {"target_exposures": 560, "tracks_per_microbatch": 40},
+        "trainer": {"accumulate_grad_batches": 2},
     }
     default = resolve_capacity_config(base)
     assert default["resolved_training_profile"]["decoder"]["name"] == "small"
@@ -212,7 +212,7 @@ def test_capacity_decoder_profiles_and_defaults():
     old_partition = deepcopy(base)
     old_partition["train"]["tracks_per_microbatch"] = 10
     old_partition["trainer"]["accumulate_grad_batches"] = 8
-    with pytest.raises(ValueError, match="80 tracks per microbatch"):
+    with pytest.raises(ValueError, match="40 tracks per microbatch"):
         resolve_capacity_config(old_partition)
 
 
@@ -222,10 +222,10 @@ def test_capacity_database_size_cli_override_resolves_manifest_and_steps():
         "model": {},
         "train": {
             "target_exposures": 560,
-            "tracks_per_microbatch": 80,
+            "tracks_per_microbatch": 40,
             "wandb": {"enabled": False},
         },
-        "trainer": {"accumulate_grad_batches": 1},
+        "trainer": {"accumulate_grad_batches": 2},
     }
     resolved = with_capacity_overrides(
         base,
@@ -253,8 +253,8 @@ def test_capacity_resume_rejects_corruption_checkpoint(tmp_path):
     base = {
         "data": {"database_size": 10_000},
         "model": {},
-        "train": {"target_exposures": 560, "tracks_per_microbatch": 80},
-        "trainer": {"accumulate_grad_batches": 1},
+        "train": {"target_exposures": 560, "tracks_per_microbatch": 40},
+        "trainer": {"accumulate_grad_batches": 2},
     }
     with pytest.raises(ValueError, match="cannot resume"):
         resolve_capacity_config(base, checkpoint=path)
@@ -272,8 +272,8 @@ def test_capacity_resume_inherits_decoder_and_rejects_mismatch(tmp_path):
     base = {
         "data": {"database_size": 10_000},
         "model": {},
-        "train": {"target_exposures": 560, "tracks_per_microbatch": 80},
-        "trainer": {"accumulate_grad_batches": 1},
+        "train": {"target_exposures": 560, "tracks_per_microbatch": 40},
+        "trainer": {"accumulate_grad_batches": 2},
     }
     resumed = resolve_capacity_config(base, checkpoint=path)
     assert resumed["resolved_training_profile"] == profile

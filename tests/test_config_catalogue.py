@@ -127,7 +127,7 @@ def test_tc9_startup_query_invariants_are_enforced():
         )
 
 
-def test_capacity_batch_is_fixed_at_80_tracks_without_accumulation():
+def test_capacity_batch_is_fixed_at_40_tracks_with_two_accumulation_steps():
     cfg = resolve_capacity_config(
         yaml.safe_load(
             (Path(__file__).parents[1] / "configs" / "capacity.yaml").read_text()
@@ -139,11 +139,11 @@ def test_capacity_batch_is_fixed_at_80_tracks_without_accumulation():
         "segment_duration_seconds": 2.0,
     }
     batch = validate_tc9_batch_configuration(cfg, query_spec)
-    assert batch["tracks_per_microbatch"] == 80
-    assert batch["documents_per_microbatch"] == 160
-    assert batch["audio_targets_per_microbatch"] == 16_000
-    assert batch["causal_tokens_per_microbatch"] == 17_280
-    assert batch["gradient_accumulation_steps"] == 1
+    assert batch["tracks_per_microbatch"] == 40
+    assert batch["documents_per_microbatch"] == 80
+    assert batch["audio_targets_per_microbatch"] == 8_000
+    assert batch["causal_tokens_per_microbatch"] == 8_640
+    assert batch["gradient_accumulation_steps"] == 2
     assert batch["tracks_per_optimizer_step"] == 80
     assert batch["documents_per_optimizer_step"] == 160
     assert batch["audio_targets_per_optimizer_step"] == 16_000
@@ -219,9 +219,9 @@ def test_capacity_datamodule_never_constructs_degradation_assets(tmp_path, monke
             "train": {
                 "seed": 1337,
                 "target_exposures": 560,
-                "tracks_per_microbatch": 80,
+                "tracks_per_microbatch": 40,
             },
-            "trainer": {"accumulate_grad_batches": 1},
+            "trainer": {"accumulate_grad_batches": 2},
             "evaluation": {"monitor_tracks": 100},
         }
     )

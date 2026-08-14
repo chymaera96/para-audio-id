@@ -82,7 +82,9 @@ def _scaled(value: int, database_size: int) -> int:
 def schedule_profile(name: str, database_size: int) -> dict[str, Any]:
     if name not in SCHEDULE_NAMES:
         raise ValueError(f"schedule must be one of {SCHEDULE_NAMES}, got {name!r}")
-    total = _scaled(70_000, database_size)
+    # Preserve all earlier 25K curriculum boundaries, but give its final
+    # learning-rate decay phase another 50K optimizer updates.
+    total = 225_000 if database_size == 25_000 else _scaled(70_000, database_size)
     common = {
         "name": name,
         "protocol": NEW_TRAINING_PROTOCOL,

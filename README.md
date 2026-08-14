@@ -114,7 +114,7 @@ For the 25K tc12 run, the secondary-view curriculum is:
 | 0–10K | 1.00 | 0 | 0 | 0 | disabled |
 | 10–30K | 1.00 → 0.40 | 0 → 0.30 | 0 → 0.30 | 0 | mild → moderate |
 | 30–60K | 0.40 → 0.10 | 0.30 → 0.35 | 0.30 | 0 → 0.25 | expand to full range |
-| 60–175K | 0.10 | 0.35 | 0.30 | 0.25 | full range |
+| 60–225K | 0.10 | 0.35 | 0.30 | 0.25 | full range |
 
 Consistency ramps from 0 to 0.1 over 10K–30K and then remains at 0.1.
 RIR severity is ranked by post-peak 99%-energy decay duration. The eligible
@@ -124,7 +124,7 @@ IRs at 60K. Convolution remains full-wet at every severity.
 Noisy examples use fixed SNR-bin probabilities `0.40/0.30/0.20/0.10` for
 `0–5/5–10/10–20/20–30 dB`; 10% of noisy views are exactly 0 dB. The LR uses
 the tc12 25K schedule: linear warm-up over 500 steps to `3e-4`, hold through
-60K, linear decay to `1.5e-4` at 140K, then cosine decay to `1.5e-5` at 175K.
+60K, linear decay to `1.5e-4` at 140K, then cosine decay to `1.5e-5` at 225K.
 
 The single-GPU logical batch is 80 tracks × 2 segments: a physical microbatch of
 ten tracks × two segments with eight gradient-accumulation steps. Each physical
@@ -139,9 +139,10 @@ RIR uses full-wet causal convolution with two seconds of preceding audio;
 the prefix is discarded after convolution so reverberant tails from preceding
 music enter the query. Room IR train/test assets are source- and content-disjoint.
 
-The 10K catalogue is the exposure reference: 10K, 25K, and 100K runs use 70K,
-175K, and 700K optimizer steps respectively, with every curriculum boundary
-scaled by the same factor. Checkpoints remain every 500 steps and monitoring
+The 10K catalogue is the exposure reference: 10K and 100K runs use 70K and
+700K optimizer steps. The 25K profile deliberately uses 225K instead of its
+175K exposure-scaled length, extending only the final decay phase because the
+earlier probes had not converged. Checkpoints remain every 500 steps and monitoring
 remains every 2,500 steps. For direct comparison with tc6, the same seeded 100-track cohort is
 evaluated using one balanced canonical, integer-shifted, and held-out
 half-offset crop per track. All three groups are evaluated clean and at

@@ -19,7 +19,7 @@ from para_audio_id.audio_lm.training import learning_rate_multiplier
     ("size", "manifest", "total", "clean", "ramp"),
     [
         (10_000, "data/training_tracks_10k.json", 70_000, 20_000, 25_000),
-        (25_000, "data/training_tracks_25k.json", 175_000, 50_000, 62_500),
+        (25_000, "data/training_tracks_25k.json", 225_000, 50_000, 62_500),
         (100_000, "data/training_tracks_100k.json", 700_000, 200_000, 250_000),
     ],
 )
@@ -182,7 +182,7 @@ def test_25k_noise_rir_profile_exactly_matches_tc12_boundaries():
         45_000: (0.25, 0.325, 0.30, 0.125),
         60_000: (0.10, 0.35, 0.30, 0.25),
         140_000: (0.10, 0.35, 0.30, 0.25),
-        175_000: (0.10, 0.35, 0.30, 0.25),
+        225_000: (0.10, 0.35, 0.30, 0.25),
     }
     for step, probabilities in expected.items():
         resolved = resolved_augmentation_schedule(step, profile)
@@ -209,7 +209,7 @@ def test_tc12_rir_severity_and_learning_rate_schedule():
         60_000, schedule
     ).rir_severity_quantile == pytest.approx(1.0)
     train = {
-        "max_steps": 175_000,
+        "max_steps": 225_000,
         "warmup_steps": 500,
         "learning_rate_schedule": profile["learning_rate_schedule"],
     }
@@ -220,7 +220,8 @@ def test_tc12_rir_severity_and_learning_rate_schedule():
         60_000: 1.0,
         100_000: 0.75,
         140_000: 0.5,
-        175_000: 0.05,
+        182_500: 0.275,
+        225_000: 0.05,
     }
     for step, multiplier in expected.items():
         assert learning_rate_multiplier(step, train) == pytest.approx(multiplier)

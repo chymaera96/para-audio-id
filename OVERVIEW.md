@@ -296,7 +296,7 @@ all earlier protocols.
 anchor. The secondary view is clean through 10K; noise-only and RIR-only each
 ramp to 0.30 over 10K–30K; then clean falls to 0.10, noise rises to 0.35, and
 noise-plus-RIR rises to 0.25 by 60K. That distribution remains fixed through
-175K. Consistency ramps from zero to 0.1 over 10K–30K.
+225K. Consistency ramps from zero to 0.1 over 10K–30K.
 
 Training IRs are ordered by post-peak 99%-energy decay duration. The eligible
 pool expands from the mildest third at 10K to the mildest two thirds at 30K and
@@ -304,9 +304,9 @@ the complete range, including the longest-decay responses, at 60K. All RIR
 convolution remains full-wet with two seconds of preceding context.
 
 The learning rate warms from zero to `3e-4` over 500 steps, holds through 60K,
-falls linearly to `1.5e-4` at 140K, and follows a cosine curve to `1.5e-5` at
-175K. These boundaries scale with catalogue size in the same way as total
-training exposure; the stated values are the 25K tc12 schedule.
+falls linearly to `1.5e-4` at 140K, and follows a longer cosine curve to
+`1.5e-5` at 225K. The additional 50K updates extend only this final decay
+phase; all earlier curriculum and learning-rate boundaries remain unchanged.
 
 ## Unified training profiles
 

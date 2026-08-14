@@ -12,6 +12,7 @@ from para_audio_id.audio_lm.profiles import (
     CAPACITY_TRAINING_PROTOCOL,
     canonical_capacity_profile,
     canonical_training_profile,
+    capacity_parallelism,
     cohort_manifest,
     historical_checkpoint_profile,
     resolve_training_config,
@@ -191,6 +192,30 @@ def test_capacity_profiles_resolve_560_exposures(size, steps):
     assert profile["training_tracks_manifest"] == (
         f"data/training_tracks_{size // 1000}k.json"
     )
+    assert profile["parallelism"] == {
+        "world_size": 1,
+        "tracks_per_device_microbatch": 40,
+        "accumulate_grad_batches": 2,
+        "global_tracks_per_optimizer_step": 80,
+    }
+
+
+@pytest.mark.parametrize(
+    ("devices", "tracks", "accumulation"),
+    [(1, 40, 2), (2, 40, 1), (4, 20, 1), (8, 10, 1)],
+)
+def test_capacity_parallelism_preserves_global_batch(devices, tracks, accumulation):
+    assert capacity_parallelism(devices) == {
+        "world_size": devices,
+        "tracks_per_device_microbatch": tracks,
+        "accumulate_grad_batches": accumulation,
+        "global_tracks_per_optimizer_step": 80,
+    }
+
+
+def test_capacity_parallelism_rejects_device_count_that_cannot_divide_batch():
+    with pytest.raises(ValueError, match="positive divisor"):
+        capacity_parallelism(3)
 
 
 def test_capacity_decoder_profiles_and_defaults():
@@ -212,8 +237,14 @@ def test_capacity_decoder_profiles_and_defaults():
     old_partition = deepcopy(base)
     old_partition["train"]["tracks_per_microbatch"] = 10
     old_partition["trainer"]["accumulate_grad_batches"] = 8
-    with pytest.raises(ValueError, match="40 tracks per microbatch"):
-        resolve_capacity_config(old_partition)
+    normalized = resolve_capacity_config(old_partition)
+    assert normalized["train"]["tracks_per_microbatch"] == 40
+    assert normalized["trainer"]["accumulate_grad_batches"] == 2
+
+    distributed = resolve_capacity_config(base, devices=2)
+    assert distributed["train"]["tracks_per_microbatch"] == 40
+    assert distributed["trainer"]["accumulate_grad_batches"] == 1
+    assert distributed["trainer"]["devices"] == 2
 
 
 def test_capacity_database_size_cli_override_resolves_manifest_and_steps():
@@ -284,3 +315,26 @@ def test_capacity_resume_inherits_decoder_and_rejects_mismatch(tmp_path):
     wrong_database["data"]["database_size"] = 25_000
     with pytest.raises(ValueError, match="database size"):
         resolve_capacity_config(wrong_database, checkpoint=path)
+
+
+def test_legacy_single_gpu_capacity_profile_is_normalized_for_resume(tmp_path):
+    profile = canonical_capacity_profile(
+        database_size=10_000,
+        decoder="small",
+        target_exposures=560,
+        tracks_per_optimizer_step=80,
+    )
+    legacy = deepcopy(profile)
+    legacy["version"] = 1
+    legacy.pop("parallelism")
+    path = tmp_path / "legacy-capacity.ckpt"
+    torch.save({"resolved_training_profile": legacy}, path)
+    base = {
+        "data": {"database_size": 10_000},
+        "model": {},
+        "train": {"target_exposures": 560, "tracks_per_microbatch": 40},
+        "trainer": {"accumulate_grad_batches": 2},
+    }
+    resumed = resolve_capacity_config(base, checkpoint=path)
+    assert resumed["resolved_training_profile"] == profile
+    assert resumed["trainer"]["devices"] == 1

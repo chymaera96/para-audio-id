@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from functools import partial
+import gc
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import random
 import time
@@ -88,8 +90,6 @@ TC9_TRACKS_PER_MICROBATCH = 10
 TC9_SEGMENTS_PER_TRACK = 2
 TC9_DOCUMENTS_PER_MICROBATCH = 20
 TC9_AUDIO_TARGETS_PER_MICROBATCH = 2_000
-CAPACITY_TRACKS_PER_MICROBATCH = 40
-CAPACITY_ACCUMULATE_GRAD_BATCHES = 2
 TRAIN_METRICS = {
     "clean_audio_loss",
     "digit_loss",
@@ -272,12 +272,16 @@ def validate_tc9_batch_configuration(cfg: dict, query_spec: dict) -> dict:
         cfg.get("resolved_training_profile", {}).get("experiment")
         == "clean_capacity"
     )
-    expected_tracks = (
-        CAPACITY_TRACKS_PER_MICROBATCH if capacity else TC9_TRACKS_PER_MICROBATCH
+    parallelism = cfg.get("resolved_training_profile", {}).get("parallelism", {})
+    expected_tracks = int(
+        parallelism.get("tracks_per_device_microbatch", TC9_TRACKS_PER_MICROBATCH)
+        if capacity
+        else TC9_TRACKS_PER_MICROBATCH
     )
-    expected_accumulation = (
-        CAPACITY_ACCUMULATE_GRAD_BATCHES if capacity else 8
+    expected_accumulation = int(
+        parallelism.get("accumulate_grad_batches", 8) if capacity else 8
     )
+    world_size = int(parallelism.get("world_size", 1) if capacity else 1)
     if tracks != expected_tracks:
         raise ValueError(
             f"{'capacity diagnostics' if capacity else 'tc9'} require "
@@ -312,7 +316,7 @@ def validate_tc9_batch_configuration(cfg: dict, query_spec: dict) -> dict:
             f"{expected_audio_targets} audio targets per "
             f"microbatch, got {audio_targets}"
         )
-    return {
+    batch_spec = {
         "tracks_per_microbatch": tracks,
         "documents_per_track": segments,
         "documents_per_microbatch": documents,
@@ -320,11 +324,17 @@ def validate_tc9_batch_configuration(cfg: dict, query_spec: dict) -> dict:
         "causal_tokens_per_microbatch": causal_tokens,
         "waveform_seconds_per_microbatch": waveform_seconds,
         "gradient_accumulation_steps": accumulation,
-        "tracks_per_optimizer_step": tracks * accumulation,
-        "documents_per_optimizer_step": documents * accumulation,
-        "audio_targets_per_optimizer_step": audio_targets * accumulation,
-        "waveform_seconds_per_optimizer_step": waveform_seconds * accumulation,
+        "tracks_per_optimizer_step": tracks * accumulation * world_size,
+        "documents_per_optimizer_step": documents * accumulation * world_size,
+        "audio_targets_per_optimizer_step": audio_targets * accumulation * world_size,
+        "waveform_seconds_per_optimizer_step": (
+            waveform_seconds * accumulation * world_size
+        ),
     }
+    if capacity:
+        batch_spec["world_size"] = world_size
+        batch_spec["tracks_per_device_optimizer_step"] = tracks * accumulation
+    return batch_spec
 
 
 class ResumableDataLoader(DataLoader):
@@ -813,6 +823,8 @@ class AudioLMDataModule(pl.LightningDataModule):
         }
 
     def train_dataloader(self) -> DataLoader:
+        world_size = int(self.trainer.world_size)
+        rank = int(self.trainer.global_rank)
         sampler = OnlineTrackBatchSampler(
             self.dataset,
             tracks_per_microbatch=int(
@@ -823,6 +835,8 @@ class AudioLMDataModule(pl.LightningDataModule):
             ),
             seed=int(self.cfg["train"]["seed"]),
             catalogue_pass=int(self.trainer.current_epoch),
+            world_size=world_size,
+            rank=rank,
         )
         self.batch_sampler = sampler
         self.train_loader = ResumableDataLoader(
@@ -849,6 +863,8 @@ class AudioLMDataModule(pl.LightningDataModule):
                 replacement_retries=int(
                     self.cfg["data"].get("replacement_retries", 32)
                 ),
+                world_size=world_size,
+                rank=rank,
             ),
             **self._common_loader_args(),
         )
@@ -1534,9 +1550,20 @@ class AudioLMModule(pl.LightningModule):
         self.trainer.datamodule.set_catalogue_pass(int(self.current_epoch))
 
     def on_fit_start(self) -> None:
-        if int(self.trainer.world_size) != 1:
+        world_size = int(self.trainer.world_size)
+        if world_size != 1 and not self.is_capacity:
             raise ValueError(
                 f"{self.training_protocol} currently requires one GPU"
+            )
+        expected_world_size = int(
+            self.cfg["resolved_training_profile"]
+            .get("parallelism", {})
+            .get("world_size", 1)
+        )
+        if self.is_capacity and world_size != expected_world_size:
+            raise ValueError(
+                f"Capacity profile expects {expected_world_size} processes, got "
+                f"{world_size}"
             )
         self.started_at = time.perf_counter()
         self.session_tokens_start = self.tokens_consumed
@@ -2599,7 +2626,21 @@ class AudioLMModule(pl.LightningModule):
             raise ValueError("Resume checkpoint room-IR assets do not match")
         if checkpoint.get("query_spec") != self.query_spec:
             raise ValueError("Resume checkpoint two-second query specification differs")
-        if checkpoint.get("batch_spec") != self.batch_spec:
+        saved_batch_spec = checkpoint.get("batch_spec")
+        if (
+            self.is_capacity
+            and isinstance(saved_batch_spec, dict)
+            and "world_size" not in saved_batch_spec
+            and int(self.batch_spec.get("world_size", 1)) == 1
+        ):
+            saved_batch_spec = {
+                **saved_batch_spec,
+                "world_size": 1,
+                "tracks_per_device_optimizer_step": int(
+                    saved_batch_spec["tracks_per_optimizer_step"]
+                ),
+            }
+        if saved_batch_spec != self.batch_spec:
             raise ValueError("Resume checkpoint tc9 batch specification differs")
         if checkpoint.get("resolved_training_profile") is not None and (
             checkpoint.get("training_corpus_fingerprint")
@@ -2696,6 +2737,27 @@ def build_logger(cfg: dict, directory: Path):
     )
 
 
+def _environment_global_rank() -> int:
+    if "RANK" in os.environ:
+        return int(os.environ["RANK"])
+    if "SLURM_PROCID" in os.environ:
+        return int(os.environ["SLURM_PROCID"])
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    local_world_size = int(os.environ.get("LOCAL_WORLD_SIZE", "1"))
+    node_rank = int(os.environ.get("NODE_RANK", "0"))
+    return node_rank * local_world_size + local_rank
+
+
+def _tokenizer_startup_device(cfg: dict) -> str:
+    configured = str(cfg["tokenizer"].get("device", "cuda"))
+    if not configured.startswith("cuda") or int(cfg["trainer"]["devices"]) == 1:
+        return configured
+    local_rank = int(
+        os.environ.get("LOCAL_RANK", os.environ.get("SLURM_LOCALID", "0"))
+    )
+    return f"cuda:{local_rank}"
+
+
 def train(cfg: dict, *, checkpoint: str | Path | None = None) -> None:
     if "resolved_training_profile" not in cfg:
         cfg = resolve_training_config(cfg, checkpoint=checkpoint)
@@ -2715,7 +2777,9 @@ def train(cfg: dict, *, checkpoint: str | Path | None = None) -> None:
         torch.backends.cudnn.benchmark = False
     directory = output_dir(cfg)
     directory.mkdir(parents=True, exist_ok=True)
-    save_config(cfg, directory / "config.yaml")
+    environment_global_zero = _environment_global_rank() == 0
+    if environment_global_zero:
+        save_config(cfg, directory / "config.yaml")
     # Validate the catalogue/cohort contract before loading the large MuQ
     # tokenizer or constructing the decoder.
     catalogue = load_catalogue(cfg["data"]["catalogue"])
@@ -2730,7 +2794,7 @@ def train(cfg: dict, *, checkpoint: str | Path | None = None) -> None:
         revision=tokenizer_cfg.get("revision", "main"),
         selected_codebooks=int(tokenizer_cfg["selected_codebooks"]),
         sample_rate=int(tokenizer_cfg["sample_rate"]),
-        device=tokenizer_cfg.get("device", "cuda"),
+        device=_tokenizer_startup_device(cfg),
         lightweight=True,
     )
     query_spec = validate_tc9_query_configuration(
@@ -2753,28 +2817,31 @@ def train(cfg: dict, *, checkpoint: str | Path | None = None) -> None:
         cfg, online_tokenizer.spec, online_tokenizer.vocabulary
     )
     datamodule.setup("fit")
-    (directory / "training_tracks.json").write_text(
-        json.dumps(datamodule.dataset.track_ids, indent=2) + "\n"
-    )
-    (directory / "monitor_recipes.json").write_text(
-        json.dumps(datamodule.monitor_recipes, indent=2, sort_keys=True) + "\n"
-    )
-    if datamodule.noise_assets is not None:
-        (directory / "background_noise_manifest.json").write_text(
-            json.dumps(datamodule.noise_assets.manifest(), indent=2, sort_keys=True)
-            + "\n"
+    if environment_global_zero:
+        (directory / "training_tracks.json").write_text(
+            json.dumps(datamodule.dataset.track_ids, indent=2) + "\n"
         )
-    if datamodule.rir_assets is not None:
-        (directory / "room_ir_manifest.json").write_text(
-            json.dumps(datamodule.rir_assets.manifest(), indent=2, sort_keys=True)
-            + "\n"
+        (directory / "monitor_recipes.json").write_text(
+            json.dumps(datamodule.monitor_recipes, indent=2, sort_keys=True) + "\n"
         )
-    (directory / "query_spec.json").write_text(
-        json.dumps(query_spec, indent=2, sort_keys=True) + "\n"
-    )
-    (directory / "batch_spec.json").write_text(
-        json.dumps(batch_spec, indent=2, sort_keys=True) + "\n"
-    )
+        if datamodule.noise_assets is not None:
+            (directory / "background_noise_manifest.json").write_text(
+                json.dumps(
+                    datamodule.noise_assets.manifest(), indent=2, sort_keys=True
+                )
+                + "\n"
+            )
+        if datamodule.rir_assets is not None:
+            (directory / "room_ir_manifest.json").write_text(
+                json.dumps(datamodule.rir_assets.manifest(), indent=2, sort_keys=True)
+                + "\n"
+            )
+        (directory / "query_spec.json").write_text(
+            json.dumps(query_spec, indent=2, sort_keys=True) + "\n"
+        )
+        (directory / "batch_spec.json").write_text(
+            json.dumps(batch_spec, indent=2, sort_keys=True) + "\n"
+        )
     module = AudioLMModule(
         cfg,
         datamodule.vocabulary,
@@ -2798,7 +2865,16 @@ def train(cfg: dict, *, checkpoint: str | Path | None = None) -> None:
         query_spec,
         batch_spec,
     )
-    module.online_tokenizer = online_tokenizer
+    if int(cfg["trainer"]["devices"]) == 1:
+        module.online_tokenizer = online_tokenizer
+    else:
+        del online_tokenizer
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    # Lightning/WandB apply their own rank-zero guards. Constructing the same
+    # logger configuration on every process keeps the Trainer topology
+    # identical while only rank zero creates or writes the run.
     logger = build_logger(cfg, directory)
     callbacks: list[pl.Callback] = [
         ModelCheckpoint(
@@ -2817,6 +2893,8 @@ def train(cfg: dict, *, checkpoint: str | Path | None = None) -> None:
         tracks_per_microbatch=int(cfg["train"]["tracks_per_microbatch"]),
         accumulation_steps=accumulation,
         seed=seed,
+        world_size=int(cfg["trainer"]["devices"]),
+        rank=0,
     )
     optimizer_steps_per_pass = len(display_sampler) // accumulation
     display_max_epochs = math.ceil(

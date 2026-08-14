@@ -287,6 +287,31 @@ two clean documents with `accumulate_grad_batches: 2`. This preserves
 the original effective batch of 80 tracks/160 documents per update while using
 the GPU more efficiently than the former `10 × accumulation 8` partition.
 
+For multiple GPUs, `--devices` automatically repartitions that same global
+80-track optimizer batch; it does not increase the scientific batch size or
+change the resolved training length. The common layouts are:
+
+| GPUs | Tracks per GPU | Accumulation | Global tracks/update |
+|---:|---:|---:|---:|
+| 1 | 40 | 2 | 80 |
+| 2 | 40 | 1 | 80 |
+| 4 | 20 | 1 | 80 |
+| 8 | 10 | 1 | 80 |
+
+For example, a two-GPU 100K-medium run is:
+
+```bash
+python diagnose.py configs/capacity.yaml \
+  --database-size 100000 \
+  --decoder medium \
+  --run-id capacity-100k-medium \
+  --devices 2 \
+  --wandb-online
+```
+
+The device count is checkpointed. Exact resume therefore uses the same
+`--devices` value as the original run.
+
 Existing valid manifests are reused byte-for-byte; incompatible manifests fail
 rather than being overwritten. Capacity W&B logging retains the established
 clean training and clean probe names and omits undefined corruption metrics.

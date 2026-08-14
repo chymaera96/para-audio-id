@@ -107,6 +107,57 @@ def test_online_track_sampler_replays_exact_batches():
     assert len(first) % 2 == 0
 
 
+def test_online_track_sampler_shards_identities_across_ranks():
+    dataset = OnlineTrackDataset(records(80))
+    rank_zero = OnlineTrackBatchSampler(
+        dataset,
+        tracks_per_microbatch=40,
+        accumulation_steps=1,
+        seed=5,
+        world_size=2,
+        rank=0,
+    )
+    rank_one = OnlineTrackBatchSampler(
+        dataset,
+        tracks_per_microbatch=40,
+        accumulation_steps=1,
+        seed=5,
+        world_size=2,
+        rank=1,
+    )
+    zero_batch = next(iter(rank_zero))
+    one_batch = next(iter(rank_one))
+    zero_indices = {row[0] for row in zero_batch}
+    one_indices = {row[0] for row in one_batch}
+    assert zero_indices == set(range(0, 80, 2))
+    assert one_indices == set(range(1, 80, 2))
+    assert zero_indices.isdisjoint(one_indices)
+    assert {row[1] for row in zero_batch} == {0}
+    assert {row[1] for row in one_batch} == {0}
+    assert {row[3] for row in zero_batch} == set(range(40))
+    assert {row[3] for row in one_batch} == set(range(40, 80))
+
+
+def test_distributed_online_track_sampler_resume_alignment_matches_ranks():
+    dataset = OnlineTrackDataset(records(160))
+    samplers = [
+        OnlineTrackBatchSampler(
+            dataset,
+            tracks_per_microbatch=40,
+            accumulation_steps=1,
+            seed=9,
+            catalogue_pass=3,
+            world_size=2,
+            rank=rank,
+        )
+        for rank in range(2)
+    ]
+    for sampler in samplers:
+        sampler.align_resume_position(batches_yielded=1, global_step=7)
+    batches = [next(iter(sampler)) for sampler in samplers]
+    assert [{row[1] for row in batch} for batch in batches] == [{6}, {6}]
+
+
 def test_online_track_sampler_rebases_after_completed_epoch_resume():
     dataset = OnlineTrackDataset(records(10))
     sampler = OnlineTrackBatchSampler(

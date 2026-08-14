@@ -19,8 +19,8 @@ SCHEDULE_NAMES = ("noise", "noise-rir")
 NEW_TRAINING_PROTOCOL = "online_random_crop_consistency_profile_v2"
 CAPACITY_TRAINING_PROTOCOL = "online_random_crop_clean_capacity_v1"
 LOSS_PROTOCOL = "tc5_family_weighted_consistency_v2"
-CAPACITY_TRACKS_PER_MICROBATCH = 40
-CAPACITY_ACCUMULATE_GRAD_BATCHES = 2
+CAPACITY_GLOBAL_TRACKS_PER_STEP = 80
+CAPACITY_MAX_TRACKS_PER_DEVICE = 40
 
 
 def cohort_manifest(database_size: int) -> str:
@@ -140,6 +140,9 @@ def canonical_capacity_profile(
     decoder: str,
     target_exposures: int,
     tracks_per_optimizer_step: int,
+    world_size: int = 1,
+    tracks_per_device_microbatch: int | None = None,
+    accumulate_grad_batches: int | None = None,
 ) -> dict[str, Any]:
     if target_exposures < 1 or tracks_per_optimizer_step < 1:
         raise ValueError("Capacity exposures and batch size must be positive")
@@ -148,12 +151,36 @@ def canonical_capacity_profile(
         raise ValueError(
             "Capacity exposure target must resolve to a whole optimizer-step count"
         )
+    if tracks_per_device_microbatch is None or accumulate_grad_batches is None:
+        if tracks_per_optimizer_step != CAPACITY_GLOBAL_TRACKS_PER_STEP:
+            raise ValueError(
+                "Explicit capacity parallelism is required for a non-standard "
+                "global batch"
+            )
+        derived = capacity_parallelism(world_size)
+        tracks_per_device_microbatch = int(
+            derived["tracks_per_device_microbatch"]
+        )
+        accumulate_grad_batches = int(derived["accumulate_grad_batches"])
+    if (
+        tracks_per_device_microbatch
+        * accumulate_grad_batches
+        * world_size
+        != tracks_per_optimizer_step
+    ):
+        raise ValueError("Capacity parallelism does not match the global batch")
     return {
-        "version": 1,
+        "version": 2,
         "experiment": "clean_capacity",
         "database_size": database_size,
         "training_tracks_manifest": cohort_manifest(database_size),
         "decoder": decoder_profile(decoder),
+        "parallelism": {
+            "world_size": world_size,
+            "tracks_per_device_microbatch": tracks_per_device_microbatch,
+            "accumulate_grad_batches": accumulate_grad_batches,
+            "global_tracks_per_optimizer_step": tracks_per_optimizer_step,
+        },
         "schedule": {
             "name": "clean",
             "protocol": CAPACITY_TRAINING_PROTOCOL,
@@ -166,9 +193,44 @@ def canonical_capacity_profile(
     }
 
 
+def capacity_parallelism(world_size: int) -> dict[str, int]:
+    if world_size < 1 or CAPACITY_GLOBAL_TRACKS_PER_STEP % world_size:
+        raise ValueError(
+            "Capacity devices must be a positive divisor of the 80-track "
+            "global optimizer batch"
+        )
+    tracks_per_device = min(
+        CAPACITY_MAX_TRACKS_PER_DEVICE,
+        CAPACITY_GLOBAL_TRACKS_PER_STEP // world_size,
+    )
+    denominator = tracks_per_device * world_size
+    if CAPACITY_GLOBAL_TRACKS_PER_STEP % denominator:
+        raise ValueError("Capacity parallelism cannot preserve the global batch")
+    return {
+        "world_size": world_size,
+        "tracks_per_device_microbatch": tracks_per_device,
+        "accumulate_grad_batches": CAPACITY_GLOBAL_TRACKS_PER_STEP // denominator,
+        "global_tracks_per_optimizer_step": CAPACITY_GLOBAL_TRACKS_PER_STEP,
+    }
+
+
 def historical_checkpoint_profile(checkpoint: dict) -> dict[str, Any]:
     stored = checkpoint.get("resolved_training_profile")
     if stored is not None:
+        if (
+            stored.get("experiment") == "clean_capacity"
+            and "parallelism" not in stored
+        ):
+            schedule = stored["schedule"]
+            return canonical_capacity_profile(
+                database_size=int(stored["database_size"]),
+                decoder=stored["decoder"]["name"],
+                target_exposures=int(schedule["target_exposures"]),
+                tracks_per_optimizer_step=int(
+                    schedule["tracks_per_optimizer_step"]
+                ),
+                world_size=1,
+            )
         return stored
     track_count = len(checkpoint.get("training_track_ids", []))
     model = checkpoint.get("model_config") or checkpoint.get(
@@ -260,6 +322,7 @@ def resolve_capacity_config(
     config: dict[str, Any],
     *,
     decoder: str | None = None,
+    devices: int | None = None,
     checkpoint: str | Path | None = None,
 ) -> dict[str, Any]:
     cfg = deepcopy(config)
@@ -268,17 +331,6 @@ def resolve_capacity_config(
     trainer = cfg.setdefault("trainer", {})
     configured_size = int(data.get("database_size", 0))
     target_exposures = int(train.get("target_exposures", 560))
-    tracks_per_microbatch = int(train["tracks_per_microbatch"])
-    accumulation = int(trainer["accumulate_grad_batches"])
-    if (
-        tracks_per_microbatch != CAPACITY_TRACKS_PER_MICROBATCH
-        or accumulation != CAPACITY_ACCUMULATE_GRAD_BATCHES
-    ):
-        raise ValueError(
-            "Capacity diagnostics require 40 tracks per microbatch and "
-            "accumulate_grad_batches=2"
-        )
-    tracks_per_step = tracks_per_microbatch * accumulation
     resumed = checkpoint_training_profile(checkpoint) if checkpoint is not None else None
     if resumed is not None:
         if resumed.get("experiment") != "clean_capacity":
@@ -286,13 +338,28 @@ def resolve_capacity_config(
         if configured_size != int(resumed["database_size"]):
             raise ValueError("Configured database size does not match capacity checkpoint")
         resolved_decoder = resumed["decoder"]["name"] if decoder is None else decoder
+        saved_parallelism = resumed.get("parallelism")
+        if saved_parallelism is None:
+            saved_parallelism = capacity_parallelism(1)
+        saved_world_size = int(saved_parallelism["world_size"])
+        if devices is not None and devices != saved_world_size:
+            raise ValueError("Explicit device count does not match capacity checkpoint")
+        parallelism = dict(saved_parallelism)
     else:
         resolved_decoder = decoder or "small"
+        configured_devices = int(devices if devices is not None else trainer.get("devices", 1))
+        parallelism = capacity_parallelism(configured_devices)
+    tracks_per_step = int(parallelism["global_tracks_per_optimizer_step"])
     profile = canonical_capacity_profile(
         database_size=configured_size,
         decoder=resolved_decoder,
         target_exposures=target_exposures,
         tracks_per_optimizer_step=tracks_per_step,
+        world_size=int(parallelism["world_size"]),
+        tracks_per_device_microbatch=int(
+            parallelism["tracks_per_device_microbatch"]
+        ),
+        accumulate_grad_batches=int(parallelism["accumulate_grad_batches"]),
     )
     if resumed is not None and profile != resumed:
         raise ValueError("Explicit capacity profile does not match resume checkpoint")
@@ -301,6 +368,14 @@ def resolve_capacity_config(
     model = cfg.setdefault("model", {})
     model.update(profile["decoder"])
     model.pop("name", None)
+    train["tracks_per_microbatch"] = int(
+        parallelism["tracks_per_device_microbatch"]
+    )
+    trainer["accumulate_grad_batches"] = int(
+        parallelism["accumulate_grad_batches"]
+    )
+    trainer["devices"] = int(parallelism["world_size"])
+    trainer["strategy"] = "auto"
     train["max_steps"] = profile["schedule"]["max_steps"]
     train["schedule"] = {
         key: value for key, value in profile["schedule"].items() if key != "max_steps"

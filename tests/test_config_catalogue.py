@@ -107,9 +107,42 @@ def test_tc9_startup_query_invariants_are_enforced():
     assert batch_spec["audio_targets_per_optimizer_step"] == 16_000
     assert batch_spec["waveform_seconds_per_optimizer_step"] == 320.0
 
+
+def test_capacity_distributed_batch_preserves_global_optimizer_batch():
+    cfg = resolve_capacity_config(
+        yaml.safe_load(
+            (Path(__file__).parents[1] / "configs" / "capacity.yaml").read_text()
+        ),
+        devices=2,
+    )
+    tokenizer_spec = TokenizerSpec(
+        architecture="muq_mel_rvq",
+        model_name="OpenMuQ/MuQ-large-msd-iter",
+        revision="test",
+        package_version="test",
+        sample_rate=24_000,
+        frame_rate=25.0,
+        waveform_normalization="none_before_muq_internal_preprocessing",
+        num_available_codebooks=8,
+        selected_codebooks=2,
+        codebook_size=1024,
+        serialization="time_major_codebook_interleaved",
+        preprocessing_version=1,
+    )
+    query_spec = validate_tc9_query_configuration(
+        cfg, tokenizer_spec, AudioLMVocabulary()
+    )
+    batch_spec = validate_tc9_batch_configuration(cfg, query_spec)
+    assert batch_spec["tracks_per_microbatch"] == 40
+    assert batch_spec["gradient_accumulation_steps"] == 1
+    assert batch_spec["world_size"] == 2
+    assert batch_spec["tracks_per_device_optimizer_step"] == 40
+    assert batch_spec["tracks_per_optimizer_step"] == 80
+    assert batch_spec["documents_per_optimizer_step"] == 160
+
     wrong_batch = deepcopy(cfg)
     wrong_batch["train"]["tracks_per_microbatch"] = 4
-    with pytest.raises(ValueError, match="10 tracks per microbatch"):
+    with pytest.raises(ValueError, match="40 tracks per microbatch"):
         validate_tc9_batch_configuration(wrong_batch, query_spec)
 
     wrong_duration = deepcopy(cfg)

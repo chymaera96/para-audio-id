@@ -306,10 +306,12 @@ runs retain the two-second random-crop formulation and weighted identifier loss
 but remove corruption, consistency, and cosine-decay confounds. The LR reaches
 `3e-4` after 200 warm-up steps and stays fixed.
 
-The physical microbatch is fixed at 40 identities (80 clean documents) with
-two-step gradient accumulation. This retains exactly 80 identity selections per
-optimizer update and therefore leaves every exposure and optimizer-step count
-unchanged from the earlier `10 tracks × accumulation 8` implementation.
+The global optimizer batch is fixed at 80 identity selections. On one GPU this
+uses 40 identities (80 clean documents) with two-step accumulation; on two GPUs
+it uses 40 identities per rank with no accumulation; four and eight GPUs use 20
+and 10 identities per rank respectively. The distributed sampler gives each
+rank a disjoint identity shard, so every layout preserves the exposure and
+optimizer-step counts of the earlier `10 tracks × accumulation 8` setup.
 
 The experiment grid combines 10K/25K/50K/100K catalogues with tiny/small/medium
 decoders. Every run receives 560 average identity exposures, resolving to

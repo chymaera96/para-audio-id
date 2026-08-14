@@ -76,4 +76,6 @@ def with_capacity_overrides(
         cfg["trainer"]["strategy"] = "auto"
     from .audio_lm.profiles import resolve_capacity_config
 
-    return resolve_capacity_config(cfg, decoder=decoder, checkpoint=checkpoint)
+    return resolve_capacity_config(
+        cfg, decoder=decoder, devices=devices, checkpoint=checkpoint
+    )

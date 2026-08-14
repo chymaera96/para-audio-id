@@ -19,7 +19,7 @@ from para_audio_id.audio_lm.training import learning_rate_multiplier
     ("size", "manifest", "total", "clean", "ramp"),
     [
         (10_000, "data/training_tracks_10k.json", 70_000, 20_000, 25_000),
-        (25_000, "data/training_tracks_25k.json", 225_000, 50_000, 62_500),
+        (25_000, "data/training_tracks_25k.json", 175_000, 50_000, 62_500),
         (100_000, "data/training_tracks_100k.json", 700_000, 200_000, 250_000),
     ],
 )
@@ -196,8 +196,13 @@ def test_25k_noise_rir_profile_exactly_matches_tc12_boundaries():
 
 def test_tc12_rir_severity_and_learning_rate_schedule():
     profile = canonical_training_profile(
-        database_size=25_000, decoder="small", schedule="noise-rir"
+        database_size=25_000,
+        decoder="small",
+        schedule="noise-rir",
+        selected_codebooks=2,
     )
+    assert profile["variant"] == "tc12-cb2"
+    assert profile["schedule"]["max_steps"] == 225_000
     schedule = profile["schedule"]
     assert resolved_augmentation_schedule(
         10_000, schedule
@@ -225,6 +230,17 @@ def test_tc12_rir_severity_and_learning_rate_schedule():
     }
     for step, multiplier in expected.items():
         assert learning_rate_multiplier(step, train) == pytest.approx(multiplier)
+
+
+def test_tc12_one_codebook_keeps_original_175k_length():
+    profile = canonical_training_profile(
+        database_size=25_000,
+        decoder="small",
+        schedule="noise-rir",
+        selected_codebooks=1,
+    )
+    assert "variant" not in profile
+    assert profile["schedule"]["max_steps"] == 175_000
 
 
 def test_relative_cosine_margin_and_denominator_stabilization():

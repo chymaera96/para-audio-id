@@ -82,9 +82,7 @@ def _scaled(value: int, database_size: int) -> int:
 def schedule_profile(name: str, database_size: int) -> dict[str, Any]:
     if name not in SCHEDULE_NAMES:
         raise ValueError(f"schedule must be one of {SCHEDULE_NAMES}, got {name!r}")
-    # Preserve all earlier 25K curriculum boundaries, but give its final
-    # learning-rate decay phase another 50K optimizer updates.
-    total = 225_000 if database_size == 25_000 else _scaled(70_000, database_size)
+    total = _scaled(70_000, database_size)
     common = {
         "name": name,
         "protocol": NEW_TRAINING_PROTOCOL,
@@ -118,7 +116,11 @@ def decoder_profile(name: str) -> dict[str, Any]:
 
 
 def canonical_training_profile(
-    *, database_size: int, decoder: str, schedule: str
+    *,
+    database_size: int,
+    decoder: str,
+    schedule: str,
+    selected_codebooks: int = 1,
 ) -> dict[str, Any]:
     profile = {
         "version": 2,
@@ -127,6 +129,13 @@ def canonical_training_profile(
         "decoder": decoder_profile(decoder),
         "schedule": schedule_profile(schedule, database_size),
     }
+    if (
+        database_size == 25_000
+        and schedule == "noise-rir"
+        and selected_codebooks == 2
+    ):
+        profile["variant"] = "tc12-cb2"
+        profile["schedule"]["max_steps"] = 225_000
     if schedule == "noise-rir":
         profile["learning_rate_schedule"] = {
             "policy": TC12_LR_POLICY,
@@ -250,10 +259,19 @@ def resolve_training_config(
             raise ValueError("Explicit training profile does not match resume checkpoint")
         profile = deepcopy(resumed)
     else:
+        configured_codebooks = int(
+            cfg.setdefault("tokenizer", {}).get("selected_codebooks", 1)
+        )
+        profile_codebooks = (
+            selected_codebooks
+            if selected_codebooks is not None
+            else configured_codebooks
+        )
         profile = canonical_training_profile(
             database_size=database_size,
             decoder=resolved_decoder,
             schedule=resolved_schedule,
+            selected_codebooks=profile_codebooks,
         )
 
     tokenizer = cfg.setdefault("tokenizer", {})

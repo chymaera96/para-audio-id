@@ -16,7 +16,10 @@ should be taken from the corresponding W&B run or evaluation JSON.
 | `tc7` | Same 10K tracks | Continuous random five-second crops | 20 | 70K | Replaced fixed training grids with online crops |
 | `tc8` | Same 10K tracks | Continuous random two-second crops | 8 | 70K | Tests shorter queries at the same audio-to-ID loss ratio |
 | `tc9` | Same 10K tracks | Two-second crops, tc7-matched acoustic budget | 8 | 70K | Raises the physical batch from 8 to 20 documents |
+| `tc10` | Same 10K tracks | Same online two-second noise-consistency views as tc9 | 8 | 70K | Scales the causal decoder from 12/768/12 to 24/1024/16 |
 | `tc11` | Fresh seeded 25K tracks | Two-second online crops with clean/noise/RIR/combined secondary views | 8 | 175K | Adds full-IR past reverberation and scales the catalogue |
+| `tc12` | Same seeded 25K tracks | Earlier progressive noise/RIR curriculum, one codebook | 4 | 175K | Reduces the acoustic vocabulary and introduces degradation earlier |
+| `tc12-cb2` | Same seeded 25K tracks | tc12 curriculum with two codebooks | 8 | 225K | Restores the two-codebook query and extends the final LR decay for convergence |
 
 Each entry is a from-scratch model unless explicitly documented otherwise.
 In particular, `tc4` is not initialized from `tc3`, `tc5` is not initialized
@@ -270,6 +273,20 @@ intrinsic ambiguity and reduced evidence of a two-second query. Its distinct
 `token_budget_matched_two_second_noise_consistency_v1` checkpoint protocol
 rejects tc8 and earlier checkpoints.
 
+## `tc10`: GPT-2-medium capacity increase
+
+`tc10` isolates decoder capacity while retaining tc9's 10K cohort, arbitrary
+five-digit mappings, two-second online random crops, two-codebook tokenizer,
+noise curriculum, consistency objective, physical/logical batch, optimizer,
+70K update count, and evaluation recipes. It starts from random weights rather
+than initializing from tc9.
+
+Only the causal decoder is enlarged: tc9 uses 12 layers, width 768, and 12
+attention heads, whereas tc10 uses 24 layers, width 1024, and 16 heads. Both
+retain tied embeddings, zero dropout, and the 512-position context. This makes
+tc10 the direct model-capacity comparison for tc9 without changing the amount
+or type of supervision.
+
 ## `tc11`: 25K noise-and-reverb consistency
 
 `tc11` is a new random initialization over a fresh seeded 25,000-track subset
@@ -296,7 +313,7 @@ all earlier protocols.
 anchor. The secondary view is clean through 10K; noise-only and RIR-only each
 ramp to 0.30 over 10K–30K; then clean falls to 0.10, noise rises to 0.35, and
 noise-plus-RIR rises to 0.25 by 60K. That distribution remains fixed through
-225K. Consistency ramps from zero to 0.1 over 10K–30K.
+175K. Consistency ramps from zero to 0.1 over 10K–30K.
 
 Training IRs are ordered by post-peak 99%-energy decay duration. The eligible
 pool expands from the mildest third at 10K to the mildest two thirds at 30K and
@@ -304,9 +321,19 @@ the complete range, including the longest-decay responses, at 60K. All RIR
 convolution remains full-wet with two seconds of preceding context.
 
 The learning rate warms from zero to `3e-4` over 500 steps, holds through 60K,
-falls linearly to `1.5e-4` at 140K, and follows a longer cosine curve to
-`1.5e-5` at 225K. The additional 50K updates extend only this final decay
-phase; all earlier curriculum and learning-rate boundaries remain unchanged.
+falls linearly to `1.5e-4` at 140K, and follows a cosine curve to `1.5e-5` at
+175K.
+
+## `tc12-cb2`: two-codebook extended-convergence run
+
+`tc12-cb2` is the explicit two-codebook version of tc12. It uses the same 25K
+cohort, GPT-2-small-style decoder, noise/RIR curriculum, and two-second queries,
+but emits 100 audio tokens per query and therefore uses `id_digit_weight: 8`.
+All curriculum boundaries remain unchanged: the final degradation mixture is
+reached at 60K and the LR reaches `1.5e-4` at 140K. Because the two-codebook
+probes had not converged at 175K, only the final cosine phase is extended; it
+now reaches `1.5e-5` at 225K. The resolved checkpoint profile records the
+`tc12-cb2` variant marker.
 
 ## Unified training profiles
 

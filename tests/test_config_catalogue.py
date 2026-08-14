@@ -40,7 +40,7 @@ def test_primary_config_is_audio_lm_and_matches_logical_batch():
         "id_digit_weight": 4.0,
     }
     assert cfg["data"]["max_training_tracks"] == 25_000
-    assert cfg["train"]["max_steps"] == 225_000
+    assert cfg["train"]["max_steps"] == 175_000
     assert cfg["train"]["warmup_steps"] == 200
     assert cfg["train"]["evaluation_interval"] == 2_500
     assert cfg["train"]["checkpoint_interval"] == 500

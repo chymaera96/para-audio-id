@@ -282,6 +282,11 @@ exposures, the four catalogue sizes resolve to 70K, 175K, 350K, and 700K
 optimizer steps. The LR warms up linearly for 200 steps and then remains fixed
 at `3e-4`.
 
+Capacity diagnostics use one physical optimizer batch of 80 identities: 80
+tracks × two clean documents with `accumulate_grad_batches: 1`. This preserves
+the original effective batch of 80 tracks/160 documents per update while using
+the GPU more efficiently than the former `10 × accumulation 8` partition.
+
 Existing valid manifests are reused byte-for-byte; incompatible manifests fail
 rather than being overwritten. Capacity W&B logging retains the established
 clean training and clean probe names and omits undefined corruption metrics.

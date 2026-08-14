@@ -88,6 +88,8 @@ TC9_TRACKS_PER_MICROBATCH = 10
 TC9_SEGMENTS_PER_TRACK = 2
 TC9_DOCUMENTS_PER_MICROBATCH = 20
 TC9_AUDIO_TARGETS_PER_MICROBATCH = 2_000
+CAPACITY_TRACKS_PER_MICROBATCH = 80
+CAPACITY_ACCUMULATE_GRAD_BATCHES = 1
 TRAIN_METRICS = {
     "clean_audio_loss",
     "digit_loss",
@@ -266,10 +268,26 @@ def validate_tc9_batch_configuration(cfg: dict, query_spec: dict) -> dict:
     tracks = int(cfg["train"]["tracks_per_microbatch"])
     segments = int(cfg["train"]["segments_per_track"])
     accumulation = int(cfg["trainer"]["accumulate_grad_batches"])
-    if tracks != TC9_TRACKS_PER_MICROBATCH:
+    capacity = (
+        cfg.get("resolved_training_profile", {}).get("experiment")
+        == "clean_capacity"
+    )
+    expected_tracks = (
+        CAPACITY_TRACKS_PER_MICROBATCH if capacity else TC9_TRACKS_PER_MICROBATCH
+    )
+    expected_accumulation = (
+        CAPACITY_ACCUMULATE_GRAD_BATCHES if capacity else 8
+    )
+    if tracks != expected_tracks:
         raise ValueError(
-            f"tc9 requires {TC9_TRACKS_PER_MICROBATCH} tracks per microbatch, "
+            f"{'capacity diagnostics' if capacity else 'tc9'} require "
+            f"{expected_tracks} tracks per microbatch, "
             f"got {tracks}"
+        )
+    if accumulation != expected_accumulation:
+        raise ValueError(
+            f"{'capacity diagnostics' if capacity else 'tc9'} require "
+            f"accumulate_grad_batches={expected_accumulation}, got {accumulation}"
         )
     if segments != TC9_SEGMENTS_PER_TRACK:
         raise ValueError(
@@ -280,14 +298,18 @@ def validate_tc9_batch_configuration(cfg: dict, query_spec: dict) -> dict:
     audio_targets = documents * int(query_spec["audio_targets"])
     causal_tokens = documents * int(query_spec["document_tokens"])
     waveform_seconds = documents * float(query_spec["segment_duration_seconds"])
-    if documents != TC9_DOCUMENTS_PER_MICROBATCH:
+    expected_documents = expected_tracks * TC9_SEGMENTS_PER_TRACK
+    expected_audio_targets = expected_documents * int(query_spec["audio_targets"])
+    if documents != expected_documents:
         raise ValueError(
-            f"tc9 requires {TC9_DOCUMENTS_PER_MICROBATCH} documents per "
+            f"{'capacity diagnostics' if capacity else 'tc9'} require "
+            f"{expected_documents} documents per "
             f"microbatch, got {documents}"
         )
-    if audio_targets != TC9_AUDIO_TARGETS_PER_MICROBATCH:
+    if audio_targets != expected_audio_targets:
         raise ValueError(
-            f"tc9 requires {TC9_AUDIO_TARGETS_PER_MICROBATCH} audio targets per "
+            f"{'capacity diagnostics' if capacity else 'tc9'} require "
+            f"{expected_audio_targets} audio targets per "
             f"microbatch, got {audio_targets}"
         )
     return {

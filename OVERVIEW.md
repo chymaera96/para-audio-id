@@ -306,6 +306,11 @@ runs retain the two-second random-crop formulation and weighted identifier loss
 but remove corruption, consistency, and cosine-decay confounds. The LR reaches
 `3e-4` after 200 warm-up steps and stays fixed.
 
+The physical batch is fixed at 80 identities (160 clean documents) with no
+gradient accumulation. This retains exactly 80 identity selections per
+optimizer update and therefore leaves every exposure and optimizer-step count
+unchanged from the earlier `10 tracks × accumulation 8` implementation.
+
 The experiment grid combines 10K/25K/50K/100K catalogues with tiny/small/medium
 decoders. Every run receives 560 average identity exposures, resolving to
 70K/175K/350K/700K optimizer updates respectively. Validation retains only the

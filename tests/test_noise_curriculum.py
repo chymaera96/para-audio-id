@@ -279,7 +279,7 @@ def test_tc11_schedule_boundaries(step, clean, noise, rir, noise_rir, weight):
     assert schedule.noise_probability == pytest.approx(noise)
     assert schedule.rir_probability == pytest.approx(rir)
     assert schedule.noise_rir_probability == pytest.approx(noise_rir)
-    assert schedule.consistency_weight == pytest.approx(weight)
+    assert schedule.predictive_weight == pytest.approx(weight)
     assert sum(
         (
             schedule.clean_probability,

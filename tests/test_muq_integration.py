@@ -3,9 +3,10 @@ import os
 import pytest
 import torch
 
+from para_audio_id.audio_lm.auxiliary import TaskAnchoredAuxiliary
 from para_audio_id.audio_lm.dataset import collate_causal_documents
 from para_audio_id.audio_lm.generation import greedy_generate, prompt_from_audio_tokens
-from para_audio_id.audio_lm.losses import noise_consistency_losses
+from para_audio_id.audio_lm.losses import degraded_causal_base_losses
 from para_audio_id.audio_lm.model import AudioCausalLM
 from para_audio_id.audio_lm.noise import mix_background_noise
 from para_audio_id.audio_lm.tokenizer import MuQRVQTokenizer
@@ -73,6 +74,12 @@ def test_real_muq_tc13_eight_document_probe():
         }
     }
     model = AudioCausalLM(cfg, tokenizer.vocabulary).to(tokenizer.device)
+    auxiliary = TaskAnchoredAuxiliary(
+        64,
+        id_token_id=tokenizer.vocabulary.id_token_id,
+        projector_hidden_size=128,
+        projection_size=32,
+    ).to(tokenizer.device)
     examples = []
     is_noisy = []
     for pair in range(4):
@@ -101,20 +108,32 @@ def test_real_muq_tc13_eight_document_probe():
         batch["attention_mask"].to(tokenizer.device),
         return_final_hidden_state=True,
     )
-    loss, metrics = noise_consistency_losses(
+    base_loss, metrics = degraded_causal_base_losses(
         logits,
-        hidden,
         batch["input_ids"].to(tokenizer.device),
         batch["audio_target_mask"].to(tokenizer.device),
         batch["id_target_mask"].to(tokenizer.device),
         batch["boundary_target_mask"].to(tokenizer.device),
         torch.tensor(is_noisy, device=tokenizer.device),
-        batch["track_id"],
         id_digit_weight=20.0,
-        consistency_weight=0.1,
+    )
+    auxiliary_metrics = auxiliary(
+        hidden,
+        batch["input_ids"].to(tokenizer.device),
+        batch["id_target_mask"].to(tokenizer.device),
+        batch["identifier_digits"].to(tokenizer.device),
+        torch.tensor(is_noisy, device=tokenizer.device),
+        batch["track_id"],
+    )
+    loss = (
+        base_loss
+        + 0.1 * auxiliary_metrics["summary_loss"]
+        + 0.1 * auxiliary_metrics["predictive_loss"]
     )
     loss.backward()
-    assert torch.isfinite(metrics["consistency_loss"])
+    assert torch.isfinite(metrics["base_loss"])
+    assert torch.isfinite(auxiliary_metrics["summary_loss"])
+    assert torch.isfinite(auxiliary_metrics["predictive_loss"])
     generated = greedy_generate(
         model.eval(),
         prompt_from_audio_tokens(audio_tokens.to(tokenizer.device), tokenizer.vocabulary),

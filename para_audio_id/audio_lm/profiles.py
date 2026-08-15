@@ -16,8 +16,8 @@ DECODER_PROFILES = {
 SCHEDULE_NAMES = ("noise-rir",)
 SUPPORTED_SELECTED_CODEBOOKS = (2,)
 TC13_ID_DIGIT_WEIGHT = 20.0
-NEW_TRAINING_PROTOCOL = "tc13_five_second_noise_rir_consistency_v1"
-LOSS_PROTOCOL = "tc5_family_weighted_consistency_v2"
+NEW_TRAINING_PROTOCOL = "tc13_five_second_task_anchored_simsiam_v1"
+LOSS_PROTOCOL = "tc13_task_anchored_simsiam_v1"
 TC12_CURRICULUM = "tc12_noise_rir_curriculum_v1"
 TC13_LR_POLICY = "tc13_warmup_hold_linear_cosine_v1"
 
@@ -88,7 +88,7 @@ def schedule_profile(name: str, database_size: int) -> dict[str, Any]:
         "protocol": NEW_TRAINING_PROTOCOL,
         "loss_protocol": LOSS_PROTOCOL,
         "max_steps": 225_000,
-        "consistency_weight": 0.10,
+        "predictive_weight": 0.10,
         "snr_bin_probabilities": [0.40, 0.30, 0.20, 0.10],
         "exact_zero_fraction_in_first_bin": 0.25,
     }
@@ -125,12 +125,30 @@ def canonical_training_profile(
     if selected_codebooks != 2:
         raise ValueError("tc13 requires two MuQ codebooks")
     profile = {
-        "version": 3,
-        "variant": "tc13",
+        "version": 4,
+        "variant": "tc13-task-anchored",
         "database_size": database_size,
         "training_tracks_manifest": cohort_manifest(database_size),
         "decoder": decoder_profile(decoder),
         "schedule": schedule_profile(schedule, database_size),
+        "auxiliary": {
+            "protocol": LOSS_PROTOCOL,
+            "summary_weight": 0.10,
+            "maximum_predictive_weight": 0.10,
+            "predictive_weight_schedule": {
+                "zero_until_step": 10_000,
+                "ramp_until_step": 30_000,
+                "maximum_weight": 0.10,
+            },
+            "summary_digits": 5,
+            "digit_classes": 10,
+            "projector": [768, 1024, 256],
+            "predictor": [256, 1024, 256],
+            "normalization": "layer_norm",
+            "clean_target_detached_after_projector": True,
+            "ema_target_encoder": False,
+            "contrastive_negatives": False,
+        },
     }
     profile["learning_rate_schedule"] = {
         "policy": TC13_LR_POLICY,
@@ -144,8 +162,10 @@ def canonical_training_profile(
 
 def historical_checkpoint_profile(checkpoint: dict) -> dict[str, Any]:
     stored = checkpoint.get("resolved_training_profile")
-    if stored is None or stored.get("variant") != "tc13":
-        raise ValueError("Only tc13 checkpoints can be resumed on this branch")
+    if stored is None or stored.get("variant") != "tc13-task-anchored":
+        raise ValueError(
+            "Only task-anchored tc13 checkpoints can be resumed on this branch"
+        )
     return stored
 
 
@@ -289,6 +309,7 @@ def resolve_training_config(
     train["schedule"] = {
         key: value for key, value in profile["schedule"].items() if key != "max_steps"
     }
+    train["auxiliary"] = deepcopy(profile["auxiliary"])
     lr_profile = profile.get("learning_rate_schedule")
     if lr_profile is not None:
         train["warmup_steps"] = int(lr_profile["warmup_steps"])

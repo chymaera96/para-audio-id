@@ -94,17 +94,19 @@ loss =
         + 100 * mean(all digit CE)
         + 2 * mean(all boundary CE)
     ) / 352
-    + lambda_consistency * clean/noisy [ID]-state consistency
+    + 0.10 * full-identifier summary CE
+    + lambda_predictive * task-anchored predictive loss
 ```
 
-The consistency loss is one minus cosine similarity between normalized
-final-layer `[ID]` states. The clean state is detached for this term; the noisy
-state, transformer, and noisy input embeddings retain gradients. Each loss
-family is computed as a mean, then recombined with effective coefficients of
-approximately 0.710 audio, 0.284 digits, and 0.006 boundaries. The identifier
-digit weight is 20. The previous
-tc5 weighted-token loss is also logged as a detached comparison metric.
-Checkpoints record the `tc5_family_weighted_consistency_v2` loss protocol.
+The training-only summary head predicts all five identifier digits directly
+from every final-layer `[ID]` state. For degraded pairs, a LayerNorm projector
+maps clean and degraded states into 256 dimensions, a predictor transforms only
+the degraded projection, and normalized squared error matches it to the
+detached clean projection. This uses the existing single decoder pass and no
+EMA model, negatives, queue, or inference-time auxiliary head. The causal loss
+coefficients remain approximately 0.710 audio, 0.284 digits, and 0.006
+boundaries with identifier weight 20. Checkpoints record the
+`tc13_task_anchored_simsiam_v1` loss protocol.
 
 For tc13, the secondary-view curriculum is:
 
@@ -115,7 +117,8 @@ For tc13, the secondary-view curriculum is:
 | 30–60K | 0.40 → 0.10 | 0.30 → 0.35 | 0.30 | 0 → 0.25 | expand to full range |
 | 60–225K | 0.10 | 0.35 | 0.30 | 0.25 | full range |
 
-Consistency ramps from 0 to 0.1 over 10K–30K and then remains at 0.1.
+The predictive weight ramps from 0 to 0.1 over 10K–30K and then remains at 0.1;
+the summary weight is 0.1 from step zero.
 RIR severity is ranked by post-peak 99%-energy decay duration. The eligible
 training pool expands from its mildest third, through two thirds at 30K, to all
 IRs at 60K. Convolution remains full-wet at every severity.
@@ -140,9 +143,9 @@ evaluated using one balanced canonical, integer-shifted, and held-out
 half-offset crop per track. All three groups are evaluated clean and at
 0/5/10/20/30 dB at step zero, every 2,500 steps, and at completion. Evaluation
 crops are five seconds long and are decoded and tokenized online; training still has
-no runtime token-store dependency. W&B keeps the tc6/tc9 compact metric names
-and adds aggregate RIR-only and noise+RIR beam Top-1, while complete
-training metrics retain tc6's `_step` and `_epoch` suffixes. Complete beam
+no runtime token-store dependency. W&B keeps a compact set of causal and
+task-anchored metrics plus aggregate RIR-only and noise+RIR beam Top-1. Detailed
+auxiliary diagnostics are appended to `auxiliary_metrics.jsonl`. Complete beam
 Top-1/5/10 and MRR results are appended to `probe_metrics.jsonl`.
 
 ```bash
@@ -158,9 +161,9 @@ python train.py configs/fma_large.yaml \
 This branch accepts only `--decoder small`, `--schedule noise-rir`, and
 `--codebooks 2`. The resolved tc13 profile is embedded in every checkpoint.
 
-When degraded pairs exist, W&B logs `train/relative_cosine_margin_step` and
-`train/relative_cosine_margin_epoch`, defined as
-`(same_track_cosine - different_track_cosine) / (1 - different_track_cosine)`.
+Task-anchored W&B metrics are summary loss/exact accuracy, predictive loss,
+paired prediction cosine, and paired-versus-shuffled prediction margin, each
+with the established `_step` and `_epoch` suffixes.
 
 Resume the exact saved model, optimizer, scheduler, loop, sampler pass, and RNG
 state:

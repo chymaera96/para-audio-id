@@ -105,6 +105,24 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
         "para_audio_id.audio_lm.training.MuQRVQTokenizer",
         FakeOnlineTokenizer,
     )
+    auxiliary_profile = {
+        "protocol": "tc13_task_anchored_simsiam_v1",
+        "summary_weight": 0.1,
+        "maximum_predictive_weight": 0.1,
+        "predictive_weight_schedule": {
+            "zero_until_step": 10_000,
+            "ramp_until_step": 30_000,
+            "maximum_weight": 0.1,
+        },
+        "summary_digits": 5,
+        "digit_classes": 10,
+        "projector": [32, 64, 16],
+        "predictor": [16, 64, 16],
+        "normalization": "layer_norm",
+        "clean_target_detached_after_projector": True,
+        "ema_target_encoder": False,
+        "contrastive_negatives": False,
+    }
     cfg = {
         "architecture": "audio_lm_v1",
         "tokenizer": {
@@ -164,21 +182,22 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
             "gradient_clip_norm": 1.0,
             "schedule": {
                 "name": "noise-rir",
-                "protocol": "tc13_five_second_noise_rir_consistency_v1",
-                "loss_protocol": "tc5_family_weighted_consistency_v2",
+                "protocol": "tc13_five_second_task_anchored_simsiam_v1",
+                "loss_protocol": "tc13_task_anchored_simsiam_v1",
                 "curriculum": "tc12_noise_rir_curriculum_v1",
                 "clean_until_step": 10_000,
                 "degradation_ramp_until_step": 30_000,
                 "combined_ramp_until_step": 60_000,
-                "consistency_weight": 0.1,
+                "predictive_weight": 0.1,
                 "snr_bin_probabilities": [0.4, 0.3, 0.2, 0.1],
                 "exact_zero_fraction_in_first_bin": 0.25,
             },
+            "auxiliary": auxiliary_profile,
             "wandb": {"enabled": False},
         },
         "resolved_training_profile": {
-            "version": 3,
-            "variant": "tc13",
+            "version": 4,
+            "variant": "tc13-task-anchored",
             "database_size": 10,
             "training_tracks_manifest": str(manifest),
             "decoder": {
@@ -189,17 +208,18 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
             },
             "schedule": {
                 "name": "noise-rir",
-                "protocol": "tc13_five_second_noise_rir_consistency_v1",
-                "loss_protocol": "tc5_family_weighted_consistency_v2",
+                "protocol": "tc13_five_second_task_anchored_simsiam_v1",
+                "loss_protocol": "tc13_task_anchored_simsiam_v1",
                 "max_steps": 2,
                 "curriculum": "tc12_noise_rir_curriculum_v1",
                 "clean_until_step": 10_000,
                 "degradation_ramp_until_step": 30_000,
                 "combined_ramp_until_step": 60_000,
-                "consistency_weight": 0.1,
+                "predictive_weight": 0.1,
                 "snr_bin_probabilities": [0.4, 0.3, 0.2, 0.1],
                 "exact_zero_fraction_in_first_bin": 0.25,
             },
+            "auxiliary": auxiliary_profile,
         },
         "evaluation": {
             "online_monitor_enabled": False,
@@ -239,9 +259,12 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
     assert checkpoint["global_step"] == 2
     assert (
         checkpoint["training_protocol"]
-        == "tc13_five_second_noise_rir_consistency_v1"
+        == "tc13_five_second_task_anchored_simsiam_v1"
     )
-    assert checkpoint["loss_protocol"] == "tc5_family_weighted_consistency_v2"
+    assert checkpoint["loss_protocol"] == "tc13_task_anchored_simsiam_v1"
+    assert checkpoint["auxiliary_protocol"] == "tc13_task_anchored_simsiam_v1"
+    assert checkpoint["auxiliary_profile"] == auxiliary_profile
+    assert any(key.startswith("task_auxiliary.") for key in checkpoint["state_dict"])
     assert checkpoint["monitor_protocol"] == "compact_beam_monitor_v2"
     assert checkpoint["crop_policy"] == "tc13_five_second_online_random_crop_24k_v1"
     assert checkpoint["room_ir_manifest"]["training_files"] == 1
@@ -280,6 +303,16 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
         "audio_targets_per_optimizer_step": 40_000,
         "waveform_seconds_per_optimizer_step": 800.0,
     }
+    auxiliary_rows = [
+        json.loads(line)
+        for line in (
+            tmp_path / "logs" / "smoke" / "auxiliary_metrics.jsonl"
+        ).read_text().splitlines()
+    ]
+    assert [row["global_step"] for row in auxiliary_rows] == [0, 1]
+    assert all(row["summary_loss"] is not None for row in auxiliary_rows)
+    assert all(row["predictive_loss"] == 0.0 for row in auxiliary_rows)
+    assert all(row["paired_prediction_cosine"] is None for row in auxiliary_rows)
 
     invalid = tmp_path / "invalid.ckpt"
     checkpoint["resolved_training_profile"]["decoder"]["name"] = "medium"
@@ -288,19 +321,19 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
         train(cfg, checkpoint=invalid)
 
 
-def test_tc9_wandb_keys_match_retained_tc6_schema():
+def test_tc13_wandb_keys_are_compact_and_task_anchored():
     assert TRAIN_METRICS == {
         "clean_audio_loss",
         "digit_loss",
-        "consistency_loss",
-        "same_track_cosine",
-        "different_track_cosine",
-        "relative_cosine_margin",
         "teacher_forced_exact_accuracy",
+        "summary_loss",
+        "summary_exact_accuracy",
+        "predictive_loss",
+        "paired_prediction_cosine",
+        "prediction_cosine_margin",
     }
     assert AUGMENTATION_METRICS == {
         "scheduled_probability",
-        "scheduled_consistency_weight",
         "realized_noisy_fraction",
         "mean_snr_db",
         "online_tokenization_seconds",
@@ -311,14 +344,16 @@ def test_tc9_wandb_keys_match_retained_tc6_schema():
         "train/clean_audio_loss_epoch",
         "train/digit_loss_step",
         "train/digit_loss_epoch",
-        "train/consistency_loss_step",
-        "train/consistency_loss_epoch",
-        "train/same_track_cosine_step",
-        "train/same_track_cosine_epoch",
-        "train/different_track_cosine_step",
-        "train/different_track_cosine_epoch",
-        "train/relative_cosine_margin_step",
-        "train/relative_cosine_margin_epoch",
+        "train/summary_loss_step",
+        "train/summary_loss_epoch",
+        "train/summary_exact_accuracy_step",
+        "train/summary_exact_accuracy_epoch",
+        "train/predictive_loss_step",
+        "train/predictive_loss_epoch",
+        "train/paired_prediction_cosine_step",
+        "train/paired_prediction_cosine_epoch",
+        "train/prediction_cosine_margin_step",
+        "train/prediction_cosine_margin_epoch",
         "train/teacher_forced_exact_accuracy_step",
         "train/teacher_forced_exact_accuracy_epoch",
         "train/loss_step",

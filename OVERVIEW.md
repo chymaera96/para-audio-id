@@ -352,13 +352,21 @@ per microbatch with accumulation 20 preserves 80 identities and 160 documents
 per optimizer update. The in-training 100-track monitor also uses five-second
 queries; standalone paper-facing evaluation changes are deferred.
 
+tc13 replaces raw `[ID]`-state cosine optimization with a task-anchored
+SimSiam-style auxiliary objective. A summary head predicts all five digits from
+every `[ID]` state. For degraded pairs, a shared projector and degraded-only
+predictor match the degraded summary to a clean projection detached after the
+projector. The summary weight is 0.1 from step zero; the predictive weight
+ramps from 0 to 0.1 over 10K–30K. Auxiliary modules are training-only and do
+not change autoregressive evaluation.
+
 ## Unified training profiles
 
 The active `medium` branch is single-purpose for tc13: small decoder, 25K
 cohort, noise-RIR schedule, two codebooks, and five-second queries. Checkpoints
-store this fully resolved profile and reject every earlier experiment. W&B
-retains the established metric names, including the normalized
-same-versus-different cosine margin alongside both raw cosine values.
+store this fully resolved profile and reject the earlier raw-cosine tc13 and
+all prior experiments. W&B retains existing non-consistency metric names and
+adds only the compact summary/predictive diagnostic set.
 
 ## Interpretation
 

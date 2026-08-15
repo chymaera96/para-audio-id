@@ -45,11 +45,13 @@ def test_primary_config_is_audio_lm_and_matches_logical_batch():
     assert cfg["train"]["evaluation_interval"] == 2_500
     assert cfg["train"]["checkpoint_interval"] == 500
     assert cfg["resolved_training_profile"]["decoder"]["name"] == "small"
-    assert cfg["resolved_training_profile"]["variant"] == "tc13"
+    assert cfg["resolved_training_profile"]["variant"] == "tc13-task-anchored"
+    assert cfg["train"]["auxiliary"]["protocol"] == "tc13_task_anchored_simsiam_v1"
+    assert cfg["train"]["auxiliary"]["summary_weight"] == 0.1
     assert cfg["train"]["schedule"]["name"] == "noise-rir"
     assert (
         cfg["train"]["schedule"]["loss_protocol"]
-        == "tc5_family_weighted_consistency_v2"
+        == "tc13_task_anchored_simsiam_v1"
     )
     assert cfg["train"]["schedule"]["clean_until_step"] == 10_000
     assert cfg["train"]["schedule"]["degradation_ramp_until_step"] == 30_000

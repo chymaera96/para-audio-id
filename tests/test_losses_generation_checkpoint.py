@@ -25,7 +25,6 @@ from para_audio_id.audio_lm.generation import (
 from para_audio_id.audio_lm.losses import (
     causal_audio_id_losses,
     causal_losses_by_view,
-    noise_consistency_losses,
 )
 from para_audio_id.audio_lm.model import AudioCausalLM
 from para_audio_id.audio_lm.vocabulary import AudioLMVocabulary
@@ -270,223 +269,6 @@ def test_anchor_secondary_loss_is_equal_mean_after_noisy_replacement():
     )
 
 
-def test_tc6_masks_noisy_audio_and_preserves_id_boundary_gradients():
-    vocabulary = AudioLMVocabulary()
-    examples = [
-        {
-            "audio_tokens": torch.tensor([1, 1025]),
-            "code": "12345",
-            "track_id": "track",
-            "document_index": index,
-            "view_type": view,
-        }
-        for index, view in enumerate(("canonical", "noisy"))
-    ]
-    batch = collate_causal_documents(examples, vocabulary, 32)
-    torch.manual_seed(17)
-    logits = torch.randn(
-        2,
-        batch["input_ids"].shape[1],
-        vocabulary.size,
-        requires_grad=True,
-    )
-    hidden = torch.randn(
-        2,
-        batch["input_ids"].shape[1],
-        8,
-        requires_grad=True,
-    )
-    is_noisy = torch.tensor([False, True])
-    loss, metrics = noise_consistency_losses(
-        logits,
-        hidden,
-        batch["input_ids"],
-        batch["audio_target_mask"],
-        batch["id_target_mask"],
-        batch["boundary_target_mask"],
-        is_noisy,
-        batch["track_id"],
-        id_digit_weight=20.0,
-        consistency_weight=0.1,
-    )
-    expected = (
-        (
-            2 * metrics["clean_audio_loss"]
-            + 100 * metrics["digit_loss"]
-            + 2 * metrics["boundary_loss"]
-        )
-        / 104
-        + 0.1 * metrics["consistency_loss"]
-    )
-    assert torch.allclose(loss, expected)
-    loss.backward()
-    noisy_audio_positions = batch["audio_target_mask"][1].nonzero().flatten()
-    assert not logits.grad[1, noisy_audio_positions].any()
-    assert logits.grad[1, batch["id_target_mask"][1].nonzero().flatten()].any()
-    assert logits.grad[
-        1, batch["boundary_target_mask"][1].nonzero().flatten()
-    ].any()
-    id_column = int(batch["id_target_mask"][0].long().argmax())
-    assert not hidden.grad[0, id_column].any()
-    assert hidden.grad[1, id_column].any()
-    assert not metrics["legacy_weighted_token_loss"].requires_grad
-
-
-def test_tc6_clean_base_loss_exactly_matches_tc5_weighted_loss():
-    vocabulary = AudioLMVocabulary()
-    audio = torch.tensor(
-        [
-            value
-            for frame in range(125)
-            for value in (frame % 1024, 1024 + frame % 1024)
-        ]
-    )
-    examples = [
-        {
-            "audio_tokens": audio,
-            "code": "12345",
-            "track_id": f"track-{index}",
-            "document_index": index,
-        }
-        for index in range(2)
-    ]
-    batch = collate_causal_documents(examples, vocabulary, 512)
-    torch.manual_seed(23)
-    logits = torch.randn(
-        2, batch["input_ids"].shape[1], vocabulary.size
-    )
-    hidden = torch.randn(2, batch["input_ids"].shape[1], 8)
-    total, metrics = noise_consistency_losses(
-        logits,
-        hidden,
-        batch["input_ids"],
-        batch["audio_target_mask"],
-        batch["id_target_mask"],
-        batch["boundary_target_mask"],
-        torch.tensor([False, False]),
-        batch["track_id"],
-        id_digit_weight=20.0,
-        consistency_weight=0.0,
-    )
-    assert torch.allclose(total, metrics["legacy_weighted_token_loss"])
-    assert metrics["audio_family_coefficient"] == pytest.approx(250 / 352)
-    assert metrics["digit_family_coefficient"] == pytest.approx(100 / 352)
-    assert metrics["boundary_family_coefficient"] == pytest.approx(2 / 352)
-
-
-def test_tc6_consistency_is_zero_for_identical_id_states():
-    vocabulary = AudioLMVocabulary()
-    examples = [
-        {
-            "audio_tokens": torch.tensor([1, 1025]),
-            "code": "12345",
-            "track_id": "track",
-            "document_index": index,
-        }
-        for index in range(2)
-    ]
-    batch = collate_causal_documents(examples, vocabulary, 32)
-    logits = torch.randn(2, batch["input_ids"].shape[1], vocabulary.size)
-    hidden = torch.randn(1, batch["input_ids"].shape[1], 8).repeat(2, 1, 1)
-    _, metrics = noise_consistency_losses(
-        logits,
-        hidden,
-        batch["input_ids"],
-        batch["audio_target_mask"],
-        batch["id_target_mask"],
-        batch["boundary_target_mask"],
-        torch.tensor([False, True]),
-        batch["track_id"],
-        id_digit_weight=20.0,
-        consistency_weight=0.1,
-    )
-    assert metrics["consistency_loss"] == pytest.approx(0.0, abs=1e-6)
-
-
-def test_tc8_two_second_family_weights_match_reported_objective():
-    vocabulary = AudioLMVocabulary()
-    audio = torch.tensor(
-        [
-            value
-            for frame in range(50)
-            for value in (frame % 1024, 1024 + frame % 1024)
-        ]
-    )
-    examples = [
-        {
-            "audio_tokens": audio,
-            "code": "12345",
-            "track_id": f"tc8-track-{index}",
-            "document_index": index,
-        }
-        for index in range(2)
-    ]
-    batch = collate_causal_documents(examples, vocabulary, 512)
-    torch.manual_seed(29)
-    logits = torch.randn(2, batch["input_ids"].shape[1], vocabulary.size)
-    hidden = torch.randn(2, batch["input_ids"].shape[1], 8)
-    total, metrics = noise_consistency_losses(
-        logits,
-        hidden,
-        batch["input_ids"],
-        batch["audio_target_mask"],
-        batch["id_target_mask"],
-        batch["boundary_target_mask"],
-        torch.tensor([False, False]),
-        batch["track_id"],
-        id_digit_weight=8.0,
-        consistency_weight=0.0,
-    )
-    assert batch["input_ids"].shape[1] == 108
-    assert batch["audio_target_mask"].sum(dim=1).tolist() == [100, 100]
-    assert torch.allclose(total, metrics["legacy_weighted_token_loss"])
-    assert metrics["audio_family_coefficient"] == pytest.approx(100 / 142)
-    assert metrics["digit_family_coefficient"] == pytest.approx(40 / 142)
-    assert metrics["boundary_family_coefficient"] == pytest.approx(2 / 142)
-    assert (
-        metrics["audio_family_coefficient"]
-        / metrics["digit_family_coefficient"]
-    ) == pytest.approx(2.5)
-
-
-def test_tc6_noisy_id_path_reaches_input_embeddings_and_transformer():
-    vocabulary = AudioLMVocabulary()
-    cfg = tiny_config()
-    cfg["model"]["tie_word_embeddings"] = False
-    model = AudioCausalLM(cfg, vocabulary)
-    examples = [
-        {
-            "audio_tokens": torch.tensor(tokens),
-            "code": "12345",
-            "track_id": "track",
-            "document_index": index,
-        }
-        for index, tokens in enumerate(([1, 1025], [77, 1101]))
-    ]
-    batch = collate_causal_documents(examples, vocabulary, 32)
-    logits, hidden = model(
-        batch["input_ids"],
-        batch["attention_mask"],
-        return_final_hidden_state=True,
-    )
-    loss, _ = noise_consistency_losses(
-        logits,
-        hidden,
-        batch["input_ids"],
-        batch["audio_target_mask"],
-        batch["id_target_mask"],
-        batch["boundary_target_mask"],
-        torch.tensor([False, True]),
-        batch["track_id"],
-        id_digit_weight=20.0,
-        consistency_weight=0.1,
-    )
-    loss.backward()
-    embeddings = model.network.transformer.wte.weight.grad
-    assert embeddings[77].abs().sum() > 0
-    assert model.network.transformer.h[0].attn.c_attn.weight.grad.abs().sum() > 0
-
-
 def test_checkpoint_identity_and_inference_loader_need_no_token_store(tmp_path):
     vocabulary = AudioLMVocabulary()
     cfg = tiny_config()
@@ -509,7 +291,10 @@ def test_checkpoint_identity_and_inference_loader_need_no_token_store(tmp_path):
     checkpoint = {
         **metadata,
         "hyper_parameters": cfg,
-        "state_dict": {f"model.{key}": value for key, value in model.state_dict().items()},
+        "state_dict": {
+            **{f"model.{key}": value for key, value in model.state_dict().items()},
+            "task_auxiliary.summary_head.weight": torch.randn(50, 32),
+        },
     }
     path = Path(tmp_path) / "model.ckpt"
     torch.save(checkpoint, path)

@@ -6,18 +6,6 @@ import torch
 import torch.nn.functional as F
 
 
-def relative_cosine_margin(
-    same_track_cosine: torch.Tensor,
-    different_track_cosine: torch.Tensor,
-    *,
-    epsilon: float = 1e-8,
-) -> torch.Tensor:
-    """Normalize the same/different cosine gap by remaining cosine headroom."""
-    return (same_track_cosine - different_track_cosine) / (
-        1.0 - different_track_cosine
-    ).clamp_min(epsilon)
-
-
 def masked_cross_entropy(
     shifted_logits: torch.Tensor, shifted_targets: torch.Tensor, mask: torch.Tensor
 ) -> torch.Tensor:
@@ -143,26 +131,27 @@ def _optional_masked_cross_entropy(
 
 def _different_track_similarity(
     clean_states: torch.Tensor,
-    noisy_states: torch.Tensor,
+    degraded_states: torch.Tensor,
     clean_track_ids: list[str],
-    noisy_track_ids: list[str],
+    degraded_track_ids: list[str],
 ) -> torch.Tensor:
+    """Legacy diagnostic retained only for historical loss tests."""
     comparisons = []
-    for noisy_state, noisy_track in zip(
-        noisy_states, noisy_track_ids, strict=True
+    for degraded_state, degraded_track in zip(
+        degraded_states, degraded_track_ids, strict=True
     ):
         index = next(
             (
                 candidate
                 for candidate, clean_track in enumerate(clean_track_ids)
-                if clean_track != noisy_track
+                if clean_track != degraded_track
             ),
             None,
         )
         if index is not None:
             comparisons.append(
                 F.cosine_similarity(
-                    noisy_state.unsqueeze(0),
+                    degraded_state.unsqueeze(0),
                     clean_states[index].detach().unsqueeze(0),
                 )[0]
             )
@@ -171,6 +160,131 @@ def _different_track_similarity(
             (), float("nan"), device=clean_states.device, dtype=clean_states.dtype
         )
     return torch.stack(comparisons).mean()
+
+
+def degraded_causal_base_losses(
+    logits: torch.Tensor,
+    input_ids: torch.Tensor,
+    audio_target_mask: torch.Tensor,
+    id_target_mask: torch.Tensor,
+    boundary_target_mask: torch.Tensor,
+    is_degraded: torch.Tensor,
+    *,
+    id_digit_weight: float,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """tc13 base loss with degraded audio targets excluded."""
+    if is_degraded.shape != (logits.shape[0],):
+        raise ValueError("is_degraded must contain one value per document")
+    if id_digit_weight <= 0:
+        raise ValueError("id_digit_weight must be positive")
+    shifted_logits = logits[:, :-1, :]
+    shifted_targets = input_ids[:, 1:]
+    clean_rows = ~is_degraded.bool()
+    degraded_rows = is_degraded.bool()
+    if not clean_rows.any():
+        raise ValueError("The base loss requires at least one clean document")
+    clean_mask = clean_rows[:, None]
+    degraded_mask = degraded_rows[:, None]
+
+    clean_audio_loss = masked_cross_entropy(
+        shifted_logits, shifted_targets, audio_target_mask & clean_mask
+    )
+    digit_loss = masked_cross_entropy(shifted_logits, shifted_targets, id_target_mask)
+    boundary_loss = masked_cross_entropy(
+        shifted_logits, shifted_targets, boundary_target_mask
+    )
+    clean_digit_loss = masked_cross_entropy(
+        shifted_logits, shifted_targets, id_target_mask & clean_mask
+    )
+    degraded_digit_loss = _optional_masked_cross_entropy(
+        shifted_logits, shifted_targets, id_target_mask & degraded_mask
+    )
+    clean_boundary_loss = masked_cross_entropy(
+        shifted_logits, shifted_targets, boundary_target_mask & clean_mask
+    )
+    degraded_boundary_loss = _optional_masked_cross_entropy(
+        shifted_logits, shifted_targets, boundary_target_mask & degraded_mask
+    )
+
+    audio_counts = audio_target_mask.sum(dim=1)
+    digit_counts = id_target_mask.sum(dim=1)
+    boundary_counts = boundary_target_mask.sum(dim=1)
+    if (
+        audio_counts.unique().numel() != 1
+        or digit_counts.unique().numel() != 1
+        or boundary_counts.unique().numel() != 1
+    ):
+        raise ValueError("tc13 family weighting requires uniform target counts")
+    audio_count = audio_counts[0].to(clean_audio_loss.dtype)
+    digit_count = digit_counts[0].to(clean_audio_loss.dtype)
+    boundary_count = boundary_counts[0].to(clean_audio_loss.dtype)
+    family_weight = (
+        audio_count + float(id_digit_weight) * digit_count + boundary_count
+    )
+    base_loss = (
+        audio_count * clean_audio_loss
+        + float(id_digit_weight) * digit_count * digit_loss
+        + boundary_count * boundary_loss
+    ) / family_weight
+
+    predictions = shifted_logits.argmax(dim=-1)
+    row_exact = ((predictions == shifted_targets) | ~id_target_mask).all(dim=1)
+    digit_correct = (predictions == shifted_targets) & id_target_mask
+    clean_exact = row_exact[clean_rows].float().mean()
+    clean_digit_accuracy = (
+        digit_correct[clean_rows].sum() / id_target_mask[clean_rows].sum()
+    )
+    degraded_exact = (
+        row_exact[degraded_rows].float().mean()
+        if degraded_rows.any()
+        else torch.full_like(clean_exact, float("nan"))
+    )
+    degraded_digit_accuracy = (
+        digit_correct[degraded_rows].sum() / id_target_mask[degraded_rows].sum()
+        if degraded_rows.any()
+        else torch.full_like(clean_digit_accuracy, float("nan"))
+    )
+    legacy = causal_audio_id_losses(
+        logits,
+        input_ids,
+        audio_target_mask,
+        id_target_mask,
+        boundary_target_mask,
+        id_digit_weight=id_digit_weight,
+    )
+    return base_loss, {
+        "base_loss": base_loss,
+        "clean_audio_loss": clean_audio_loss,
+        "clean_audio_perplexity": clean_audio_loss.detach()
+        .clamp(max=math.log(1e6))
+        .exp(),
+        "clean_digit_loss": clean_digit_loss,
+        "degraded_digit_loss": (
+            degraded_digit_loss
+            if degraded_digit_loss is not None
+            else torch.full_like(clean_digit_loss, float("nan"))
+        ),
+        "clean_boundary_loss": clean_boundary_loss,
+        "degraded_boundary_loss": (
+            degraded_boundary_loss
+            if degraded_boundary_loss is not None
+            else torch.full_like(clean_boundary_loss, float("nan"))
+        ),
+        "digit_loss": digit_loss,
+        "boundary_loss": boundary_loss,
+        "audio_family_coefficient": audio_count / family_weight,
+        "digit_family_coefficient": float(id_digit_weight)
+        * digit_count
+        / family_weight,
+        "boundary_family_coefficient": boundary_count / family_weight,
+        "legacy_weighted_token_loss": legacy["loss"].detach(),
+        "teacher_forced_digit_accuracy": legacy["teacher_forced_digit_accuracy"],
+        "teacher_forced_exact_accuracy": legacy["teacher_forced_exact_accuracy"],
+        "clean_teacher_forced_digit_accuracy": clean_digit_accuracy,
+        "degraded_teacher_forced_digit_accuracy": degraded_digit_accuracy,
+        "clean_teacher_forced_exact_accuracy": clean_exact,
+        "degraded_teacher_forced_exact_accuracy": degraded_exact,
+    }
 
 
 def noise_consistency_losses(

@@ -3,7 +3,6 @@ from __future__ import annotations
 import pytest
 import torch
 
-from para_audio_id.audio_lm.losses import relative_cosine_margin
 from para_audio_id.audio_lm.noise import resolved_augmentation_schedule
 from para_audio_id.audio_lm.profiles import (
     NEW_TRAINING_PROTOCOL,
@@ -40,8 +39,8 @@ def test_tc13_profile_is_fixed_and_resolves_defaults():
         selected_codebooks=2,
     )
     assert cohort_manifest(25_000) == "data/training_tracks_25k.json"
-    assert profile["version"] == 3
-    assert profile["variant"] == "tc13"
+    assert profile["version"] == 4
+    assert profile["variant"] == "tc13-task-anchored"
     assert profile["decoder"] == {
         "name": "small",
         "num_layers": 12,
@@ -50,6 +49,24 @@ def test_tc13_profile_is_fixed_and_resolves_defaults():
     }
     assert profile["schedule"]["protocol"] == NEW_TRAINING_PROTOCOL
     assert profile["schedule"]["max_steps"] == 225_000
+    assert profile["auxiliary"] == {
+        "protocol": "tc13_task_anchored_simsiam_v1",
+        "summary_weight": 0.10,
+        "maximum_predictive_weight": 0.10,
+        "predictive_weight_schedule": {
+            "zero_until_step": 10_000,
+            "ramp_until_step": 30_000,
+            "maximum_weight": 0.10,
+        },
+        "summary_digits": 5,
+        "digit_classes": 10,
+        "projector": [768, 1024, 256],
+        "predictor": [256, 1024, 256],
+        "normalization": "layer_norm",
+        "clean_target_detached_after_projector": True,
+        "ema_target_encoder": False,
+        "contrastive_negatives": False,
+    }
     resolved = resolve_training_config(base_config())
     assert resolved["resolved_training_profile"] == profile
     assert resolved["resolved_query_profile"] == {
@@ -108,8 +125,16 @@ def test_tc13_resume_accepts_only_exact_tc13_profile(tmp_path):
         {"resolved_training_profile": {"version": 2, "variant": "tc12-cb2"}},
         old,
     )
-    with pytest.raises(ValueError, match="Only tc13 checkpoints"):
+    with pytest.raises(ValueError, match="Only task-anchored tc13 checkpoints"):
         resolve_training_config(base_config(), checkpoint=old)
+
+    raw_tc13 = tmp_path / "raw-tc13.ckpt"
+    torch.save(
+        {"resolved_training_profile": {"version": 3, "variant": "tc13"}},
+        raw_tc13,
+    )
+    with pytest.raises(ValueError, match="Only task-anchored tc13 checkpoints"):
+        resolve_training_config(base_config(), checkpoint=raw_tc13)
 
 
 def test_tc13_noise_rir_boundaries_and_severity():
@@ -132,6 +157,12 @@ def test_tc13_noise_rir_boundaries_and_severity():
             resolved.rir_probability,
             resolved.noise_rir_probability,
         ) == pytest.approx(probabilities)
+    assert resolved_augmentation_schedule(9_999, profile).predictive_weight == 0.0
+    assert resolved_augmentation_schedule(10_000, profile).predictive_weight == 0.0
+    assert resolved_augmentation_schedule(20_000, profile).predictive_weight == pytest.approx(
+        0.05
+    )
+    assert resolved_augmentation_schedule(30_000, profile).predictive_weight == 0.10
     assert resolved_augmentation_schedule(
         10_000, profile
     ).rir_severity_quantile == pytest.approx(1 / 3)
@@ -167,11 +198,3 @@ def test_tc13_learning_rate_schedule_extends_to_225k():
     }
     for step, multiplier in expected.items():
         assert learning_rate_multiplier(step, train) == pytest.approx(multiplier)
-
-
-def test_relative_cosine_margin_and_denominator_stabilization():
-    same = torch.tensor(0.8)
-    different = torch.tensor(0.5)
-    assert float(relative_cosine_margin(same, different)) == pytest.approx(0.6)
-    stabilized = relative_cosine_margin(torch.tensor(1.0), torch.tensor(1.0))
-    assert torch.isfinite(stabilized)

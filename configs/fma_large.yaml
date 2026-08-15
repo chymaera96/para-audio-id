@@ -47,6 +47,10 @@ train:
   checkpoint_interval: 500
   id_digit_weight: 20.0
   gradient_clip_norm: 1.0
+  auxiliary:
+    protocol: tc13_task_anchored_simsiam_v1
+    summary_weight: 0.10
+    maximum_predictive_weight: 0.10
   wandb:
     enabled: false
     project: para-audio-id

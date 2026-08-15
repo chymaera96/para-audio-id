@@ -9,18 +9,17 @@ from typing import Any
 import torch
 
 
-SUPPORTED_DATABASE_SIZES = (10_000, 25_000, 100_000)
+SUPPORTED_DATABASE_SIZES = (25_000,)
 DECODER_PROFILES = {
     "small": {"num_layers": 12, "hidden_size": 768, "num_attention_heads": 12},
-    "medium": {"num_layers": 24, "hidden_size": 1024, "num_attention_heads": 16},
 }
-SCHEDULE_NAMES = ("noise", "noise-rir")
-SUPPORTED_SELECTED_CODEBOOKS = (1, 2)
-ID_DIGIT_WEIGHT_PER_CODEBOOK = 4.0
-NEW_TRAINING_PROTOCOL = "online_random_crop_consistency_profile_v2"
+SCHEDULE_NAMES = ("noise-rir",)
+SUPPORTED_SELECTED_CODEBOOKS = (2,)
+TC13_ID_DIGIT_WEIGHT = 20.0
+NEW_TRAINING_PROTOCOL = "tc13_five_second_noise_rir_consistency_v1"
 LOSS_PROTOCOL = "tc5_family_weighted_consistency_v2"
 TC12_CURRICULUM = "tc12_noise_rir_curriculum_v1"
-TC12_LR_POLICY = "tc12_warmup_hold_linear_cosine_v1"
+TC13_LR_POLICY = "tc13_warmup_hold_linear_cosine_v1"
 
 
 def cohort_manifest(database_size: int) -> str:
@@ -82,22 +81,17 @@ def _scaled(value: int, database_size: int) -> int:
 def schedule_profile(name: str, database_size: int) -> dict[str, Any]:
     if name not in SCHEDULE_NAMES:
         raise ValueError(f"schedule must be one of {SCHEDULE_NAMES}, got {name!r}")
-    total = _scaled(70_000, database_size)
+    if database_size != 25_000:
+        raise ValueError("tc13 requires the 25K training cohort")
     common = {
         "name": name,
         "protocol": NEW_TRAINING_PROTOCOL,
         "loss_protocol": LOSS_PROTOCOL,
-        "max_steps": total,
+        "max_steps": 225_000,
         "consistency_weight": 0.10,
         "snr_bin_probabilities": [0.40, 0.30, 0.20, 0.10],
         "exact_zero_fraction_in_first_bin": 0.25,
     }
-    if name == "noise":
-        return {
-            **common,
-            "clean_until_step": _scaled(20_000, database_size),
-            "noise_ramp_until_step": _scaled(25_000, database_size),
-        }
     return {
         **common,
         "curriculum": TC12_CURRICULUM,
@@ -120,67 +114,39 @@ def canonical_training_profile(
     database_size: int,
     decoder: str,
     schedule: str,
-    selected_codebooks: int = 1,
+    selected_codebooks: int = 2,
 ) -> dict[str, Any]:
+    if database_size != 25_000:
+        raise ValueError("tc13 requires database_size=25000")
+    if decoder != "small":
+        raise ValueError("tc13 requires the small decoder")
+    if schedule != "noise-rir":
+        raise ValueError("tc13 requires the noise-rir schedule")
+    if selected_codebooks != 2:
+        raise ValueError("tc13 requires two MuQ codebooks")
     profile = {
-        "version": 2,
+        "version": 3,
+        "variant": "tc13",
         "database_size": database_size,
         "training_tracks_manifest": cohort_manifest(database_size),
         "decoder": decoder_profile(decoder),
         "schedule": schedule_profile(schedule, database_size),
     }
-    if (
-        database_size == 25_000
-        and schedule == "noise-rir"
-        and selected_codebooks == 2
-    ):
-        profile["variant"] = "tc12-cb2"
-        profile["schedule"]["max_steps"] = 225_000
-    if schedule == "noise-rir":
-        profile["learning_rate_schedule"] = {
-            "policy": TC12_LR_POLICY,
-            "warmup_steps": _scaled(200, database_size),
-            "hold_until_step": _scaled(24_000, database_size),
-            "linear_decay_until_step": _scaled(56_000, database_size),
-            "final_learning_rate_ratio": 0.05,
-        }
+    profile["learning_rate_schedule"] = {
+        "policy": TC13_LR_POLICY,
+        "warmup_steps": 500,
+        "hold_until_step": 60_000,
+        "linear_decay_until_step": 140_000,
+        "final_learning_rate_ratio": 0.05,
+    }
     return profile
 
 
 def historical_checkpoint_profile(checkpoint: dict) -> dict[str, Any]:
     stored = checkpoint.get("resolved_training_profile")
-    if stored is not None:
-        return stored
-    track_count = len(checkpoint.get("training_track_ids", []))
-    model = checkpoint.get("model_config") or checkpoint.get(
-        "hyper_parameters", {}
-    ).get("model", {})
-    dimensions = (
-        int(model.get("num_layers", 0)),
-        int(model.get("hidden_size", 0)),
-        int(model.get("num_attention_heads", 0)),
-    )
-    decoder = {
-        (12, 768, 12): "small",
-        (24, 1024, 16): "medium",
-    }.get(dimensions)
-    if decoder is None:
-        raise ValueError(f"Checkpoint has an unknown decoder shape {dimensions}")
-    protocol = checkpoint.get("training_protocol")
-    if protocol == "online_random_crop_noise_rir_consistency_25k_v1":
-        schedule = "noise-rir"
-    elif protocol in {
-        "token_budget_matched_two_second_noise_consistency_v1",
-        "online_random_crop_noise_consistency_v1",
-    }:
-        schedule = "noise"
-    else:
-        raise ValueError(f"Checkpoint has an unsupported training protocol {protocol!r}")
-    if track_count not in SUPPORTED_DATABASE_SIZES:
-        raise ValueError(f"Checkpoint has unsupported catalogue size {track_count}")
-    return canonical_training_profile(
-        database_size=track_count, decoder=decoder, schedule=schedule
-    )
+    if stored is None or stored.get("variant") != "tc13":
+        raise ValueError("Only tc13 checkpoints can be resumed on this branch")
+    return stored
 
 
 def checkpoint_training_profile(path: str | Path) -> dict[str, Any]:
@@ -202,7 +168,7 @@ def _checkpoint_query_profile(checkpoint: dict[str, Any]) -> dict[str, Any] | No
         query.get(
             "id_digit_weight",
             train.get(
-                "id_digit_weight", ID_DIGIT_WEIGHT_PER_CODEBOOK * selected
+                "id_digit_weight", TC13_ID_DIGIT_WEIGHT
             ),
         )
     )
@@ -220,7 +186,7 @@ def resolve_query_profile(selected_codebooks: int) -> dict[str, Any]:
         )
     return {
         "selected_codebooks": selected_codebooks,
-        "id_digit_weight": ID_DIGIT_WEIGHT_PER_CODEBOOK * selected_codebooks,
+        "id_digit_weight": TC13_ID_DIGIT_WEIGHT,
     }
 
 
@@ -251,7 +217,7 @@ def resolve_training_config(
         resolved_schedule = resumed["schedule"]["name"] if schedule is None else schedule
     else:
         resolved_decoder = decoder or "small"
-        resolved_schedule = schedule or "noise"
+        resolved_schedule = schedule or "noise-rir"
     if resumed is not None:
         if resolved_decoder != resumed["decoder"]["name"] or (
             resolved_schedule != resumed["schedule"]["name"]
@@ -260,7 +226,7 @@ def resolve_training_config(
         profile = deepcopy(resumed)
     else:
         configured_codebooks = int(
-            cfg.setdefault("tokenizer", {}).get("selected_codebooks", 1)
+            cfg.setdefault("tokenizer", {}).get("selected_codebooks", 2)
         )
         profile_codebooks = (
             selected_codebooks
@@ -295,7 +261,7 @@ def resolve_training_config(
                 "Resume checkpoint has an incompatible codebook/loss profile"
             )
     else:
-        configured_codebooks = int(tokenizer.get("selected_codebooks", 1))
+        configured_codebooks = int(tokenizer.get("selected_codebooks", 2))
         query_profile = resolve_query_profile(
             selected_codebooks
             if selected_codebooks is not None

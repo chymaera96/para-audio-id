@@ -7,14 +7,14 @@ fixed 100,000-track catalogue into its parameters. Each training document is:
 [BOS] audio-token-1 ... audio-token-N [ID] digit-1 ... digit-5 [EOS]
 ```
 
-Audio tokens use the first Mel-RVQ codebook from the frozen
+Audio tokens use the first two Mel-RVQ codebooks from the frozen
 `OpenMuQ/MuQ-large-msd-iter` checkpoint. The causal LM jointly predicts the audio
 sequence and the track's arbitrary five-digit code. Identification performs model
 generation only: it does not search fingerprints, embeddings, an ANN index, token
 shards, a valid-code list, or training audio.
 
 This is LLM-style memorisation through repeated causal continuations. Every clean
-two-second segment from a track is a separate document with the same identifier,
+five-second segment from a track is a separate document with the same identifier,
 and each document contains that identifier only once. Parametric indexing methods
 such as DSI are related work, but this system does not use staged DSI training.
 
@@ -77,23 +77,23 @@ python prepare_training_cohort.py configs/fma_large.yaml
 ## Training
 
 The default causal LM is a randomly initialized 12-layer GPT-2-style decoder with
-hidden size 768, 12 heads, tied embeddings, and no dropout. The default vocabulary has
-1,024 collision-free audio tokens, `[BOS]`, `[ID]`, ten dedicated digit tokens,
+hidden size 768, 12 heads, tied embeddings, and no dropout. The vocabulary has
+2,048 codebook-separated audio tokens, `[BOS]`, `[ID]`, ten dedicated digit tokens,
 and `[EOS]`.
 
-Training samples online two-second crops from the configured cohort. Each
+Training samples online five-second crops from the fixed 25K cohort. Each
 identity contributes a clean anchor and one secondary view: a distinct clean
 crop, an exact same-crop background-noise view, an exact same-crop room-reverb
 view, or the combined noise-then-reverb view. One frozen lightweight MuQ call
-tokenizes all twenty final waveforms in each physical microbatch.
+tokenizes all eight final waveforms in each physical microbatch.
 
 ```text
 loss =
     (
-        50 * mean(clean audio-token CE)
-        + 20 * mean(all digit CE)
+        250 * mean(clean audio-token CE)
+        + 100 * mean(all digit CE)
         + 2 * mean(all boundary CE)
-    ) / 72
+    ) / 352
     + lambda_consistency * clean/noisy [ID]-state consistency
 ```
 
@@ -101,20 +101,19 @@ The consistency loss is one minus cosine similarity between normalized
 final-layer `[ID]` states. The clean state is detached for this term; the noisy
 state, transformer, and noisy input embeddings retain gradients. Each loss
 family is computed as a mean, then recombined with effective coefficients of
-approximately 0.694 audio, 0.278 digits, and 0.028 boundaries. An identifier
-digit weight of 4 preserves the established 2.5:1 audio-to-identifier ratio
-with one codebook. The previous
+approximately 0.710 audio, 0.284 digits, and 0.006 boundaries. The identifier
+digit weight is 20. The previous
 tc5 weighted-token loss is also logged as a detached comparison metric.
 Checkpoints record the `tc5_family_weighted_consistency_v2` loss protocol.
 
-For the 25K tc12 run, the secondary-view curriculum is:
+For tc13, the secondary-view curriculum is:
 
 | Raw steps | Clean | Noise | RIR | Noise + RIR | RIR severity |
 | ---: | ---: | ---: | ---: | ---: | ---: |
 | 0–10K | 1.00 | 0 | 0 | 0 | disabled |
 | 10–30K | 1.00 → 0.40 | 0 → 0.30 | 0 → 0.30 | 0 | mild → moderate |
 | 30–60K | 0.40 → 0.10 | 0.30 → 0.35 | 0.30 | 0 → 0.25 | expand to full range |
-| 60–175K | 0.10 | 0.35 | 0.30 | 0.25 | full range |
+| 60–225K | 0.10 | 0.35 | 0.30 | 0.25 | full range |
 
 Consistency ramps from 0 to 0.1 over 10K–30K and then remains at 0.1.
 RIR severity is ranked by post-peak 99%-energy decay duration. The eligible
@@ -123,35 +122,24 @@ IRs at 60K. Convolution remains full-wet at every severity.
 
 Noisy examples use fixed SNR-bin probabilities `0.40/0.30/0.20/0.10` for
 `0–5/5–10/10–20/20–30 dB`; 10% of noisy views are exactly 0 dB. The LR uses
-the tc12 25K schedule: linear warm-up over 500 steps to `3e-4`, hold through
-60K, linear decay to `1.5e-4` at 140K, then cosine decay to `1.5e-5` at 175K.
+the tc13 schedule: linear warm-up over 500 steps to `3e-4`, hold through 60K,
+linear decay to `1.5e-4` at 140K, then cosine decay to `1.5e-5` at 225K.
 
 The single-GPU logical batch is 80 tracks × 2 segments: a physical microbatch of
-ten tracks × two segments with eight gradient-accumulation steps. Each physical
-microbatch contains 1,000 audio targets and 40 seconds of waveform.
-
-New runs use one codebook by default. Historical two-codebook checkpoints remain
-loadable and resumable because their tokenizer vocabulary and digit weight are
-restored from checkpoint metadata. `--codebooks 2` is available for an explicit
-new two-codebook run; it uses the historical digit weight of 8.
-
-The named `tc12-cb2` variant is the 25K, noise-RIR, two-codebook run. It keeps
-all tc12 curriculum and LR boundaries through 140K, but extends the final
-cosine decay to step 225K because the two-codebook probes had not converged at
-175K. Launch it with `--schedule noise-rir --codebooks 2 --run-id tc12-cb2`.
+four tracks × two segments with twenty gradient-accumulation steps. Each
+microbatch contains 2,000 audio targets and 40 seconds of waveform; each
+optimizer update contains 40,000 audio targets and 800 seconds of waveform.
 
 RIR uses full-wet causal convolution with two seconds of preceding audio;
 the prefix is discarded after convolution so reverberant tails from preceding
 music enter the query. Room IR train/test assets are source- and content-disjoint.
 
-The 10K catalogue is the exposure reference: ordinary 10K, 25K, and 100K
-profiles use 70K, 175K, and 700K optimizer steps. `tc12-cb2` is the explicit
-225K exception. Checkpoints remain every 500 steps and monitoring
+tc13 runs for 225K optimizer steps. Checkpoints remain every 500 steps and monitoring
 remains every 2,500 steps. For direct comparison with tc6, the same seeded 100-track cohort is
 evaluated using one balanced canonical, integer-shifted, and held-out
 half-offset crop per track. All three groups are evaluated clean and at
 0/5/10/20/30 dB at step zero, every 2,500 steps, and at completion. Evaluation
-crops are two seconds long and are decoded and tokenized online; tc11 still has
+crops are five seconds long and are decoded and tokenized online; training still has
 no runtime token-store dependency. W&B keeps the tc6/tc9 compact metric names
 and adds aggregate RIR-only and noise+RIR beam Top-1, while complete
 training metrics retain tc6's `_step` and `_epoch` suffixes. Complete beam
@@ -161,15 +149,14 @@ Top-1/5/10 and MRR results are appended to `probe_metrics.jsonl`.
 python train.py configs/fma_large.yaml \
   --decoder small \
   --schedule noise-rir \
-  --run-id tc12 \
+  --codebooks 2 \
+  --run-id tc13 \
   --devices 1 \
   --wandb-online
 ```
 
-`--decoder` accepts `small` (12×768, 12 heads; default) or `medium`
-(24×1024, 16 heads). `--schedule` accepts `noise` (default) or `noise-rir`.
-A noise-only run does not discover, validate, fingerprint, or decode room-IR
-assets. The resolved profile is embedded in every checkpoint.
+This branch accepts only `--decoder small`, `--schedule noise-rir`, and
+`--codebooks 2`. The resolved tc13 profile is embedded in every checkpoint.
 
 When degraded pairs exist, W&B logs `train/relative_cosine_margin_step` and
 `train/relative_cosine_margin_epoch`, defined as
@@ -181,13 +168,13 @@ state:
 ```bash
 python train.py configs/fma_large.yaml \
   --devices 1 \
-  --run-id tc11 \
+  --run-id tc13 \
   --wandb-online \
   --resume
 ```
 
-On resume, omit `--decoder` and `--schedule` to recover both from the checkpoint.
-An incompatible explicit override fails before model construction.
+On resume, profile values are recovered from the checkpoint. Any pre-tc13
+checkpoint or incompatible explicit override fails before model construction.
 
 Checkpoints are written every 500 optimizer steps under:
 
@@ -198,9 +185,8 @@ Checkpoints are written every 500 optimizer steps under:
 Checkpoints embed the vocabulary, exact cohort, resolved profile, random-crop and replacement
 policies, fixed monitor manifest, noise/tokenizer fingerprints, sampler state,
 RNG state, query specification, and code mapping. Resume is accepted only for
-compatible profile checkpoints. Legacy tc11 maps to the equivalent
-25K/small/noise-RIR profile and remains resumable. tc9-small and tc10-medium
-remain loadable for evaluation but are not training initialization sources.
+compatible tc13 checkpoints. Backward compatibility with earlier experiments
+is intentionally not provided on this trial branch.
 
 PyTorch deterministic algorithms and seeded Python, NumPy, Torch, samplers, and
 workers are enabled. `deterministic_warn_only: true` reports CUDA operations for

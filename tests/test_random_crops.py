@@ -162,7 +162,7 @@ def test_clean_collator_produces_two_distinct_crops_per_identity(tmp_path):
     sf.write(rir_train / "ir.wav", impulse, 8_000)
     sf.write(rir_validation / "ir.wav", impulse[::-1], 8_000)
     assets = BackgroundNoiseAssets(
-        train_noise, validation_noise, sample_rate=8_000, samples=16_000
+        train_noise, validation_noise, sample_rate=8_000, samples=40_000
     )
     rir_assets = RoomImpulseResponseAssets(
         rir_train.parent.parent, rir_validation.parent.parent, sample_rate=8_000
@@ -191,12 +191,12 @@ def test_clean_collator_produces_two_distinct_crops_per_identity(tmp_path):
             "snr_bin_probabilities": [0.4, 0.3, 0.2, 0.1],
         },
         sample_rate=8_000,
-        crop_duration=2.0,
+        crop_duration=5.0,
         past_context_duration=2.0,
         seed=3,
         reserved_starts={},
     )(examples)
-    assert batch["waveforms"].shape == (8, 16_000)
+    assert batch["waveforms"].shape == (8, 40_000)
     for offset in range(0, 8, 2):
         assert (
             batch["metadata"][offset]["track_id"]
@@ -521,7 +521,7 @@ def test_monitor_collator_skips_invalid_crop_without_aborting(tmp_path):
     sf.write(rir_train / "ir.wav", impulse, 8_000)
     sf.write(rir_validation / "ir.wav", impulse[::-1], 8_000)
     assets = BackgroundNoiseAssets(
-        train_noise, validation_noise, sample_rate=8_000, samples=16_000
+        train_noise, validation_noise, sample_rate=8_000, samples=40_000
     )
     rir_assets = RoomImpulseResponseAssets(
         rir_train.parent.parent, rir_validation.parent.parent, sample_rate=8_000
@@ -530,7 +530,7 @@ def test_monitor_collator_skips_invalid_crop_without_aborting(tmp_path):
         "source_duration": 6.0,
         "start_sample": 0,
         "start": 0.0,
-        "crop_duration": 2.0,
+        "crop_duration": 5.0,
         "view_type": "canonical",
     }
     batch = RandomEvaluationCollator(
@@ -556,7 +556,7 @@ def test_monitor_collator_skips_invalid_crop_without_aborting(tmp_path):
             },
         ]
     )
-    assert batch["clean_waveforms"].shape == (1, 16_000)
+    assert batch["clean_waveforms"].shape == (1, 40_000)
     assert batch["track_id"] == ["valid"]
     assert len(batch["skipped"]) == 1
     assert batch["skipped"][0]["track_id"] == "bad"

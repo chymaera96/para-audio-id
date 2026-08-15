@@ -99,7 +99,7 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
 
         def tokenize(self, waveforms):
             frame = torch.tensor([3, 1027], device=waveforms.device)
-            return frame.repeat(waveforms.shape[0], 50)
+            return frame.repeat(waveforms.shape[0], 125)
 
     monkeypatch.setattr(
         "para_audio_id.audio_lm.training.MuQRVQTokenizer",
@@ -131,7 +131,7 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
             "training_tracks_manifest": str(manifest),
             "database_size": 10,
             "max_training_tracks": 10,
-            "segment_duration": 2.0,
+            "segment_duration": 5.0,
             "crop_retries": 4,
             "replacement_retries": 32,
             "background_noise": {
@@ -152,7 +152,7 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
             "checkpoint_dir": str(tmp_path / "checkpoints"),
             "run_id": "smoke",
             "max_steps": 2,
-            "tracks_per_microbatch": 10,
+            "tracks_per_microbatch": 4,
             "segments_per_track": 2,
             "learning_rate": 3e-4,
             "betas": [0.9, 0.95],
@@ -160,17 +160,16 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
             "warmup_steps": 1,
             "evaluation_interval": 1,
             "checkpoint_interval": 1,
-            "id_digit_weight": 8.0,
+            "id_digit_weight": 20.0,
             "gradient_clip_norm": 1.0,
             "schedule": {
                 "name": "noise-rir",
-                "protocol": "online_random_crop_consistency_profile_v2",
+                "protocol": "tc13_five_second_noise_rir_consistency_v1",
                 "loss_protocol": "tc5_family_weighted_consistency_v2",
-                "clean_until_step": 50_000,
-                "noise_ramp_until_step": 62_500,
-                "noise_steady_until_step": 87_500,
-                "rir_ramp_until_step": 100_000,
-                "combined_ramp_until_step": 112_500,
+                "curriculum": "tc12_noise_rir_curriculum_v1",
+                "clean_until_step": 10_000,
+                "degradation_ramp_until_step": 30_000,
+                "combined_ramp_until_step": 60_000,
                 "consistency_weight": 0.1,
                 "snr_bin_probabilities": [0.4, 0.3, 0.2, 0.1],
                 "exact_zero_fraction_in_first_bin": 0.25,
@@ -178,7 +177,8 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
             "wandb": {"enabled": False},
         },
         "resolved_training_profile": {
-            "version": 2,
+            "version": 3,
+            "variant": "tc13",
             "database_size": 10,
             "training_tracks_manifest": str(manifest),
             "decoder": {
@@ -189,14 +189,13 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
             },
             "schedule": {
                 "name": "noise-rir",
-                "protocol": "online_random_crop_consistency_profile_v2",
+                "protocol": "tc13_five_second_noise_rir_consistency_v1",
                 "loss_protocol": "tc5_family_weighted_consistency_v2",
                 "max_steps": 2,
-                "clean_until_step": 50_000,
-                "noise_ramp_until_step": 62_500,
-                "noise_steady_until_step": 87_500,
-                "rir_ramp_until_step": 100_000,
-                "combined_ramp_until_step": 112_500,
+                "curriculum": "tc12_noise_rir_curriculum_v1",
+                "clean_until_step": 10_000,
+                "degradation_ramp_until_step": 30_000,
+                "combined_ramp_until_step": 60_000,
                 "consistency_weight": 0.1,
                 "snr_bin_probabilities": [0.4, 0.3, 0.2, 0.1],
                 "exact_zero_fraction_in_first_bin": 0.25,
@@ -220,7 +219,7 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
             "devices": 1,
             "strategy": "auto",
             "precision": "32-true",
-            "accumulate_grad_batches": 8,
+            "accumulate_grad_batches": 20,
             "log_every_n_steps": 1,
         },
     }
@@ -240,46 +239,46 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
     assert checkpoint["global_step"] == 2
     assert (
         checkpoint["training_protocol"]
-        == "online_random_crop_consistency_profile_v2"
+        == "tc13_five_second_noise_rir_consistency_v1"
     )
     assert checkpoint["loss_protocol"] == "tc5_family_weighted_consistency_v2"
     assert checkpoint["monitor_protocol"] == "compact_beam_monitor_v2"
-    assert checkpoint["crop_policy"] == "tc11_two_second_online_random_crop_24k_v1"
+    assert checkpoint["crop_policy"] == "tc13_five_second_online_random_crop_24k_v1"
     assert checkpoint["room_ir_manifest"]["training_files"] == 1
     assert len(checkpoint["monitor_recipes"]) == 6
     assert {
         row["view_type"] for row in checkpoint["monitor_recipes"]
     } == {"canonical", "shifted", "heldout"}
     assert all(
-        row["crop_duration"] == 2.0
+        row["crop_duration"] == 5.0
         for row in checkpoint["monitor_recipes"]
     )
     assert checkpoint["query_spec"] == {
-        "segment_duration_seconds": 2.0,
+        "segment_duration_seconds": 5.0,
         "sample_rate": 24_000,
-        "waveform_samples": 48_000,
+        "waveform_samples": 120_000,
         "frame_rate": 25.0,
         "selected_codebooks": 2,
-        "frames": 50,
-        "audio_targets": 100,
+        "frames": 125,
+        "audio_targets": 250,
         "digit_targets": 5,
         "boundary_targets": 2,
-        "document_tokens": 108,
-        "id_digit_weight": 8.0,
+        "document_tokens": 258,
+        "id_digit_weight": 20.0,
         "max_position_embeddings": 512,
     }
     assert checkpoint["batch_spec"] == {
-        "tracks_per_microbatch": 10,
+        "tracks_per_microbatch": 4,
         "documents_per_track": 2,
-        "documents_per_microbatch": 20,
+        "documents_per_microbatch": 8,
         "audio_targets_per_microbatch": 2_000,
-        "causal_tokens_per_microbatch": 2_160,
+        "causal_tokens_per_microbatch": 2_064,
         "waveform_seconds_per_microbatch": 40.0,
-        "gradient_accumulation_steps": 8,
+        "gradient_accumulation_steps": 20,
         "tracks_per_optimizer_step": 80,
         "documents_per_optimizer_step": 160,
-        "audio_targets_per_optimizer_step": 16_000,
-        "waveform_seconds_per_optimizer_step": 320.0,
+        "audio_targets_per_optimizer_step": 40_000,
+        "waveform_seconds_per_optimizer_step": 800.0,
     }
 
     invalid = tmp_path / "invalid.ckpt"

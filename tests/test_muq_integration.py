@@ -16,35 +16,35 @@ from para_audio_id.audio_lm.tokenizer import MuQRVQTokenizer
     os.environ.get("RUN_MUQ_INTEGRATION") != "1",
     reason="set RUN_MUQ_INTEGRATION=1 to load the real MuQ checkpoint",
 )
-def test_real_muq_one_codebook_twenty_document_probe():
+def test_real_muq_tc13_eight_document_probe():
     tokenizer = MuQRVQTokenizer(
         "OpenMuQ/MuQ-large-msd-iter",
-        selected_codebooks=1,
+        selected_codebooks=2,
         device=os.environ.get("MUQ_DEVICE", "cuda"),
     )
     waveform = torch.sin(
-        2 * torch.pi * 220 * torch.arange(48_000) / 24_000
+        2 * torch.pi * 220 * torch.arange(120_000) / 24_000
     ).unsqueeze(0)
     report = tokenizer.probe(waveform)
-    assert report["raw_shape"][1] == 1
-    assert report["serialized_tokens_per_example"] == 50
+    assert report["raw_shape"][1] == 2
+    assert report["serialized_tokens_per_example"] == 250
     audio_tokens = tokenizer.tokenize(waveform)[0].cpu()
     lightweight = MuQRVQTokenizer(
         "OpenMuQ/MuQ-large-msd-iter",
         revision=tokenizer.revision,
-        selected_codebooks=1,
+        selected_codebooks=2,
         device=os.environ.get("MUQ_DEVICE", "cuda"),
         lightweight=True,
     )
     anchors = torch.cat(
-        [waveform.roll(index * 1_000, dims=1) for index in range(10)]
+        [waveform.roll(index * 1_000, dims=1) for index in range(4)]
     ).to(lightweight.device)
     noises = anchors.roll(7_000, dims=1)
     mixed, valid = mix_background_noise(
         anchors,
         noises,
         torch.tensor(
-            [0.0, 5.0, 10.0, 20.0, 30.0] * 2,
+            [0.0, 10.0, 20.0, 30.0],
             device=lightweight.device,
         ),
     )
@@ -58,7 +58,7 @@ def test_real_muq_one_codebook_twenty_document_probe():
     )
     lightweight_tokens = lightweight.tokenize(online_waveforms)
     assert torch.equal(lightweight_tokens[0].cpu(), audio_tokens)
-    assert lightweight_tokens.shape == (20, 50)
+    assert lightweight_tokens.shape == (8, 250)
     cfg = {
         "model": {
             "architecture": "gpt2",
@@ -75,7 +75,7 @@ def test_real_muq_one_codebook_twenty_document_probe():
     model = AudioCausalLM(cfg, tokenizer.vocabulary).to(tokenizer.device)
     examples = []
     is_noisy = []
-    for pair in range(10):
+    for pair in range(4):
         for role, tokens in enumerate(
             lightweight_tokens[pair * 2 : pair * 2 + 2].cpu()
         ):
@@ -94,8 +94,8 @@ def test_real_muq_one_codebook_twenty_document_probe():
         tokenizer.vocabulary,
         512,
     )
-    assert batch["input_ids"].shape == (20, 58)
-    assert int(batch["audio_target_mask"].sum()) == 1_000
+    assert batch["input_ids"].shape == (8, 258)
+    assert int(batch["audio_target_mask"].sum()) == 2_000
     logits, hidden = model(
         batch["input_ids"].to(tokenizer.device),
         batch["attention_mask"].to(tokenizer.device),
@@ -110,7 +110,7 @@ def test_real_muq_one_codebook_twenty_document_probe():
         batch["boundary_target_mask"].to(tokenizer.device),
         torch.tensor(is_noisy, device=tokenizer.device),
         batch["track_id"],
-        id_digit_weight=4.0,
+        id_digit_weight=20.0,
         consistency_weight=0.1,
     )
     loss.backward()

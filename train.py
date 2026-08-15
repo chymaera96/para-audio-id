@@ -13,13 +13,13 @@ def main() -> None:
     parser.add_argument("--wandb-online", action="store_true")
     parser.add_argument("--run-id")
     parser.add_argument("--devices", type=int, default=None)
-    parser.add_argument("--decoder", choices=("small", "medium"))
-    parser.add_argument("--schedule", choices=("noise", "noise-rir"))
+    parser.add_argument("--decoder", choices=("small",))
+    parser.add_argument("--schedule", choices=("noise-rir",))
     parser.add_argument(
         "--codebooks",
         type=int,
-        choices=(1, 2),
-        help="MuQ Mel-RVQ codebooks (new-run default comes from the config)",
+        choices=(2,),
+        help="tc13 requires two MuQ Mel-RVQ codebooks",
     )
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--ckpt-path", type=Path)

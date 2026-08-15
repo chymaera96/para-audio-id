@@ -20,6 +20,7 @@ should be taken from the corresponding W&B run or evaluation JSON.
 | `tc11` | Fresh seeded 25K tracks | Two-second online crops with clean/noise/RIR/combined secondary views | 8 | 175K | Adds full-IR past reverberation and scales the catalogue |
 | `tc12` | Same seeded 25K tracks | Earlier progressive noise/RIR curriculum, one codebook | 4 | 175K | Reduces the acoustic vocabulary and introduces degradation earlier |
 | `tc12-cb2` | Same seeded 25K tracks | tc12 curriculum with two codebooks | 8 | 225K | Restores the two-codebook query and extends the final LR decay for convergence |
+| `tc13` | Same seeded 25K tracks | Five-second online crops with tc12-cb2 noise/RIR curriculum | 20 | 225K | Returns to five-second evidence while preserving the 80-track optimizer batch |
 
 Each entry is a from-scratch model unless explicitly documented otherwise.
 In particular, `tc4` is not initialized from `tc3`, `tc5` is not initialized
@@ -335,23 +336,33 @@ probes had not converged at 175K, only the final cosine phase is extended; it
 now reaches `1.5e-5` at 225K. The resolved checkpoint profile records the
 `tc12-cb2` variant marker.
 
+## `tc13`: five-second duration ablation
+
+`tc13` is a from-scratch duration ablation of tc12-cb2 on the `medium` branch;
+the branch name does not indicate the decoder size. It retains the same seeded
+25K cohort, GPT-2-small-style decoder, two MuQ codebooks, noise/RIR curriculum,
+two seconds of preceding RIR context, and 225K LR schedule. The query alone
+changes from two to five seconds.
+
+At 25 frames/s and two codebooks, each crop produces 125 frames and 250 audio
+tokens. With five identifier digits and two boundary targets, the 258-token
+document uses `id_digit_weight: 20` and the weighted objective
+`(250 audio + 100 digit + 2 boundary) / 352`. Four identities/eight documents
+per microbatch with accumulation 20 preserves 80 identities and 160 documents
+per optimizer update. The in-training 100-track monitor also uses five-second
+queries; standalone paper-facing evaluation changes are deferred.
+
 ## Unified training profiles
 
-Current runs select the causal decoder (`small` or `medium`) and robustness
-schedule (`noise` or `noise-rir`) at launch. Catalogue size is selected in YAML
-and resolves a dedicated 10K, 25K, or 100K cohort manifest. Optimizer steps and
-curriculum transitions scale linearly from the 10K/70K-step reference.
-Checkpointing and monitoring intervals remain fixed; tc12's warm-up and decay
-boundaries scale with catalogue exposure.
-
-New checkpoints store the fully resolved profile rather than relying on mutable
-CLI defaults. Historical tc9 (small/noise/10K), tc10 (medium/noise/10K), and
-tc11 (small/noise-RIR/25K) are recognized during evaluation. Representation diagnostics now include the normalized
+The active `medium` branch is single-purpose for tc13: small decoder, 25K
+cohort, noise-RIR schedule, two codebooks, and five-second queries. Checkpoints
+store this fully resolved profile and reject every earlier experiment. W&B
+retains the established metric names, including the normalized
 same-versus-different cosine margin alongside both raw cosine values.
 
 ## Interpretation
 
-The progression isolates eight questions:
+The progression isolates ten questions:
 
 1. `tc2`: can the causal formulation memorize audio-token-to-code mappings?
 2. `tc3`: does a smaller catalogue and stronger ID supervision make that
@@ -369,6 +380,10 @@ The progression isolates eight questions:
 8. `tc9`: does matching tc7's acoustic-token and waveform budget recover the
    two-second model's deficit, or is the remaining difficulty intrinsic to the
    shorter and more ambiguous query?
+9. `tc10`–`tc12-cb2`: how do decoder capacity, catalogue size, RIR exposure,
+   and codebook count change two-second identification?
+10. `tc13`: with the mature tc12-cb2 training recipe fixed, how much does
+    returning to a five-second query improve identification?
 
 Teacher-forced digit accuracy is useful for optimization diagnostics, but the
 scientific identification result is free-running exact accuracy and beam

@@ -84,7 +84,7 @@ Training samples online five-second crops from the fixed 25K cohort. Each
 identity contributes a clean anchor and one secondary view: a distinct clean
 crop, an exact same-crop background-noise view, an exact same-crop room-reverb
 view, or the combined noise-then-reverb view. One frozen lightweight MuQ call
-tokenizes all 32 final waveforms in each physical microbatch.
+tokenizes all 80 final waveforms in each physical microbatch.
 
 ```text
 loss =
@@ -126,8 +126,8 @@ the tc14 schedule: linear warm-up over 500 steps to `3e-4`, hold through 60K,
 linear decay to `1.5e-4` at 140K, then cosine decay to `1.5e-5` at 225K.
 
 The single-GPU logical batch is 80 tracks × 2 segments: a physical microbatch of
-16 tracks × two segments with five gradient-accumulation steps. Each
-microbatch contains 12,000 audio targets and 160 seconds of waveform; each
+40 tracks × two segments with two gradient-accumulation steps. Each
+microbatch contains 30,000 audio targets and 400 seconds of waveform; each
 optimizer update contains 60,000 audio targets and 800 seconds of waveform.
 
 RIR uses full-wet causal convolution with two seconds of preceding audio;

@@ -366,7 +366,7 @@ not change autoregressive evaluation.
 codebooks. Each query contains 375 audio targets and uses identifier weight 30,
 giving the base objective `(375 audio + 150 digit + 2 boundary) / 527`.
 
-Its optimized physical batch contains 16 identities and 32 documents with five
+Its optimized physical batch contains 40 identities and 80 documents with two
 gradient-accumulation steps. This preserves tc13's logical 80 identities and
 160 documents per optimizer update while issuing larger GPU workloads.
 Checkpoints are saved every 2,500 optimizer steps.

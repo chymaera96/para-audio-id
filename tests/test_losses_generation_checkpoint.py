@@ -270,7 +270,7 @@ def test_anchor_secondary_loss_is_equal_mean_after_noisy_replacement():
 
 
 def test_checkpoint_identity_and_inference_loader_need_no_token_store(tmp_path):
-    vocabulary = AudioLMVocabulary()
+    vocabulary = AudioLMVocabulary(num_codebooks=3)
     cfg = tiny_config()
     model = AudioCausalLM(cfg, vocabulary)
     metadata = {
@@ -292,8 +292,7 @@ def test_checkpoint_identity_and_inference_loader_need_no_token_store(tmp_path):
         **metadata,
         "hyper_parameters": cfg,
         "state_dict": {
-            **{f"model.{key}": value for key, value in model.state_dict().items()},
-            "task_auxiliary.summary_head.weight": torch.randn(50, 32),
+            f"model.{key}": value for key, value in model.state_dict().items()
         },
     }
     path = Path(tmp_path) / "model.ckpt"

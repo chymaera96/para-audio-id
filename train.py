@@ -18,8 +18,14 @@ def main() -> None:
     parser.add_argument(
         "--codebooks",
         type=int,
-        choices=(2,),
-        help="tc13 requires two MuQ Mel-RVQ codebooks",
+        choices=(3,),
+        help="tc14 requires three MuQ Mel-RVQ codebooks",
+    )
+    parser.add_argument(
+        "--distillation-weight",
+        type=float,
+        default=None,
+        help="maximum identifier-logit distillation weight (default: 0.1)",
     )
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--ckpt-path", type=Path)
@@ -44,6 +50,7 @@ def main() -> None:
         decoder=args.decoder,
         schedule=args.schedule,
         selected_codebooks=args.codebooks,
+        distillation_weight=args.distillation_weight,
         checkpoint=checkpoint,
     )
     train(cfg, checkpoint=checkpoint)

@@ -20,7 +20,6 @@ from tqdm import tqdm
 from ..audio import load_audio
 from ..catalogue import load_catalogue
 from ..config import save_config
-from .auxiliary import TaskAnchoredAuxiliary, task_anchored_total_loss
 from .checkpoint import ARCHITECTURE
 from .dataset import (
     CachedPositionDataset,
@@ -37,6 +36,8 @@ from .generation import (
 from .losses import (
     causal_losses_by_view,
     degraded_causal_base_losses,
+    distillation_weight,
+    identifier_logit_distillation_loss,
 )
 from .model import AudioCausalLM
 from .noise import (
@@ -74,43 +75,21 @@ from .vocabulary import AudioLMVocabulary
 
 TRAINING_PROTOCOL = NEW_TRAINING_PROTOCOL
 MONITOR_PROTOCOL = "compact_beam_monitor_v2"
-TC13_SEGMENT_DURATION = 5.0
-TC13_SAMPLE_RATE = 24_000
-TC13_FRAME_RATE = 25.0
-TC13_SELECTED_CODEBOOKS = 2
-TC13_ID_DIGIT_WEIGHT = 20.0
-TC13_DIGIT_TARGETS = 5
-TC13_BOUNDARY_TARGETS = 2
-TC13_TRACKS_PER_MICROBATCH = 4
-TC13_SEGMENTS_PER_TRACK = 2
-TC13_DOCUMENTS_PER_MICROBATCH = 8
-TC13_ACCUMULATE_GRAD_BATCHES = 20
+TC14_SEGMENT_DURATION = 5.0
+TC14_SAMPLE_RATE = 24_000
+TC14_FRAME_RATE = 25.0
+TC14_SELECTED_CODEBOOKS = 3
+TC14_ID_DIGIT_WEIGHT = 30.0
+TC14_DIGIT_TARGETS = 5
+TC14_BOUNDARY_TARGETS = 2
+TC14_TRACKS_PER_MICROBATCH = 4
+TC14_SEGMENTS_PER_TRACK = 2
+TC14_DOCUMENTS_PER_MICROBATCH = 8
+TC14_ACCUMULATE_GRAD_BATCHES = 20
 TRAIN_METRICS = {
     "clean_audio_loss",
     "digit_loss",
     "teacher_forced_exact_accuracy",
-    "summary_loss",
-    "summary_exact_accuracy",
-    "predictive_loss",
-    "paired_prediction_cosine",
-    "prediction_cosine_margin",
-}
-AUXILIARY_DETAIL_METRICS = {
-    "summary_loss",
-    "summary_contribution",
-    "summary_digit_accuracy",
-    "summary_exact_accuracy",
-    "clean_summary_exact_accuracy",
-    "degraded_summary_exact_accuracy",
-    "predictive_loss",
-    "predictive_contribution",
-    "effective_predictive_weight",
-    "paired_prediction_cosine",
-    "shuffled_prediction_cosine",
-    "prediction_cosine_margin",
-    "clean_projected_feature_std",
-    "degraded_projected_feature_std",
-    "degraded_pair_count",
 }
 VALIDATION_METRICS = {
     "audio_loss",
@@ -141,16 +120,16 @@ def learning_rate_multiplier(step: int, train_cfg: dict) -> float:
         return 0.5 * (
             1 + math.cos(math.pi * min(max(progress, 0.0), 1.0))
         )
-    if policy != "tc13_warmup_hold_linear_cosine_v1":
+    if policy != "tc14_warmup_hold_linear_cosine_v1":
         raise ValueError(f"Unknown learning-rate policy {policy!r}")
     lr_cfg = train_cfg["learning_rate_schedule"]
     hold_end = int(lr_cfg["hold_until_step"])
     linear_end = int(lr_cfg["linear_decay_until_step"])
     final_ratio = float(lr_cfg["final_learning_rate_ratio"])
     if not warmup_steps < hold_end < linear_end < max_steps:
-        raise ValueError("Invalid tc13 learning-rate boundaries")
+        raise ValueError("Invalid tc14 learning-rate boundaries")
     if not 0.0 < final_ratio < 0.5:
-        raise ValueError("tc13 final learning-rate ratio must be in (0, 0.5)")
+        raise ValueError("tc14 final learning-rate ratio must be in (0, 0.5)")
     if step < warmup_steps:
         return step / warmup_steps
     if step < hold_end:
@@ -169,7 +148,7 @@ def tc6_training_wandb_keys() -> set[str]:
         f"train/{name}_{level}"
         for name in TRAIN_METRICS | {"loss"}
         for level in ("step", "epoch")
-    }
+    } | {"train/distillation_loss_epoch"}
 
 
 def tc6_probe_wandb_keys(snr_values: list[float]) -> set[str]:
@@ -190,7 +169,7 @@ def tc6_probe_wandb_keys(snr_values: list[float]) -> set[str]:
     }
 
 
-def validate_tc13_query_configuration(
+def validate_tc14_query_configuration(
     cfg: dict,
     tokenizer_spec: TokenizerSpec,
     vocabulary: AudioLMVocabulary,
@@ -198,34 +177,34 @@ def validate_tc13_query_configuration(
     duration = float(cfg["data"]["segment_duration"])
     id_digit_weight = float(cfg["train"]["id_digit_weight"])
     max_positions = int(cfg["model"]["max_position_embeddings"])
-    if not math.isclose(duration, TC13_SEGMENT_DURATION):
+    if not math.isclose(duration, TC14_SEGMENT_DURATION):
         raise ValueError(
-            f"tc13 requires segment_duration={TC13_SEGMENT_DURATION}, got {duration}"
+            f"tc14 requires segment_duration={TC14_SEGMENT_DURATION}, got {duration}"
         )
-    if tokenizer_spec.sample_rate != TC13_SAMPLE_RATE:
+    if tokenizer_spec.sample_rate != TC14_SAMPLE_RATE:
         raise ValueError(
-            f"tc13 requires a {TC13_SAMPLE_RATE} Hz tokenizer, got "
+            f"tc14 requires a {TC14_SAMPLE_RATE} Hz tokenizer, got "
             f"{tokenizer_spec.sample_rate}"
         )
-    if not math.isclose(tokenizer_spec.frame_rate, TC13_FRAME_RATE):
+    if not math.isclose(tokenizer_spec.frame_rate, TC14_FRAME_RATE):
         raise ValueError(
-            f"tc13 requires {TC13_FRAME_RATE:g} MuQ frames/s, got "
+            f"tc14 requires {TC14_FRAME_RATE:g} MuQ frames/s, got "
             f"{tokenizer_spec.frame_rate:g}"
         )
     selected_codebooks = int(tokenizer_spec.selected_codebooks)
-    if selected_codebooks != TC13_SELECTED_CODEBOOKS:
+    if selected_codebooks != TC14_SELECTED_CODEBOOKS:
         raise ValueError(
-            f"tc13 requires selected_codebooks={TC13_SELECTED_CODEBOOKS}, "
+            f"tc14 requires selected_codebooks={TC14_SELECTED_CODEBOOKS}, "
             f"got {selected_codebooks}"
         )
-    if not math.isclose(id_digit_weight, TC13_ID_DIGIT_WEIGHT):
+    if not math.isclose(id_digit_weight, TC14_ID_DIGIT_WEIGHT):
         raise ValueError(
-            f"tc13 requires id_digit_weight={TC13_ID_DIGIT_WEIGHT:g}, "
+            f"tc14 requires id_digit_weight={TC14_ID_DIGIT_WEIGHT:g}, "
             f"got {id_digit_weight:g}"
         )
     if max_positions != 512:
         raise ValueError(
-            f"tc13 requires max_position_embeddings=512, got {max_positions}"
+            f"tc14 requires max_position_embeddings=512, got {max_positions}"
         )
     audio_targets = round(
         duration
@@ -233,11 +212,11 @@ def validate_tc13_query_configuration(
         * tokenizer_spec.selected_codebooks
     )
     expected_audio_targets = round(
-        TC13_SEGMENT_DURATION * TC13_FRAME_RATE * selected_codebooks
+        TC14_SEGMENT_DURATION * TC14_FRAME_RATE * selected_codebooks
     )
     if audio_targets != expected_audio_targets:
         raise ValueError(
-            f"tc13 requires {expected_audio_targets} audio targets "
+            f"tc14 requires {expected_audio_targets} audio targets "
             f"with {selected_codebooks} codebook(s), got {audio_targets}"
         )
     if (
@@ -248,32 +227,32 @@ def validate_tc13_query_configuration(
     example = {
         "audio_tokens": torch.zeros(audio_targets, dtype=torch.long),
         "code": "00000",
-        "track_id": "tc13-startup-probe",
+        "track_id": "tc14-startup-probe",
         "document_index": -1,
     }
     batch = collate_causal_documents([example], vocabulary, max_positions)
     digit_targets = int(batch["id_target_mask"].sum())
     boundary_targets = int(batch["boundary_target_mask"].sum())
     document_tokens = int(batch["attention_mask"].sum())
-    if digit_targets != TC13_DIGIT_TARGETS:
+    if digit_targets != TC14_DIGIT_TARGETS:
         raise ValueError(
-            f"tc13 requires {TC13_DIGIT_TARGETS} digit targets, got {digit_targets}"
+            f"tc14 requires {TC14_DIGIT_TARGETS} digit targets, got {digit_targets}"
         )
-    if boundary_targets != TC13_BOUNDARY_TARGETS:
+    if boundary_targets != TC14_BOUNDARY_TARGETS:
         raise ValueError(
-            f"tc13 requires {TC13_BOUNDARY_TARGETS} boundary targets, got "
+            f"tc14 requires {TC14_BOUNDARY_TARGETS} boundary targets, got "
             f"{boundary_targets}"
         )
     expected_document_tokens = expected_audio_targets + 8
     if document_tokens != expected_document_tokens:
         raise ValueError(
-            f"tc13 requires {expected_document_tokens} document "
+            f"tc14 requires {expected_document_tokens} document "
             "tokens, got "
             f"{document_tokens}"
         )
     if document_tokens > max_positions:
         raise ValueError(
-            f"tc13 document length {document_tokens} exceeds context {max_positions}"
+            f"tc14 document length {document_tokens} exceeds context {max_positions}"
         )
     return {
         "segment_duration_seconds": duration,
@@ -291,32 +270,32 @@ def validate_tc13_query_configuration(
     }
 
 
-def validate_tc13_batch_configuration(cfg: dict, query_spec: dict) -> dict:
+def validate_tc14_batch_configuration(cfg: dict, query_spec: dict) -> dict:
     tracks = int(cfg["train"]["tracks_per_microbatch"])
     segments = int(cfg["train"]["segments_per_track"])
     accumulation = int(cfg["trainer"]["accumulate_grad_batches"])
-    if tracks != TC13_TRACKS_PER_MICROBATCH:
+    if tracks != TC14_TRACKS_PER_MICROBATCH:
         raise ValueError(
-            f"tc13 requires {TC13_TRACKS_PER_MICROBATCH} tracks per microbatch, "
+            f"tc14 requires {TC14_TRACKS_PER_MICROBATCH} tracks per microbatch, "
             f"got {tracks}"
         )
-    if segments != TC13_SEGMENTS_PER_TRACK:
+    if segments != TC14_SEGMENTS_PER_TRACK:
         raise ValueError(
-            f"tc13 requires {TC13_SEGMENTS_PER_TRACK} documents per track, "
+            f"tc14 requires {TC14_SEGMENTS_PER_TRACK} documents per track, "
             f"got {segments}"
         )
-    if accumulation != TC13_ACCUMULATE_GRAD_BATCHES:
+    if accumulation != TC14_ACCUMULATE_GRAD_BATCHES:
         raise ValueError(
-            f"tc13 requires accumulate_grad_batches="
-            f"{TC13_ACCUMULATE_GRAD_BATCHES}, got {accumulation}"
+            f"tc14 requires accumulate_grad_batches="
+            f"{TC14_ACCUMULATE_GRAD_BATCHES}, got {accumulation}"
         )
     documents = tracks * segments
     audio_targets = documents * int(query_spec["audio_targets"])
     causal_tokens = documents * int(query_spec["document_tokens"])
     waveform_seconds = documents * float(query_spec["segment_duration_seconds"])
-    if documents != TC13_DOCUMENTS_PER_MICROBATCH:
+    if documents != TC14_DOCUMENTS_PER_MICROBATCH:
         raise ValueError(
-            f"tc13 requires {TC13_DOCUMENTS_PER_MICROBATCH} documents per "
+            f"tc14 requires {TC14_DOCUMENTS_PER_MICROBATCH} documents per "
             f"microbatch, got {documents}"
         )
     return {
@@ -385,7 +364,6 @@ def replace_secondary_rows_with_noisy_tokens(
         "audio_target_mask",
         "id_target_mask",
         "boundary_target_mask",
-        "identifier_digits",
         "document_index",
         "segment_start",
         "segment_duration",
@@ -930,24 +908,9 @@ class AudioLMModule(pl.LightningModule):
         self.query_spec = query_spec
         self.batch_spec = batch_spec
         self.model = AudioCausalLM(cfg, vocabulary)
-        auxiliary_cfg = cfg["train"]["auxiliary"]
-        if auxiliary_cfg.get("protocol") != LOSS_PROTOCOL:
-            raise ValueError(f"Auxiliary protocol must be {LOSS_PROTOCOL}")
-        projector_dimensions = [int(value) for value in auxiliary_cfg["projector"]]
-        predictor_dimensions = [int(value) for value in auxiliary_cfg["predictor"]]
-        hidden_size = int(cfg["model"]["hidden_size"])
-        if projector_dimensions[0] != hidden_size or predictor_dimensions != [
-            projector_dimensions[2],
-            projector_dimensions[1],
-            projector_dimensions[2],
-        ]:
-            raise ValueError("Task-anchored auxiliary dimensions are inconsistent")
-        self.task_auxiliary = TaskAnchoredAuxiliary(
-            hidden_size,
-            id_token_id=vocabulary.id_token_id,
-            projector_hidden_size=projector_dimensions[1],
-            projection_size=projector_dimensions[2],
-        )
+        distillation_cfg = cfg["train"]["distillation"]
+        if distillation_cfg.get("protocol") != LOSS_PROTOCOL:
+            raise ValueError(f"Distillation protocol must be {LOSS_PROTOCOL}")
         self.online_tokenizer = None
         self._last_probe_step = -1
         self.documents_consumed = 0
@@ -967,15 +930,6 @@ class AudioLMModule(pl.LightningModule):
         self.replacement_audit: list[dict] = []
         self.failed_crop_attempt_audit: list[dict] = []
         self._sampler_runtime_rebased = False
-        self._last_auxiliary_audit_step = -1
-        auxiliary_audit_path = output_dir(cfg) / "auxiliary_metrics.jsonl"
-        self._audited_auxiliary_steps = set()
-        if auxiliary_audit_path.exists():
-            for line in auxiliary_audit_path.read_text().splitlines():
-                if line.strip():
-                    self._audited_auxiliary_steps.add(
-                        int(json.loads(line)["global_step"])
-                    )
         self.save_hyperparameters(cfg)
 
     def _step(self, batch: dict, prefix: str) -> torch.Tensor:
@@ -1126,7 +1080,6 @@ class AudioLMModule(pl.LightningModule):
             "scheduled_probability": float(
                 schedule.background_noise_probability
             ),
-            "scheduled_predictive_weight": float(schedule.predictive_weight),
             "realized_noisy_fraction": realized_background
             / max(1, len(crop_batch["metadata"]) // 2),
             "mean_snr_db": (
@@ -1174,11 +1127,7 @@ class AudioLMModule(pl.LightningModule):
                 on_epoch=False,
                 sync_dist=False,
             )
-        logits, final_hidden_states = self.model(
-            batch["input_ids"],
-            batch["attention_mask"],
-            return_final_hidden_state=True,
-        )
+        logits = self.model(batch["input_ids"], batch["attention_mask"])
         base_loss, metrics = degraded_causal_base_losses(
             logits,
             batch["input_ids"],
@@ -1188,24 +1137,32 @@ class AudioLMModule(pl.LightningModule):
             batch["is_noisy"],
             id_digit_weight=float(self.cfg["train"]["id_digit_weight"]),
         )
-        auxiliary_metrics = self.task_auxiliary(
-            final_hidden_states,
-            batch["input_ids"],
+        distillation_loss = identifier_logit_distillation_loss(
+            logits,
             batch["id_target_mask"],
-            batch["identifier_digits"],
             batch["is_noisy"],
             batch["track_id"],
+            list(self.vocabulary.digit_token_ids),
+            temperature=float(self.cfg["train"]["distillation"]["temperature"]),
         )
-        summary_weight = float(self.cfg["train"]["auxiliary"]["summary_weight"])
-        predictive_weight = float(schedule.predictive_weight)
-        loss, contribution_metrics = task_anchored_total_loss(
-            base_loss,
-            auxiliary_metrics,
-            summary_weight=summary_weight,
-            predictive_weight=predictive_weight,
+        distillation_cfg = self.cfg["train"]["distillation"]
+        weight_schedule = distillation_cfg["weight_schedule"]
+        current_distillation_weight = distillation_weight(
+            int(self.global_step),
+            maximum_weight=float(distillation_cfg["maximum_weight"]),
+            zero_until_step=int(weight_schedule["zero_until_step"]),
+            ramp_until_step=int(weight_schedule["ramp_until_step"]),
         )
-        metrics.update(auxiliary_metrics)
-        metrics.update(contribution_metrics)
+        loss = base_loss + current_distillation_weight * distillation_loss
+        metrics["distillation_loss"] = distillation_loss
+        metrics["distillation_contribution"] = (
+            current_distillation_weight * distillation_loss
+        )
+        metrics["effective_distillation_weight"] = torch.tensor(
+            current_distillation_weight,
+            device=loss.device,
+            dtype=loss.dtype,
+        )
         metrics["loss"] = loss
         clean_count = int((~batch["is_noisy"]).sum())
         noisy_count = int(batch["is_noisy"].sum())
@@ -1241,6 +1198,14 @@ class AudioLMModule(pl.LightningModule):
             "train/loss",
             loss,
             **TRAIN_LOG_LEVELS,
+            sync_dist=True,
+            batch_size=batch_size,
+        )
+        self.log(
+            "train/distillation_loss_epoch",
+            distillation_loss,
+            on_step=False,
+            on_epoch=True,
             sync_dist=True,
             batch_size=batch_size,
         )
@@ -1305,8 +1270,7 @@ class AudioLMModule(pl.LightningModule):
                 "metrics": {
                     name: float(value.detach().cpu())
                     for name, value in metrics.items()
-                    if name not in AUXILIARY_DETAIL_METRICS
-                    and isinstance(value, torch.Tensor)
+                    if isinstance(value, torch.Tensor)
                     and torch.isfinite(value)
                 },
             }
@@ -1314,32 +1278,6 @@ class AudioLMModule(pl.LightningModule):
                 "a", encoding="utf-8"
             ) as handle:
                 handle.write(json.dumps(detail, sort_keys=True) + "\n")
-        current_step = int(self.global_step)
-        if (
-            self.trainer.is_global_zero
-            and current_step % int(self.cfg["trainer"]["log_every_n_steps"]) == 0
-            and current_step not in self._audited_auxiliary_steps
-        ):
-            auxiliary_detail = {
-                "global_step": current_step,
-                "track_count": len(set(batch["track_id"])),
-                "document_count": batch_size,
-                **{
-                    name: (
-                        float(value.detach().cpu())
-                        if isinstance(value, torch.Tensor) and torch.isfinite(value)
-                        else None
-                    )
-                    for name, value in metrics.items()
-                    if name in AUXILIARY_DETAIL_METRICS
-                },
-            }
-            with (output_dir(self.cfg) / "auxiliary_metrics.jsonl").open(
-                "a", encoding="utf-8"
-            ) as handle:
-                handle.write(json.dumps(auxiliary_detail, sort_keys=True) + "\n")
-            self._last_auxiliary_audit_step = current_step
-            self._audited_auxiliary_steps.add(current_step)
         return loss
 
     def on_train_batch_end(
@@ -1527,7 +1465,7 @@ class AudioLMModule(pl.LightningModule):
             int(self.global_step) == 0
             and self.cfg["evaluation"].get("online_monitor_enabled", True)
         ):
-            self._generation_probe_tc13()
+            self._generation_probe_tc14()
 
     def _verify_cached_token_equivalence(self) -> None:
         count = int(
@@ -1584,13 +1522,13 @@ class AudioLMModule(pl.LightningModule):
             torch.cuda.reset_peak_memory_stats(self.device)
 
     def on_validation_epoch_end(self) -> None:
-        self._generation_probe_tc13()
+        self._generation_probe_tc14()
 
     def on_train_end(self) -> None:
         if self._last_probe_step != int(self.global_step):
-            self._generation_probe_tc13()
+            self._generation_probe_tc14()
 
-    def _generation_probe_tc13(self) -> None:
+    def _generation_probe_tc14(self) -> None:
         if not self.cfg["evaluation"].get("online_monitor_enabled", True):
             self._last_probe_step = int(self.global_step)
             return
@@ -2006,7 +1944,7 @@ class AudioLMModule(pl.LightningModule):
         unexpected = set(metrics) - allowed_probe_keys
         if unexpected:
             raise RuntimeError(
-                f"tc13 produced non-tc6 W&B probe keys: {sorted(unexpected)}"
+                f"tc14 produced non-tc6 W&B probe keys: {sorted(unexpected)}"
             )
         if self.logger is not None:
             self.logger.log_metrics(metrics, step=self.global_step)
@@ -2321,8 +2259,10 @@ class AudioLMModule(pl.LightningModule):
                 "training_corpus_fingerprint": self.training_corpus_fingerprint,
                 "training_protocol": TRAINING_PROTOCOL,
                 "loss_protocol": LOSS_PROTOCOL,
-                "auxiliary_protocol": self.cfg["train"]["auxiliary"]["protocol"],
-                "auxiliary_profile": self.cfg["train"]["auxiliary"],
+                "distillation_protocol": self.cfg["train"]["distillation"][
+                    "protocol"
+                ],
+                "distillation_profile": self.cfg["train"]["distillation"],
                 "monitor_protocol": MONITOR_PROTOCOL,
                 "schedule_config": self.cfg["train"]["schedule"],
                 "crop_policy": CROP_POLICY,
@@ -2339,7 +2279,6 @@ class AudioLMModule(pl.LightningModule):
                 "documents_consumed": self.documents_consumed,
                 "tokens_consumed": self.tokens_consumed,
                 "last_probe_step": self._last_probe_step,
-                "last_auxiliary_audit_step": self._last_auxiliary_audit_step,
                 "python_rng_state": random.getstate(),
                 "numpy_rng_state": {
                     "bit_generator": numpy_state[0],
@@ -2380,10 +2319,12 @@ class AudioLMModule(pl.LightningModule):
             raise ValueError(
                 "Resume checkpoint uses a different loss protocol"
             )
-        if checkpoint.get("auxiliary_protocol") != LOSS_PROTOCOL:
-            raise ValueError("Resume checkpoint uses a different auxiliary protocol")
-        if checkpoint.get("auxiliary_profile") != self.cfg["train"]["auxiliary"]:
-            raise ValueError("Resume checkpoint uses a different auxiliary profile")
+        if checkpoint.get("distillation_protocol") != LOSS_PROTOCOL:
+            raise ValueError("Resume checkpoint uses a different distillation protocol")
+        if checkpoint.get("distillation_profile") != self.cfg["train"][
+            "distillation"
+        ]:
+            raise ValueError("Resume checkpoint uses a different distillation profile")
         if checkpoint.get("monitor_protocol") != MONITOR_PROTOCOL:
             raise ValueError("Resume checkpoint uses a different monitor protocol")
         if checkpoint.get("resolved_training_profile") is not None and (
@@ -2401,9 +2342,9 @@ class AudioLMModule(pl.LightningModule):
         if checkpoint.get("room_ir_manifest") != self.rir_manifest:
             raise ValueError("Resume checkpoint room-IR assets do not match")
         if checkpoint.get("query_spec") != self.query_spec:
-            raise ValueError("Resume checkpoint tc13 query specification differs")
+            raise ValueError("Resume checkpoint tc14 query specification differs")
         if checkpoint.get("batch_spec") != self.batch_spec:
-            raise ValueError("Resume checkpoint tc13 batch specification differs")
+            raise ValueError("Resume checkpoint tc14 batch specification differs")
         if checkpoint.get("resolved_training_profile") is not None and (
             checkpoint.get("training_corpus_fingerprint")
             != self.training_corpus_fingerprint
@@ -2414,9 +2355,6 @@ class AudioLMModule(pl.LightningModule):
         self.documents_consumed = int(checkpoint.get("documents_consumed", 0))
         self.tokens_consumed = int(checkpoint.get("tokens_consumed", 0))
         self._last_probe_step = int(checkpoint.get("last_probe_step", -1))
-        self._last_auxiliary_audit_step = int(
-            checkpoint.get("last_auxiliary_audit_step", -1)
-        )
         self.snr_epoch_counts = {
             key: int(value)
             for key, value in checkpoint.get(
@@ -2453,10 +2391,7 @@ class AudioLMModule(pl.LightningModule):
     def configure_optimizers(self):
         train_cfg = self.cfg["train"]
         optimizer = torch.optim.AdamW(
-            [
-                *self.model.parameters(),
-                *self.task_auxiliary.parameters(),
-            ],
+            self.model.parameters(),
             lr=float(train_cfg["learning_rate"]),
             betas=tuple(float(value) for value in train_cfg["betas"]),
             weight_decay=float(train_cfg["weight_decay"]),
@@ -2510,10 +2445,12 @@ def train(cfg: dict, *, checkpoint: str | Path | None = None) -> None:
         raise ValueError(f"Training protocol must be {TRAINING_PROTOCOL}")
     if cfg["train"]["schedule"].get("loss_protocol") != LOSS_PROTOCOL:
         raise ValueError(f"Loss protocol must be {LOSS_PROTOCOL}")
-    if cfg["train"].get("auxiliary") != cfg["resolved_training_profile"].get(
-        "auxiliary"
+    if cfg["train"].get("distillation") != cfg[
+        "resolved_training_profile"
+    ].get(
+        "distillation"
     ):
-        raise ValueError("Resolved task-anchored auxiliary profile differs")
+        raise ValueError("Resolved tc14 distillation profile differs")
     seed = int(cfg["train"]["seed"])
     pl.seed_everything(seed, workers=True)
     torch.use_deterministic_algorithms(
@@ -2541,10 +2478,10 @@ def train(cfg: dict, *, checkpoint: str | Path | None = None) -> None:
         device=tokenizer_cfg.get("device", "cuda"),
         lightweight=True,
     )
-    query_spec = validate_tc13_query_configuration(
+    query_spec = validate_tc14_query_configuration(
         cfg, online_tokenizer.spec, online_tokenizer.vocabulary
     )
-    batch_spec = validate_tc13_batch_configuration(cfg, query_spec)
+    batch_spec = validate_tc14_batch_configuration(cfg, query_spec)
     startup_waveform = torch.zeros(
         (1, int(query_spec["waveform_samples"])),
         device=online_tokenizer.device,

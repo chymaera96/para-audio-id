@@ -129,39 +129,6 @@ def _optional_masked_cross_entropy(
     )
 
 
-def _different_track_similarity(
-    clean_states: torch.Tensor,
-    degraded_states: torch.Tensor,
-    clean_track_ids: list[str],
-    degraded_track_ids: list[str],
-) -> torch.Tensor:
-    """Legacy diagnostic retained only for historical loss tests."""
-    comparisons = []
-    for degraded_state, degraded_track in zip(
-        degraded_states, degraded_track_ids, strict=True
-    ):
-        index = next(
-            (
-                candidate
-                for candidate, clean_track in enumerate(clean_track_ids)
-                if clean_track != degraded_track
-            ),
-            None,
-        )
-        if index is not None:
-            comparisons.append(
-                F.cosine_similarity(
-                    degraded_state.unsqueeze(0),
-                    clean_states[index].detach().unsqueeze(0),
-                )[0]
-            )
-    if not comparisons:
-        return torch.full(
-            (), float("nan"), device=clean_states.device, dtype=clean_states.dtype
-        )
-    return torch.stack(comparisons).mean()
-
-
 def degraded_causal_base_losses(
     logits: torch.Tensor,
     input_ids: torch.Tensor,
@@ -172,7 +139,7 @@ def degraded_causal_base_losses(
     *,
     id_digit_weight: float,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-    """tc13 base loss with degraded audio targets excluded."""
+    """tc14 base loss with degraded audio targets excluded."""
     if is_degraded.shape != (logits.shape[0],):
         raise ValueError("is_degraded must contain one value per document")
     if id_digit_weight <= 0:
@@ -214,7 +181,7 @@ def degraded_causal_base_losses(
         or digit_counts.unique().numel() != 1
         or boundary_counts.unique().numel() != 1
     ):
-        raise ValueError("tc13 family weighting requires uniform target counts")
+        raise ValueError("tc14 family weighting requires uniform target counts")
     audio_count = audio_counts[0].to(clean_audio_loss.dtype)
     digit_count = digit_counts[0].to(clean_audio_loss.dtype)
     boundary_count = boundary_counts[0].to(clean_audio_loss.dtype)
@@ -287,199 +254,89 @@ def degraded_causal_base_losses(
     }
 
 
-def noise_consistency_losses(
-    logits: torch.Tensor,
-    final_hidden_states: torch.Tensor,
-    input_ids: torch.Tensor,
-    audio_target_mask: torch.Tensor,
-    id_target_mask: torch.Tensor,
-    boundary_target_mask: torch.Tensor,
-    is_noisy: torch.Tensor,
-    track_ids: list[str],
+def distillation_weight(
+    step: int,
     *,
-    id_digit_weight: float,
-    consistency_weight: float,
-) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-    if is_noisy.shape != (logits.shape[0],):
-        raise ValueError("is_noisy must contain one value per document")
-    if final_hidden_states.shape[:2] != input_ids.shape:
-        raise ValueError("Final hidden states do not match causal input shape")
-    if len(track_ids) != logits.shape[0]:
-        raise ValueError("track_ids must contain one value per document")
-    if id_digit_weight <= 0 or consistency_weight < 0:
-        raise ValueError("Loss weights are invalid")
+    maximum_weight: float,
+    zero_until_step: int = 15_000,
+    ramp_until_step: int = 30_000,
+) -> float:
+    """Resolve tc14's clean-teacher distillation weight."""
+    if step < 0:
+        raise ValueError("Global step cannot be negative")
+    if not math.isfinite(maximum_weight) or maximum_weight < 0:
+        raise ValueError("maximum_weight must be finite and non-negative")
+    if not 0 <= zero_until_step < ramp_until_step:
+        raise ValueError("Invalid distillation schedule boundaries")
+    if step <= zero_until_step:
+        return 0.0
+    if step < ramp_until_step:
+        progress = (step - zero_until_step) / (
+            ramp_until_step - zero_until_step
+        )
+        return maximum_weight * progress
+    return maximum_weight
 
+
+def identifier_logit_distillation_loss(
+    logits: torch.Tensor,
+    id_target_mask: torch.Tensor,
+    is_degraded: torch.Tensor,
+    track_ids: list[str],
+    digit_token_ids: list[int] | torch.Tensor,
+    *,
+    temperature: float = 2.0,
+) -> torch.Tensor:
+    """Distil clean next-digit distributions into same-track degraded rows."""
+    if logits.ndim != 3:
+        raise ValueError("logits must have shape [batch, sequence, vocabulary]")
+    batch_size = logits.shape[0]
     shifted_logits = logits[:, :-1, :]
-    shifted_targets = input_ids[:, 1:]
-    clean_rows = ~is_noisy.bool()
-    noisy_rows = is_noisy.bool()
-    clean_mask = clean_rows[:, None]
-    noisy_mask = noisy_rows[:, None]
-
-    clean_audio_loss = masked_cross_entropy(
-        shifted_logits,
-        shifted_targets,
-        audio_target_mask & clean_mask,
-    )
-    clean_digit_loss = masked_cross_entropy(
-        shifted_logits,
-        shifted_targets,
-        id_target_mask & clean_mask,
-    )
-    noisy_digit_loss = _optional_masked_cross_entropy(
-        shifted_logits,
-        shifted_targets,
-        id_target_mask & noisy_mask,
-    )
-    clean_boundary_loss = masked_cross_entropy(
-        shifted_logits,
-        shifted_targets,
-        boundary_target_mask & clean_mask,
-    )
-    noisy_boundary_loss = _optional_masked_cross_entropy(
-        shifted_logits,
-        shifted_targets,
-        boundary_target_mask & noisy_mask,
-    )
-
-    digit_loss = masked_cross_entropy(
-        shifted_logits,
-        shifted_targets,
-        id_target_mask,
-    )
-    boundary_loss = masked_cross_entropy(
-        shifted_logits,
-        shifted_targets,
-        boundary_target_mask,
-    )
-
+    if id_target_mask.shape != shifted_logits.shape[:2]:
+        raise ValueError("Identifier target mask does not align with shifted logits")
+    if is_degraded.shape != (batch_size,):
+        raise ValueError("is_degraded must contain one value per document")
+    if len(track_ids) != batch_size:
+        raise ValueError("track_ids must contain one value per document")
+    if not math.isfinite(temperature) or temperature <= 0:
+        raise ValueError("temperature must be finite and positive")
     if not (id_target_mask.sum(dim=1) == 5).all():
         raise ValueError("Every document must contain exactly five digit targets")
-    id_columns = id_target_mask.long().argmax(dim=1)
-    id_states = final_hidden_states[
-        torch.arange(input_ids.shape[0], device=input_ids.device), id_columns
-    ]
 
-    noisy_indices = is_noisy.bool().nonzero(as_tuple=False).flatten()
-    if len(noisy_indices):
-        if (noisy_indices % 2 != 1).any():
-            raise ValueError("Noisy rows must be the second row of their pair")
-        clean_indices = noisy_indices - 1
-        if is_noisy[clean_indices].any():
-            raise ValueError("A noisy row must follow a clean anchor")
-        clean_states = F.normalize(id_states[clean_indices], dim=-1)
-        noisy_states = F.normalize(id_states[noisy_indices], dim=-1)
-        same_similarity = F.cosine_similarity(
-            clean_states.detach(), noisy_states, dim=-1
-        ).mean()
-        consistency_loss = 1.0 - same_similarity
-        different_similarity = _different_track_similarity(
-            F.normalize(id_states[clean_rows], dim=-1),
-            noisy_states,
-            [
-                track_id
-                for track_id, keep in zip(
-                    track_ids, clean_rows.tolist(), strict=True
-                )
-                if keep
-            ],
-            [track_ids[index] for index in noisy_indices.tolist()],
-        )
-    else:
-        consistency_loss = logits.sum() * 0.0
-        same_similarity = torch.full(
-            (), float("nan"), device=logits.device, dtype=logits.dtype
-        )
-        different_similarity = same_similarity.clone()
+    digit_ids = torch.as_tensor(
+        digit_token_ids, device=logits.device, dtype=torch.long
+    )
+    if digit_ids.shape != (10,) or digit_ids.unique().numel() != 10:
+        raise ValueError("digit_token_ids must contain ten unique token IDs")
+    if (digit_ids < 0).any() or (digit_ids >= logits.shape[-1]).any():
+        raise ValueError("digit_token_ids fall outside the model vocabulary")
 
-    audio_counts = audio_target_mask.sum(dim=1)
-    digit_counts = id_target_mask.sum(dim=1)
-    boundary_counts = boundary_target_mask.sum(dim=1)
-    if (
-        audio_counts.unique().numel() != 1
-        or digit_counts.unique().numel() != 1
-        or boundary_counts.unique().numel() != 1
+    degraded_indices = is_degraded.bool().nonzero(as_tuple=False).flatten()
+    if not len(degraded_indices):
+        return logits.sum() * 0.0
+    if (degraded_indices % 2 != 1).any():
+        raise ValueError("Degraded rows must be the second row of their pair")
+    clean_indices = degraded_indices - 1
+    if is_degraded[clean_indices].any():
+        raise ValueError("A degraded row must follow a clean anchor")
+    for clean_index, degraded_index in zip(
+        clean_indices.tolist(), degraded_indices.tolist(), strict=True
     ):
-        raise ValueError(
-            "tc6 fixed family weighting requires uniform document target counts"
-        )
-    audio_count = audio_counts[0].to(clean_audio_loss.dtype)
-    digit_count = digit_counts[0].to(clean_audio_loss.dtype)
-    boundary_count = boundary_counts[0].to(clean_audio_loss.dtype)
-    family_weight = (
-        audio_count
-        + float(id_digit_weight) * digit_count
-        + boundary_count
+        if track_ids[clean_index] != track_ids[degraded_index]:
+            raise ValueError("A degraded row and clean anchor must share a track")
+
+    digit_logits = shifted_logits[id_target_mask.bool()].reshape(
+        batch_size, 5, logits.shape[-1]
     )
-    base_loss = (
-        audio_count * clean_audio_loss
-        + float(id_digit_weight) * digit_count * digit_loss
-        + boundary_count * boundary_loss
-    ) / family_weight
-    total = base_loss + float(consistency_weight) * consistency_loss
-    legacy = causal_audio_id_losses(
-        logits,
-        input_ids,
-        audio_target_mask,
-        id_target_mask,
-        boundary_target_mask,
-        id_digit_weight=id_digit_weight,
+    clean_logits = digit_logits[clean_indices].index_select(-1, digit_ids).detach()
+    degraded_logits = digit_logits[degraded_indices].index_select(-1, digit_ids)
+    teacher_probabilities = F.softmax(clean_logits / temperature, dim=-1)
+    degraded_log_probabilities = F.log_softmax(
+        degraded_logits / temperature, dim=-1
     )
-    predictions = shifted_logits.argmax(dim=-1)
-    row_exact = ((predictions == shifted_targets) | ~id_target_mask).all(dim=1)
-    clean_exact = row_exact[clean_rows].float().mean()
-    noisy_exact = (
-        row_exact[noisy_rows].float().mean()
-        if noisy_rows.any()
-        else torch.full_like(clean_exact, float("nan"))
-    )
-    digit_correct = (predictions == shifted_targets) & id_target_mask
-    clean_digit_accuracy = (
-        digit_correct[clean_rows].sum() / id_target_mask[clean_rows].sum()
-    )
-    noisy_digit_accuracy = (
-        digit_correct[noisy_rows].sum() / id_target_mask[noisy_rows].sum()
-        if noisy_rows.any()
-        else torch.full_like(clean_digit_accuracy, float("nan"))
-    )
-    return total, {
-        "loss": total,
-        "base_loss": base_loss,
-        "clean_audio_loss": clean_audio_loss,
-        "clean_audio_perplexity": clean_audio_loss.detach()
-        .clamp(max=math.log(1e6))
-        .exp(),
-        "clean_digit_loss": clean_digit_loss,
-        "noisy_digit_loss": (
-            noisy_digit_loss
-            if noisy_digit_loss is not None
-            else torch.full_like(clean_digit_loss, float("nan"))
-        ),
-        "clean_boundary_loss": clean_boundary_loss,
-        "noisy_boundary_loss": (
-            noisy_boundary_loss
-            if noisy_boundary_loss is not None
-            else torch.full_like(clean_boundary_loss, float("nan"))
-        ),
-        "digit_loss": digit_loss,
-        "boundary_loss": boundary_loss,
-        "audio_family_coefficient": audio_count / family_weight,
-        "digit_family_coefficient": (
-            float(id_digit_weight) * digit_count / family_weight
-        ),
-        "boundary_family_coefficient": boundary_count / family_weight,
-        "consistency_loss": consistency_loss,
-        "same_track_cosine": same_similarity,
-        "different_track_cosine": different_similarity,
-        "legacy_weighted_token_loss": legacy["loss"].detach(),
-        "teacher_forced_digit_accuracy": legacy[
-            "teacher_forced_digit_accuracy"
-        ],
-        "teacher_forced_exact_accuracy": legacy[
-            "teacher_forced_exact_accuracy"
-        ],
-        "clean_teacher_forced_digit_accuracy": clean_digit_accuracy,
-        "noisy_teacher_forced_digit_accuracy": noisy_digit_accuracy,
-        "clean_teacher_forced_exact_accuracy": clean_exact,
-        "noisy_teacher_forced_exact_accuracy": noisy_exact,
-    }
+    per_digit_kl = F.kl_div(
+        degraded_log_probabilities,
+        teacher_probabilities,
+        reduction="none",
+    ).sum(dim=-1)
+    return temperature**2 * per_digit_kl.mean()

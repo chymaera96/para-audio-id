@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 import hashlib
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -14,12 +15,13 @@ DECODER_PROFILES = {
     "small": {"num_layers": 12, "hidden_size": 768, "num_attention_heads": 12},
 }
 SCHEDULE_NAMES = ("noise-rir",)
-SUPPORTED_SELECTED_CODEBOOKS = (2,)
-TC13_ID_DIGIT_WEIGHT = 20.0
-NEW_TRAINING_PROTOCOL = "tc13_five_second_task_anchored_simsiam_v1"
-LOSS_PROTOCOL = "tc13_task_anchored_simsiam_v1"
+SUPPORTED_SELECTED_CODEBOOKS = (3,)
+TC14_ID_DIGIT_WEIGHT = 30.0
+DEFAULT_DISTILLATION_WEIGHT = 0.10
+NEW_TRAINING_PROTOCOL = "tc14_logit_distillation_v1"
+LOSS_PROTOCOL = "tc14_logit_distillation_v1"
 TC12_CURRICULUM = "tc12_noise_rir_curriculum_v1"
-TC13_LR_POLICY = "tc13_warmup_hold_linear_cosine_v1"
+TC14_LR_POLICY = "tc14_warmup_hold_linear_cosine_v1"
 
 
 def cohort_manifest(database_size: int) -> str:
@@ -82,13 +84,12 @@ def schedule_profile(name: str, database_size: int) -> dict[str, Any]:
     if name not in SCHEDULE_NAMES:
         raise ValueError(f"schedule must be one of {SCHEDULE_NAMES}, got {name!r}")
     if database_size != 25_000:
-        raise ValueError("tc13 requires the 25K training cohort")
+        raise ValueError("tc14 requires the 25K training cohort")
     common = {
         "name": name,
         "protocol": NEW_TRAINING_PROTOCOL,
         "loss_protocol": LOSS_PROTOCOL,
         "max_steps": 225_000,
-        "predictive_weight": 0.10,
         "snr_bin_probabilities": [0.40, 0.30, 0.20, 0.10],
         "exact_zero_fraction_in_first_bin": 0.25,
     }
@@ -114,44 +115,41 @@ def canonical_training_profile(
     database_size: int,
     decoder: str,
     schedule: str,
-    selected_codebooks: int = 2,
+    selected_codebooks: int = 3,
+    distillation_weight: float = DEFAULT_DISTILLATION_WEIGHT,
 ) -> dict[str, Any]:
     if database_size != 25_000:
-        raise ValueError("tc13 requires database_size=25000")
+        raise ValueError("tc14 requires database_size=25000")
     if decoder != "small":
-        raise ValueError("tc13 requires the small decoder")
+        raise ValueError("tc14 requires the small decoder")
     if schedule != "noise-rir":
-        raise ValueError("tc13 requires the noise-rir schedule")
-    if selected_codebooks != 2:
-        raise ValueError("tc13 requires two MuQ codebooks")
+        raise ValueError("tc14 requires the noise-rir schedule")
+    if selected_codebooks != 3:
+        raise ValueError("tc14 requires three MuQ codebooks")
+    if not math.isfinite(distillation_weight) or distillation_weight < 0:
+        raise ValueError("distillation_weight must be finite and non-negative")
     profile = {
-        "version": 4,
-        "variant": "tc13-task-anchored",
+        "version": 5,
+        "variant": "tc14-logit-distillation",
         "database_size": database_size,
         "training_tracks_manifest": cohort_manifest(database_size),
         "decoder": decoder_profile(decoder),
         "schedule": schedule_profile(schedule, database_size),
-        "auxiliary": {
+        "distillation": {
             "protocol": LOSS_PROTOCOL,
-            "summary_weight": 0.10,
-            "maximum_predictive_weight": 0.10,
-            "predictive_weight_schedule": {
-                "zero_until_step": 10_000,
+            "temperature": 2.0,
+            "maximum_weight": float(distillation_weight),
+            "weight_schedule": {
+                "zero_until_step": 15_000,
                 "ramp_until_step": 30_000,
-                "maximum_weight": 0.10,
             },
-            "summary_digits": 5,
-            "digit_classes": 10,
-            "projector": [768, 1024, 256],
-            "predictor": [256, 1024, 256],
-            "normalization": "layer_norm",
-            "clean_target_detached_after_projector": True,
-            "ema_target_encoder": False,
-            "contrastive_negatives": False,
+            "target_positions": "five_next_identifier_digits",
+            "vocabulary_scope": "digit_tokens_only",
+            "clean_teacher_detached": True,
         },
     }
     profile["learning_rate_schedule"] = {
-        "policy": TC13_LR_POLICY,
+        "policy": TC14_LR_POLICY,
         "warmup_steps": 500,
         "hold_until_step": 60_000,
         "linear_decay_until_step": 140_000,
@@ -162,9 +160,9 @@ def canonical_training_profile(
 
 def historical_checkpoint_profile(checkpoint: dict) -> dict[str, Any]:
     stored = checkpoint.get("resolved_training_profile")
-    if stored is None or stored.get("variant") != "tc13-task-anchored":
+    if stored is None or stored.get("variant") != "tc14-logit-distillation":
         raise ValueError(
-            "Only task-anchored tc13 checkpoints can be resumed on this branch"
+            "Only tc14 logit-distillation checkpoints can be resumed on this branch"
         )
     return stored
 
@@ -188,7 +186,7 @@ def _checkpoint_query_profile(checkpoint: dict[str, Any]) -> dict[str, Any] | No
         query.get(
             "id_digit_weight",
             train.get(
-                "id_digit_weight", TC13_ID_DIGIT_WEIGHT
+                "id_digit_weight", TC14_ID_DIGIT_WEIGHT
             ),
         )
     )
@@ -206,7 +204,7 @@ def resolve_query_profile(selected_codebooks: int) -> dict[str, Any]:
         )
     return {
         "selected_codebooks": selected_codebooks,
-        "id_digit_weight": TC13_ID_DIGIT_WEIGHT,
+        "id_digit_weight": TC14_ID_DIGIT_WEIGHT,
     }
 
 
@@ -216,8 +214,13 @@ def resolve_training_config(
     decoder: str | None = None,
     schedule: str | None = None,
     selected_codebooks: int | None = None,
+    distillation_weight: float | None = None,
     checkpoint: str | Path | None = None,
 ) -> dict[str, Any]:
+    if distillation_weight is not None and (
+        not math.isfinite(distillation_weight) or distillation_weight < 0
+    ):
+        raise ValueError("distillation_weight must be finite and non-negative")
     cfg = deepcopy(config)
     data = cfg.setdefault("data", {})
     database_size = int(data.get("database_size", data.get("max_training_tracks", 0)))
@@ -243,10 +246,20 @@ def resolve_training_config(
             resolved_schedule != resumed["schedule"]["name"]
         ):
             raise ValueError("Explicit training profile does not match resume checkpoint")
+        saved_distillation_weight = float(
+            resumed["distillation"]["maximum_weight"]
+        )
+        if (
+            distillation_weight is not None
+            and distillation_weight != saved_distillation_weight
+        ):
+            raise ValueError(
+                "Explicit distillation weight does not match resume checkpoint"
+            )
         profile = deepcopy(resumed)
     else:
         configured_codebooks = int(
-            cfg.setdefault("tokenizer", {}).get("selected_codebooks", 2)
+            cfg.setdefault("tokenizer", {}).get("selected_codebooks", 3)
         )
         profile_codebooks = (
             selected_codebooks
@@ -258,6 +271,15 @@ def resolve_training_config(
             decoder=resolved_decoder,
             schedule=resolved_schedule,
             selected_codebooks=profile_codebooks,
+            distillation_weight=(
+                float(distillation_weight)
+                if distillation_weight is not None
+                else float(
+                    cfg.setdefault("train", {})
+                    .get("distillation", {})
+                    .get("maximum_weight", DEFAULT_DISTILLATION_WEIGHT)
+                )
+            ),
         )
 
     tokenizer = cfg.setdefault("tokenizer", {})
@@ -281,7 +303,7 @@ def resolve_training_config(
                 "Resume checkpoint has an incompatible codebook/loss profile"
             )
     else:
-        configured_codebooks = int(tokenizer.get("selected_codebooks", 2))
+        configured_codebooks = int(tokenizer.get("selected_codebooks", 3))
         query_profile = resolve_query_profile(
             selected_codebooks
             if selected_codebooks is not None
@@ -309,7 +331,7 @@ def resolve_training_config(
     train["schedule"] = {
         key: value for key, value in profile["schedule"].items() if key != "max_steps"
     }
-    train["auxiliary"] = deepcopy(profile["auxiliary"])
+    train["distillation"] = deepcopy(profile["distillation"])
     lr_profile = profile.get("learning_rate_schedule")
     if lr_profile is not None:
         train["warmup_steps"] = int(lr_profile["warmup_steps"])

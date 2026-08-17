@@ -28,6 +28,7 @@ def with_overrides(
     decoder: str | None = None,
     schedule: str | None = None,
     selected_codebooks: int | None = None,
+    distillation_weight: float | None = None,
     checkpoint: str | Path | None = None,
 ) -> dict:
     cfg = deepcopy(config)
@@ -50,5 +51,6 @@ def with_overrides(
         decoder=decoder,
         schedule=schedule,
         selected_codebooks=selected_codebooks,
+        distillation_weight=distillation_weight,
         checkpoint=checkpoint,
     )

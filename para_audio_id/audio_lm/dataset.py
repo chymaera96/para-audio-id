@@ -420,7 +420,6 @@ def collate_causal_documents(
     audio_target_masks = []
     id_target_masks = []
     boundary_target_masks = []
-    identifier_digits = []
     for example in examples:
         audio = example["audio_tokens"].long()
         code = example["code"]
@@ -428,7 +427,6 @@ def collate_causal_documents(
             "0" <= character <= "9" for character in code
         ):
             raise ValueError("Every catalogue code must contain five decimal digits")
-        digit_classes = torch.tensor([int(character) for character in code])
         digits = vocabulary.encode_code(code)
         sequence = torch.cat(
             (
@@ -455,7 +453,6 @@ def collate_causal_documents(
         audio_target_masks.append(audio_mask)
         id_target_masks.append(id_mask)
         boundary_target_masks.append(boundary_mask)
-        identifier_digits.append(digit_classes)
 
     maximum = max(len(sequence) for sequence in sequences)
     input_ids = torch.full(
@@ -477,7 +474,6 @@ def collate_causal_documents(
         "audio_target_mask": audio_mask,
         "id_target_mask": id_mask,
         "boundary_target_mask": boundary_mask,
-        "identifier_digits": torch.stack(identifier_digits).long(),
         "code": [example["code"] for example in examples],
         "track_id": [example["track_id"] for example in examples],
         "source_path": [example.get("source_path") for example in examples],

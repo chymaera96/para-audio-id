@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 import torch
 
+from para_audio_id.audio_lm.losses import distillation_weight
 from para_audio_id.audio_lm.noise import resolved_augmentation_schedule
 from para_audio_id.audio_lm.profiles import (
     NEW_TRAINING_PROTOCOL,
@@ -17,7 +18,7 @@ from para_audio_id.audio_lm.training import learning_rate_multiplier
 
 def base_config() -> dict:
     return {
-        "tokenizer": {"selected_codebooks": 2},
+        "tokenizer": {"selected_codebooks": 3},
         "data": {
             "database_size": 25_000,
             "room_ir": {
@@ -27,20 +28,20 @@ def base_config() -> dict:
             },
         },
         "model": {},
-        "train": {},
+        "train": {"distillation": {"maximum_weight": 0.1}},
     }
 
 
-def test_tc13_profile_is_fixed_and_resolves_defaults():
+def test_tc14_profile_is_fixed_and_resolves_defaults():
     profile = canonical_training_profile(
         database_size=25_000,
         decoder="small",
         schedule="noise-rir",
-        selected_codebooks=2,
+        selected_codebooks=3,
     )
     assert cohort_manifest(25_000) == "data/training_tracks_25k.json"
-    assert profile["version"] == 4
-    assert profile["variant"] == "tc13-task-anchored"
+    assert profile["version"] == 5
+    assert profile["variant"] == "tc14-logit-distillation"
     assert profile["decoder"] == {
         "name": "small",
         "num_layers": 12,
@@ -49,29 +50,23 @@ def test_tc13_profile_is_fixed_and_resolves_defaults():
     }
     assert profile["schedule"]["protocol"] == NEW_TRAINING_PROTOCOL
     assert profile["schedule"]["max_steps"] == 225_000
-    assert profile["auxiliary"] == {
-        "protocol": "tc13_task_anchored_simsiam_v1",
-        "summary_weight": 0.10,
-        "maximum_predictive_weight": 0.10,
-        "predictive_weight_schedule": {
-            "zero_until_step": 10_000,
+    assert profile["distillation"] == {
+        "protocol": "tc14_logit_distillation_v1",
+        "temperature": 2.0,
+        "maximum_weight": 0.1,
+        "weight_schedule": {
+            "zero_until_step": 15_000,
             "ramp_until_step": 30_000,
-            "maximum_weight": 0.10,
         },
-        "summary_digits": 5,
-        "digit_classes": 10,
-        "projector": [768, 1024, 256],
-        "predictor": [256, 1024, 256],
-        "normalization": "layer_norm",
-        "clean_target_detached_after_projector": True,
-        "ema_target_encoder": False,
-        "contrastive_negatives": False,
+        "target_positions": "five_next_identifier_digits",
+        "vocabulary_scope": "digit_tokens_only",
+        "clean_teacher_detached": True,
     }
     resolved = resolve_training_config(base_config())
     assert resolved["resolved_training_profile"] == profile
     assert resolved["resolved_query_profile"] == {
-        "selected_codebooks": 2,
-        "id_digit_weight": 20.0,
+        "selected_codebooks": 3,
+        "id_digit_weight": 30.0,
     }
     assert resolved["train"]["max_steps"] == 225_000
     assert resolved["train"]["warmup_steps"] == 500
@@ -83,61 +78,62 @@ def test_tc13_profile_is_fixed_and_resolves_defaults():
         ({"database_size": 10_000}, "database_size=25000"),
         ({"decoder": "medium"}, "small decoder"),
         ({"schedule": "noise"}, "noise-rir schedule"),
-        ({"selected_codebooks": 1}, "two MuQ codebooks"),
+        ({"selected_codebooks": 2}, "three MuQ codebooks"),
+        ({"distillation_weight": -0.1}, "non-negative"),
     ],
 )
-def test_tc13_rejects_other_training_profiles(kwargs, message):
+def test_tc14_rejects_other_training_profiles(kwargs, message):
     values = {
         "database_size": 25_000,
         "decoder": "small",
         "schedule": "noise-rir",
-        "selected_codebooks": 2,
+        "selected_codebooks": 3,
     }
     values.update(kwargs)
     with pytest.raises(ValueError, match=message):
         canonical_training_profile(**values)
 
 
-def test_tc13_resume_accepts_only_exact_tc13_profile(tmp_path):
+def test_tc14_resume_inherits_weight_and_rejects_overrides(tmp_path):
     profile = canonical_training_profile(
         database_size=25_000,
         decoder="small",
         schedule="noise-rir",
-        selected_codebooks=2,
+        selected_codebooks=3,
+        distillation_weight=0.0,
     )
-    path = tmp_path / "tc13.ckpt"
+    path = tmp_path / "tc14.ckpt"
     torch.save(
         {
             "resolved_training_profile": profile,
-            "tokenizer_spec": {"selected_codebooks": 2},
-            "query_spec": {"id_digit_weight": 20.0},
+            "tokenizer_spec": {"selected_codebooks": 3},
+            "query_spec": {"id_digit_weight": 30.0},
         },
         path,
     )
     resolved = resolve_training_config(base_config(), checkpoint=path)
-    assert resolved["resolved_training_profile"] == profile
+    assert resolved["train"]["distillation"]["maximum_weight"] == 0.0
     assert historical_checkpoint_profile(torch.load(path, weights_only=False)) == profile
-    with pytest.raises(ValueError, match="does not match resume checkpoint"):
-        resolve_training_config(base_config(), decoder="medium", checkpoint=path)
+    with pytest.raises(ValueError, match="distillation weight"):
+        resolve_training_config(
+            base_config(), distillation_weight=0.1, checkpoint=path
+        )
 
-    old = tmp_path / "tc12.ckpt"
+    old = tmp_path / "tc13.ckpt"
     torch.save(
-        {"resolved_training_profile": {"version": 2, "variant": "tc12-cb2"}},
+        {
+            "resolved_training_profile": {
+                "version": 4,
+                "variant": "tc13-task-anchored",
+            }
+        },
         old,
     )
-    with pytest.raises(ValueError, match="Only task-anchored tc13 checkpoints"):
+    with pytest.raises(ValueError, match="Only tc14"):
         resolve_training_config(base_config(), checkpoint=old)
 
-    raw_tc13 = tmp_path / "raw-tc13.ckpt"
-    torch.save(
-        {"resolved_training_profile": {"version": 3, "variant": "tc13"}},
-        raw_tc13,
-    )
-    with pytest.raises(ValueError, match="Only task-anchored tc13 checkpoints"):
-        resolve_training_config(base_config(), checkpoint=raw_tc13)
 
-
-def test_tc13_noise_rir_boundaries_and_severity():
+def test_tc14_noise_rir_boundaries_remain_unchanged():
     profile = schedule_profile("noise-rir", 25_000)
     expected = {
         9_999: (1.0, 0.0, 0.0, 0.0),
@@ -146,7 +142,6 @@ def test_tc13_noise_rir_boundaries_and_severity():
         30_000: (0.40, 0.30, 0.30, 0.0),
         45_000: (0.25, 0.325, 0.30, 0.125),
         60_000: (0.10, 0.35, 0.30, 0.25),
-        140_000: (0.10, 0.35, 0.30, 0.25),
         225_000: (0.10, 0.35, 0.30, 0.25),
     }
     for step, probabilities in expected.items():
@@ -157,12 +152,6 @@ def test_tc13_noise_rir_boundaries_and_severity():
             resolved.rir_probability,
             resolved.noise_rir_probability,
         ) == pytest.approx(probabilities)
-    assert resolved_augmentation_schedule(9_999, profile).predictive_weight == 0.0
-    assert resolved_augmentation_schedule(10_000, profile).predictive_weight == 0.0
-    assert resolved_augmentation_schedule(20_000, profile).predictive_weight == pytest.approx(
-        0.05
-    )
-    assert resolved_augmentation_schedule(30_000, profile).predictive_weight == 0.10
     assert resolved_augmentation_schedule(
         10_000, profile
     ).rir_severity_quantile == pytest.approx(1 / 3)
@@ -174,12 +163,21 @@ def test_tc13_noise_rir_boundaries_and_severity():
     ).rir_severity_quantile == pytest.approx(1.0)
 
 
-def test_tc13_learning_rate_schedule_extends_to_225k():
+@pytest.mark.parametrize(
+    ("step", "expected"),
+    [(15_000, 0.0), (22_500, 0.05), (30_000, 0.1), (225_000, 0.1)],
+)
+def test_tc14_distillation_weight_schedule(step, expected):
+    assert distillation_weight(step, maximum_weight=0.1) == pytest.approx(expected)
+    assert distillation_weight(step, maximum_weight=0.0) == 0.0
+
+
+def test_tc14_learning_rate_schedule_extends_to_225k():
     profile = canonical_training_profile(
         database_size=25_000,
         decoder="small",
         schedule="noise-rir",
-        selected_codebooks=2,
+        selected_codebooks=3,
     )
     train = {
         "max_steps": 225_000,

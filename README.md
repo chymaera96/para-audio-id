@@ -53,7 +53,7 @@ python probe_muq_tokenizer.py \
 The probe resolves and records an immutable Hugging Face revision, checks that the
 checkpoint contains eight 1,024-entry Mel-RVQ codebooks, proves MuQ's public target
 layout is block-major, verifies deterministic extraction, converts the selected
-codebook to time-major tokens, and confirms the complete causal document fits the
+codebooks to time-major tokens, and confirms the complete causal document fits the
 512-token context.
 
 Failure is a hard blocker. The pipeline does not substitute rounded continuous
@@ -65,20 +65,19 @@ The repository still contains the older cache-preparation commands, but current 
 does not use canonical, shifted, or half-offset token stores for training or
 evaluation. They remain useful only when reproducing tc2–tc6 from Git history.
 
-Set `data.database_size` to `10000`, `25000`, or `100000`, then prepare that
-size-specific identity manifest. This never overwrites a different-size manifest:
+tc14 uses the existing 25K identity manifest. Prepare it if it is not already
+available:
 
 ```bash
 python prepare_training_cohort.py configs/fma_large.yaml
-# Writes training_tracks_10k.json, training_tracks_25k.json, or
-# training_tracks_100k.json according to data.database_size.
+# Writes or validates data/training_tracks_25k.json.
 ```
 
 ## Training
 
 The default causal LM is a randomly initialized 12-layer GPT-2-style decoder with
 hidden size 768, 12 heads, tied embeddings, and no dropout. The vocabulary has
-2,048 codebook-separated audio tokens, `[BOS]`, `[ID]`, ten dedicated digit tokens,
+3,072 codebook-separated audio tokens, `[BOS]`, `[ID]`, ten dedicated digit tokens,
 and `[EOS]`.
 
 Training samples online five-second crops from the fixed 25K cohort. Each
@@ -90,25 +89,22 @@ tokenizes all eight final waveforms in each physical microbatch.
 ```text
 loss =
     (
-        250 * mean(clean audio-token CE)
-        + 100 * mean(all digit CE)
+        375 * mean(clean audio-token CE)
+        + 150 * mean(all digit CE)
         + 2 * mean(all boundary CE)
-    ) / 352
-    + 0.10 * full-identifier summary CE
-    + lambda_predictive * task-anchored predictive loss
+    ) / 527
+    + lambda_KD * identifier-logit distillation
 ```
 
-The training-only summary head predicts all five identifier digits directly
-from every final-layer `[ID]` state. For degraded pairs, a LayerNorm projector
-maps clean and degraded states into 256 dimensions, a predictor transforms only
-the degraded projection, and normalized squared error matches it to the
-detached clean projection. This uses the existing single decoder pass and no
-EMA model, negatives, queue, or inference-time auxiliary head. The causal loss
-coefficients remain approximately 0.710 audio, 0.284 digits, and 0.006
-boundaries with identifier weight 20. Checkpoints record the
-`tc13_task_anchored_simsiam_v1` loss protocol.
+For every degraded secondary, tc14 uses its clean anchor as a stop-gradient
+teacher at the five causal positions that predict the next identifier digit.
+The KL divergence is computed only over the ten digit-token logits with
+temperature 2. This uses the existing single decoder pass and adds no model
+parameters or inference-time modules. The causal coefficients remain
+approximately 0.712 audio, 0.285 digits, and 0.004 boundaries with identifier
+weight 30. Checkpoints record `tc14_logit_distillation_v1`.
 
-For tc13, the secondary-view curriculum is:
+For tc14, the secondary-view curriculum is:
 
 | Raw steps | Clean | Noise | RIR | Noise + RIR | RIR severity |
 | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -117,53 +113,55 @@ For tc13, the secondary-view curriculum is:
 | 30–60K | 0.40 → 0.10 | 0.30 → 0.35 | 0.30 | 0 → 0.25 | expand to full range |
 | 60–225K | 0.10 | 0.35 | 0.30 | 0.25 | full range |
 
-The predictive weight ramps from 0 to 0.1 over 10K–30K and then remains at 0.1;
-the summary weight is 0.1 from step zero.
+The distillation weight is zero through 15K, ramps to its configured maximum
+over 15K–30K, and then remains fixed. Its maximum defaults to 0.1 and can be
+set to zero for the matched no-distillation ablation.
 RIR severity is ranked by post-peak 99%-energy decay duration. The eligible
 training pool expands from its mildest third, through two thirds at 30K, to all
 IRs at 60K. Convolution remains full-wet at every severity.
 
 Noisy examples use fixed SNR-bin probabilities `0.40/0.30/0.20/0.10` for
 `0–5/5–10/10–20/20–30 dB`; 10% of noisy views are exactly 0 dB. The LR uses
-the tc13 schedule: linear warm-up over 500 steps to `3e-4`, hold through 60K,
+the tc14 schedule: linear warm-up over 500 steps to `3e-4`, hold through 60K,
 linear decay to `1.5e-4` at 140K, then cosine decay to `1.5e-5` at 225K.
 
 The single-GPU logical batch is 80 tracks × 2 segments: a physical microbatch of
 four tracks × two segments with twenty gradient-accumulation steps. Each
-microbatch contains 2,000 audio targets and 40 seconds of waveform; each
-optimizer update contains 40,000 audio targets and 800 seconds of waveform.
+microbatch contains 3,000 audio targets and 40 seconds of waveform; each
+optimizer update contains 60,000 audio targets and 800 seconds of waveform.
 
 RIR uses full-wet causal convolution with two seconds of preceding audio;
 the prefix is discarded after convolution so reverberant tails from preceding
 music enter the query. Room IR train/test assets are source- and content-disjoint.
 
-tc13 runs for 225K optimizer steps. Checkpoints remain every 500 steps and monitoring
+tc14 runs for 225K optimizer steps. Checkpoints remain every 500 steps and monitoring
 remains every 2,500 steps. For direct comparison with tc6, the same seeded 100-track cohort is
 evaluated using one balanced canonical, integer-shifted, and held-out
 half-offset crop per track. All three groups are evaluated clean and at
 0/5/10/20/30 dB at step zero, every 2,500 steps, and at completion. Evaluation
 crops are five seconds long and are decoded and tokenized online; training still has
-no runtime token-store dependency. W&B keeps a compact set of causal and
-task-anchored metrics plus aggregate RIR-only and noise+RIR beam Top-1. Detailed
-auxiliary diagnostics are appended to `auxiliary_metrics.jsonl`. Complete beam
+no runtime token-store dependency. W&B preserves the causal metrics and adds
+only the epoch-level distillation loss, alongside aggregate RIR-only and
+noise+RIR beam Top-1. Complete beam
 Top-1/5/10 and MRR results are appended to `probe_metrics.jsonl`.
 
 ```bash
 python train.py configs/fma_large.yaml \
   --decoder small \
   --schedule noise-rir \
-  --codebooks 2 \
-  --run-id tc13 \
+  --codebooks 3 \
+  --distillation-weight 0.1 \
+  --run-id tc14 \
   --devices 1 \
   --wandb-online
 ```
 
 This branch accepts only `--decoder small`, `--schedule noise-rir`, and
-`--codebooks 2`. The resolved tc13 profile is embedded in every checkpoint.
+`--codebooks 3`. The resolved tc14 profile and distillation maximum are embedded
+in every checkpoint. Use `--distillation-weight 0.0` for the matched ablation.
 
-Task-anchored W&B metrics are summary loss/exact accuracy, predictive loss,
-paired prediction cosine, and paired-versus-shuffled prediction margin, each
-with the established `_step` and `_epoch` suffixes.
+The only new W&B key is `train/distillation_loss_epoch`; it remains available
+when the configured optimization weight is zero.
 
 Resume the exact saved model, optimizer, scheduler, loop, sampler pass, and RNG
 state:
@@ -171,12 +169,12 @@ state:
 ```bash
 python train.py configs/fma_large.yaml \
   --devices 1 \
-  --run-id tc13 \
+  --run-id tc14 \
   --wandb-online \
   --resume
 ```
 
-On resume, profile values are recovered from the checkpoint. Any pre-tc13
+On resume, profile values are recovered from the checkpoint. Any pre-tc14
 checkpoint or incompatible explicit override fails before model construction.
 
 Checkpoints are written every 500 optimizer steps under:
@@ -188,7 +186,7 @@ Checkpoints are written every 500 optimizer steps under:
 Checkpoints embed the vocabulary, exact cohort, resolved profile, random-crop and replacement
 policies, fixed monitor manifest, noise/tokenizer fingerprints, sampler state,
 RNG state, query specification, and code mapping. Resume is accepted only for
-compatible tc13 checkpoints. Backward compatibility with earlier experiments
+compatible tc14 checkpoints. Backward compatibility with earlier experiments
 is intentionally not provided on this trial branch.
 
 PyTorch deterministic algorithms and seeded Python, NumPy, Torch, samplers, and

@@ -36,7 +36,7 @@ class AugmentationSchedule:
     noise_probability: float
     rir_probability: float
     noise_rir_probability: float
-    predictive_weight: float
+    consistency_weight: float
     snr_bin_probabilities: tuple[float, float, float, float] | None
     phase: str
     rir_severity_quantile: float | None = None
@@ -204,7 +204,9 @@ def resolved_augmentation_schedule(
         snr_bins = tuple(
             float(value) for value in schedule["snr_bin_probabilities"]
         )
-        predictive = float(schedule["predictive_weight"])
+        # The active tc14 objective schedules distillation independently from
+        # the unchanged corruption curriculum.
+        legacy_consistency = 0.0
         if step < clean_end:
             return AugmentationSchedule(
                 1.0, 0.0, 0.0, 0.0, 0.0, None, "clean", None
@@ -216,7 +218,7 @@ def resolved_augmentation_schedule(
                 0.30 * progress,
                 0.30 * progress,
                 0.0,
-                predictive * progress,
+                legacy_consistency,
                 snr_bins,
                 "noise_rir_ramp",
                 (1.0 + progress) / 3.0,
@@ -230,7 +232,7 @@ def resolved_augmentation_schedule(
                 0.30 + 0.05 * progress,
                 0.30,
                 0.25 * progress,
-                predictive,
+                legacy_consistency,
                 snr_bins,
                 "combined_ramp",
                 (2.0 + progress) / 3.0,
@@ -240,7 +242,7 @@ def resolved_augmentation_schedule(
             0.35,
             0.30,
             0.25,
-            predictive,
+            legacy_consistency,
             snr_bins,
             "full_distribution",
             1.0,

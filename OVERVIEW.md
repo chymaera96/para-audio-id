@@ -21,6 +21,7 @@ should be taken from the corresponding W&B run or evaluation JSON.
 | `tc12` | Same seeded 25K tracks | Earlier progressive noise/RIR curriculum, one codebook | 4 | 175K | Reduces the acoustic vocabulary and introduces degradation earlier |
 | `tc12-cb2` | Same seeded 25K tracks | tc12 curriculum with two codebooks | 8 | 225K | Restores the two-codebook query and extends the final LR decay for convergence |
 | `tc13` | Same seeded 25K tracks | Five-second online crops with tc12-cb2 noise/RIR curriculum | 20 | 225K | Returns to five-second evidence while preserving the 80-track optimizer batch |
+| `tc14` | Same seeded 25K tracks | Five-second, three-codebook clean/degraded pairs | 30 | 225K | Replaces tc13 representation auxiliaries with clean-to-degraded digit-logit distillation |
 
 Each entry is a from-scratch model unless explicitly documented otherwise.
 In particular, `tc4` is not initialized from `tc3`, `tc5` is not initialized
@@ -40,13 +41,11 @@ From `tc2` onward, the system is a discrete-audio causal language model:
 - Historical tc2–tc11 runs serialize the first two of MuQ's eight 1,024-entry codebooks in
   time-major, codebook-interleaved order. A five-second crop produces 125 frames
   and 250 audio tokens; tc8's two-second crop produces 50 frames and 100 tokens.
-- The current `mel-rvq` default selects only the first codebook. A two-second crop
-  therefore has 50 audio tokens, a 58-token causal document, and uses
-  `id_digit_weight: 4` to preserve the historical audio-to-identifier ratio.
-  Existing two-codebook checkpoints retain their embedded 2-codebook/weight-8
-  query profile when evaluated or resumed.
-- The vocabulary has 2,061 entries: 2,048 audio tokens, `[BOS]`, `[ID]`, ten
-  digit tokens, and `[EOS]`.
+- The active tc14 profile selects three codebooks. Its five-second crop has 375
+  audio tokens, a 383-token causal document, and uses `id_digit_weight: 30`.
+- tc14's vocabulary has 3,085 entries: 3,072 audio tokens, `[BOS]`, `[ID]`, ten
+  digit tokens, and `[EOS]`. Historical checkpoint vocabularies remain embedded
+  in their respective checkpoints.
 - The model is a randomly initialized GPT-2-style causal transformer: 12 layers,
   hidden size 768, 12 attention heads, a 512-token context, tied embeddings, and
   zero dropout. It uses Hugging Face's `GPT2LMHeadModel` implementation but no
@@ -360,17 +359,30 @@ projector. The summary weight is 0.1 from step zero; the predictive weight
 ramps from 0 to 0.1 over 10K–30K. Auxiliary modules are training-only and do
 not change autoregressive evaluation.
 
+## `tc14`: three-codebook identifier-logit distillation
+
+`tc14` retains tc13's five-second 25K noise/RIR experiment, batch exposure,
+225K endpoint, and LR schedule while increasing MuQ serialization to three
+codebooks. Each query contains 375 audio targets and uses identifier weight 30,
+giving the base objective `(375 audio + 150 digit + 2 boundary) / 527`.
+
+The tc13 summary, projector, predictor, and cosine objectives are removed.
+For degraded pairs, the clean row supplies detached temperature-2 teacher
+distributions over the ten digit tokens at each of the five next-digit
+positions. The distillation maximum defaults to 0.1, ramps over 15K–30K, and
+can be set to zero for an otherwise matched ablation. Inference remains the
+same five-step autoregressive identifier generation.
+
 ## Unified training profiles
 
-The active `medium` branch is single-purpose for tc13: small decoder, 25K
-cohort, noise-RIR schedule, two codebooks, and five-second queries. Checkpoints
-store this fully resolved profile and reject the earlier raw-cosine tc13 and
-all prior experiments. W&B retains existing non-consistency metric names and
-adds only the compact summary/predictive diagnostic set.
+The active `mel-rvq` branch is single-purpose for tc14: small decoder, 25K
+cohort, noise-RIR schedule, three codebooks, and five-second queries. Checkpoints
+store the resolved distillation profile and reject tc13 and all earlier runs.
+W&B retains existing causal names and adds only epoch-level distillation loss.
 
 ## Interpretation
 
-The progression isolates ten questions:
+The progression isolates eleven questions:
 
 1. `tc2`: can the causal formulation memorize audio-token-to-code mappings?
 2. `tc3`: does a smaller catalogue and stronger ID supervision make that
@@ -392,6 +404,8 @@ The progression isolates ten questions:
    and codebook count change two-second identification?
 10. `tc13`: with the mature tc12-cb2 training recipe fixed, how much does
     returning to a five-second query improve identification?
+11. `tc14`: does task-level clean-to-degraded digit-logit distillation improve
+    robustness without adding an inference-time representation head?
 
 Teacher-forced digit accuracy is useful for optimization diagnostics, but the
 scientific identification result is free-running exact accuracy and beam

@@ -4,7 +4,7 @@ tokenizer:
   model_name: OpenMuQ/MuQ-large-msd-iter
   revision: main
   sample_rate: 24000
-  selected_codebooks: 2
+  selected_codebooks: 3
   device: cuda
 
 model:
@@ -45,12 +45,12 @@ train:
   warmup_steps: 500
   evaluation_interval: 2500
   checkpoint_interval: 500
-  id_digit_weight: 20.0
+  id_digit_weight: 30.0
   gradient_clip_norm: 1.0
-  auxiliary:
-    protocol: tc13_task_anchored_simsiam_v1
-    summary_weight: 0.10
-    maximum_predictive_weight: 0.10
+  distillation:
+    protocol: tc14_logit_distillation_v1
+    temperature: 2.0
+    maximum_weight: 0.10
   wandb:
     enabled: false
     project: para-audio-id

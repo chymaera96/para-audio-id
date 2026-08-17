@@ -44,7 +44,7 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
     catalogue = tmp_path / "catalogue.jsonl"
     rows = []
     track_ids = []
-    for index in range(10):
+    for index in range(16):
         path = f"{index}.wav"
         track_id = f"track-{index}"
         sf.write(audio_root / path, waveform, 8_000)
@@ -65,7 +65,7 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
             {
                 "protocol": "fresh_seeded_catalogue_cohort_v1",
                 "seed": 7,
-                "count": 10,
+                "count": 16,
                 "catalogue_fingerprint": catalogue_fingerprint(records),
                 "track_ids": track_ids,
                 "code_mapping_fingerprint": hashlib.sha256(
@@ -140,9 +140,9 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
         "data": {
             "audio_root": str(audio_root),
             "catalogue": str(catalogue),
-            "training_tracks_manifest": str(manifest),
-            "database_size": 10,
-            "max_training_tracks": 10,
+                "training_tracks_manifest": str(manifest),
+                "database_size": 16,
+                "max_training_tracks": 16,
             "segment_duration": 5.0,
             "crop_retries": 4,
             "replacement_retries": 32,
@@ -164,7 +164,7 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
             "checkpoint_dir": str(tmp_path / "checkpoints"),
             "run_id": "smoke",
             "max_steps": 2,
-            "tracks_per_microbatch": 4,
+            "tracks_per_microbatch": 16,
             "segments_per_track": 2,
             "learning_rate": 3e-4,
             "betas": [0.9, 0.95],
@@ -191,7 +191,7 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
         "resolved_training_profile": {
             "version": 5,
             "variant": "tc14-logit-distillation",
-            "database_size": 10,
+            "database_size": 16,
             "training_tracks_manifest": str(manifest),
             "decoder": {
                 "name": "small",
@@ -231,7 +231,7 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
             "devices": 1,
             "strategy": "auto",
             "precision": "32-true",
-            "accumulate_grad_batches": 20,
+            "accumulate_grad_batches": 5,
             "log_every_n_steps": 1,
         },
     }
@@ -285,13 +285,13 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
         "max_position_embeddings": 512,
     }
     assert checkpoint["batch_spec"] == {
-        "tracks_per_microbatch": 4,
+        "tracks_per_microbatch": 16,
         "documents_per_track": 2,
-        "documents_per_microbatch": 8,
-        "audio_targets_per_microbatch": 3_000,
-        "causal_tokens_per_microbatch": 3_064,
-        "waveform_seconds_per_microbatch": 40.0,
-        "gradient_accumulation_steps": 20,
+        "documents_per_microbatch": 32,
+        "audio_targets_per_microbatch": 12_000,
+        "causal_tokens_per_microbatch": 12_256,
+        "waveform_seconds_per_microbatch": 160.0,
+        "gradient_accumulation_steps": 5,
         "tracks_per_optimizer_step": 80,
         "documents_per_optimizer_step": 160,
         "audio_targets_per_optimizer_step": 60_000,

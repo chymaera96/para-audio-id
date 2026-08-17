@@ -82,10 +82,10 @@ TC14_SELECTED_CODEBOOKS = 3
 TC14_ID_DIGIT_WEIGHT = 30.0
 TC14_DIGIT_TARGETS = 5
 TC14_BOUNDARY_TARGETS = 2
-TC14_TRACKS_PER_MICROBATCH = 4
+TC14_TRACKS_PER_MICROBATCH = 16
 TC14_SEGMENTS_PER_TRACK = 2
-TC14_DOCUMENTS_PER_MICROBATCH = 8
-TC14_ACCUMULATE_GRAD_BATCHES = 20
+TC14_DOCUMENTS_PER_MICROBATCH = 32
+TC14_ACCUMULATE_GRAD_BATCHES = 5
 TRAIN_METRICS = {
     "clean_audio_loss",
     "digit_loss",
@@ -1006,12 +1006,10 @@ class AudioLMModule(pl.LightningModule):
         if self.online_tokenizer is None:
             raise RuntimeError("Online MuQ tokenizer has not been initialized")
         waveforms = crop_batch["waveforms"].to(self.device)
-        if self.device.type == "cuda":
-            torch.cuda.synchronize(self.device)
+        # Keep the hot path asynchronous. This measures host-side submission
+        # time on CUDA; explicit end-to-end profiling belongs outside training.
         token_started = time.perf_counter()
         audio_tokens = self.online_tokenizer.tokenize(waveforms)
-        if self.device.type == "cuda":
-            torch.cuda.synchronize(self.device)
         tokenizer_seconds = time.perf_counter() - token_started
         expected_tokens = round(
             float(self.cfg["data"]["segment_duration"])
@@ -1023,7 +1021,6 @@ class AudioLMModule(pl.LightningModule):
                 f"Online MuQ returned {tuple(audio_tokens.shape)}, expected "
                 f"({len(crop_batch['metadata'])}, {expected_tokens})"
             )
-        audio_tokens_cpu = audio_tokens.cpu()
         examples = [
             {
                 "audio_tokens": tokens,
@@ -1038,7 +1035,7 @@ class AudioLMModule(pl.LightningModule):
                 ),
             }
             for tokens, metadata in zip(
-                audio_tokens_cpu, crop_batch["metadata"], strict=True
+                audio_tokens, crop_batch["metadata"], strict=True
             )
         ]
         prepared = collate_causal_documents(

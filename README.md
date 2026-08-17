@@ -84,7 +84,7 @@ Training samples online five-second crops from the fixed 25K cohort. Each
 identity contributes a clean anchor and one secondary view: a distinct clean
 crop, an exact same-crop background-noise view, an exact same-crop room-reverb
 view, or the combined noise-then-reverb view. One frozen lightweight MuQ call
-tokenizes all eight final waveforms in each physical microbatch.
+tokenizes all 32 final waveforms in each physical microbatch.
 
 ```text
 loss =
@@ -126,15 +126,15 @@ the tc14 schedule: linear warm-up over 500 steps to `3e-4`, hold through 60K,
 linear decay to `1.5e-4` at 140K, then cosine decay to `1.5e-5` at 225K.
 
 The single-GPU logical batch is 80 tracks × 2 segments: a physical microbatch of
-four tracks × two segments with twenty gradient-accumulation steps. Each
-microbatch contains 3,000 audio targets and 40 seconds of waveform; each
+16 tracks × two segments with five gradient-accumulation steps. Each
+microbatch contains 12,000 audio targets and 160 seconds of waveform; each
 optimizer update contains 60,000 audio targets and 800 seconds of waveform.
 
 RIR uses full-wet causal convolution with two seconds of preceding audio;
 the prefix is discarded after convolution so reverberant tails from preceding
 music enter the query. Room IR train/test assets are source- and content-disjoint.
 
-tc14 runs for 225K optimizer steps. Checkpoints remain every 500 steps and monitoring
+tc14 runs for 225K optimizer steps. Checkpoints and monitoring both run every 2,500 steps. Monitoring
 remains every 2,500 steps. For direct comparison with tc6, the same seeded 100-track cohort is
 evaluated using one balanced canonical, integer-shifted, and held-out
 half-offset crop per track. All three groups are evaluated clean and at
@@ -177,7 +177,7 @@ python train.py configs/fma_large.yaml \
 On resume, profile values are recovered from the checkpoint. Any pre-tc14
 checkpoint or incompatible explicit override fails before model construction.
 
-Checkpoints are written every 500 optimizer steps under:
+Checkpoints are written every 2,500 optimizer steps under:
 
 ```text
 /gpfs/scratch/acw723/para-audio-id/audio-lm-checkpoints/<run-id>/

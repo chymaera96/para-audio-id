@@ -19,7 +19,7 @@ from para_audio_id.audio_lm.tokenizer import MuQRVQTokenizer
     os.environ.get("RUN_MUQ_INTEGRATION") != "1",
     reason="set RUN_MUQ_INTEGRATION=1 to load the real MuQ checkpoint",
 )
-def test_real_muq_tc14_eight_document_probe():
+def test_real_muq_tc14_thirty_two_document_probe():
     tokenizer = MuQRVQTokenizer(
         "OpenMuQ/MuQ-large-msd-iter",
         selected_codebooks=3,
@@ -40,13 +40,16 @@ def test_real_muq_tc14_eight_document_probe():
         lightweight=True,
     )
     anchors = torch.cat(
-        [waveform.roll(index * 1_000, dims=1) for index in range(4)]
+        [waveform.roll(index * 1_000, dims=1) for index in range(16)]
     ).to(lightweight.device)
     noises = anchors.roll(7_000, dims=1)
     mixed, valid = mix_background_noise(
         anchors,
         noises,
-        torch.tensor([0.0, 10.0, 20.0, 30.0], device=lightweight.device),
+        torch.tensor(
+            [0.0, 10.0, 20.0, 30.0] * 4,
+            device=lightweight.device,
+        ),
     )
     assert valid.all()
     online_waveforms = torch.stack(
@@ -54,7 +57,7 @@ def test_real_muq_tc14_eight_document_probe():
     )
     lightweight_tokens = lightweight.tokenize(online_waveforms)
     assert torch.equal(lightweight_tokens[0].cpu(), audio_tokens)
-    assert lightweight_tokens.shape == (8, 375)
+    assert lightweight_tokens.shape == (32, 375)
     cfg = {
         "model": {
             "architecture": "gpt2",
@@ -71,7 +74,7 @@ def test_real_muq_tc14_eight_document_probe():
     model = AudioCausalLM(cfg, tokenizer.vocabulary).to(tokenizer.device)
     examples = []
     is_degraded = []
-    for pair in range(4):
+    for pair in range(16):
         for role, tokens in enumerate(
             lightweight_tokens[pair * 2 : pair * 2 + 2].cpu()
         ):
@@ -86,8 +89,8 @@ def test_real_muq_tc14_eight_document_probe():
             )
             is_degraded.append(bool(role))
     batch = collate_causal_documents(examples, tokenizer.vocabulary, 512)
-    assert batch["input_ids"].shape == (8, 383)
-    assert int(batch["audio_target_mask"].sum()) == 3_000
+    assert batch["input_ids"].shape == (32, 383)
+    assert int(batch["audio_target_mask"].sum()) == 12_000
     logits = model(
         batch["input_ids"].to(tokenizer.device),
         batch["attention_mask"].to(tokenizer.device),

@@ -28,9 +28,9 @@ def test_primary_config_is_audio_lm_and_matches_logical_batch():
     physical_documents = (
         cfg["train"]["tracks_per_microbatch"] * cfg["train"]["segments_per_track"]
     )
-    assert physical_documents == 8
+    assert physical_documents == 32
     assert physical_documents * cfg["trainer"]["accumulate_grad_batches"] == 160
-    assert cfg["train"]["tracks_per_microbatch"] == 4
+    assert cfg["train"]["tracks_per_microbatch"] == 16
     assert cfg["train"]["deterministic"]
     assert cfg["data"]["segment_duration"] == 5.0
     assert cfg["tokenizer"]["sample_rate"] * cfg["data"]["segment_duration"] == 120_000
@@ -43,7 +43,7 @@ def test_primary_config_is_audio_lm_and_matches_logical_batch():
     assert cfg["train"]["max_steps"] == 225_000
     assert cfg["train"]["warmup_steps"] == 500
     assert cfg["train"]["evaluation_interval"] == 2_500
-    assert cfg["train"]["checkpoint_interval"] == 500
+    assert cfg["train"]["checkpoint_interval"] == 2_500
     assert cfg["resolved_training_profile"]["decoder"]["name"] == "small"
     assert cfg["resolved_training_profile"]["variant"] == "tc14-logit-distillation"
     assert cfg["train"]["distillation"]["protocol"] == "tc14_logit_distillation_v1"
@@ -103,10 +103,10 @@ def test_tc14_startup_query_invariants_are_enforced():
     assert query_spec["digit_targets"] == 5
     assert query_spec["boundary_targets"] == 2
     assert query_spec["document_tokens"] == 383
-    assert batch_spec["documents_per_microbatch"] == 8
-    assert batch_spec["audio_targets_per_microbatch"] == 3_000
-    assert batch_spec["causal_tokens_per_microbatch"] == 3_064
-    assert batch_spec["waveform_seconds_per_microbatch"] == 40.0
+    assert batch_spec["documents_per_microbatch"] == 32
+    assert batch_spec["audio_targets_per_microbatch"] == 12_000
+    assert batch_spec["causal_tokens_per_microbatch"] == 12_256
+    assert batch_spec["waveform_seconds_per_microbatch"] == 160.0
     assert batch_spec["tracks_per_optimizer_step"] == 80
     assert batch_spec["documents_per_optimizer_step"] == 160
     assert batch_spec["audio_targets_per_optimizer_step"] == 60_000
@@ -114,7 +114,7 @@ def test_tc14_startup_query_invariants_are_enforced():
 
     wrong_batch = deepcopy(cfg)
     wrong_batch["train"]["tracks_per_microbatch"] = 10
-    with pytest.raises(ValueError, match="4 tracks per microbatch"):
+    with pytest.raises(ValueError, match="16 tracks per microbatch"):
         validate_tc14_batch_configuration(wrong_batch, query_spec)
 
     wrong_duration = deepcopy(cfg)

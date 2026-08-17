@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 import torch
 
+import para_audio_id.audio_lm.losses as loss_module
 from para_audio_id.audio_lm.dataset import collate_causal_documents
 from para_audio_id.audio_lm.losses import (
     degraded_causal_base_losses,
@@ -147,3 +148,27 @@ def test_tc14_base_loss_masks_degraded_audio_and_has_expected_coefficients():
     assert not logits.grad[1, degraded_audio].any()
     assert logits.grad[1, batch["id_target_mask"][1].nonzero().flatten()].any()
     assert logits.grad[1, batch["boundary_target_mask"][1].nonzero().flatten()].any()
+
+
+def test_tc14_base_computes_vocabulary_cross_entropy_once(monkeypatch):
+    batch, vocabulary = _batch(["01234", "01234"])
+    logits = torch.randn(2, batch["input_ids"].shape[1], vocabulary.size)
+    calls = 0
+    original = loss_module.F.cross_entropy
+
+    def counted_cross_entropy(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(loss_module.F, "cross_entropy", counted_cross_entropy)
+    degraded_causal_base_losses(
+        logits,
+        batch["input_ids"],
+        batch["audio_target_mask"],
+        batch["id_target_mask"],
+        batch["boundary_target_mask"],
+        torch.tensor([False, True]),
+        id_digit_weight=30.0,
+    )
+    assert calls == 1

@@ -9,12 +9,68 @@ import torch.nn.functional as F
 def masked_cross_entropy(
     shifted_logits: torch.Tensor, shifted_targets: torch.Tensor, mask: torch.Tensor
 ) -> torch.Tensor:
-    if shifted_logits.shape[:-1] != shifted_targets.shape or mask.shape != shifted_targets.shape:
-        raise ValueError("Logits, targets, and loss mask shapes are inconsistent")
+    token_losses = unreduced_cross_entropy(shifted_logits, shifted_targets)
+    return masked_token_mean(token_losses, mask)
+
+
+def unreduced_cross_entropy(
+    shifted_logits: torch.Tensor, shifted_targets: torch.Tensor
+) -> torch.Tensor:
+    """Compute vocabulary-wide cross-entropy once for every causal target."""
+    if shifted_logits.shape[:-1] != shifted_targets.shape:
+        raise ValueError("Logits and targets shapes are inconsistent")
+    return F.cross_entropy(
+        shifted_logits.transpose(1, 2), shifted_targets, reduction="none"
+    )
+
+
+def masked_token_mean(token_losses: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    """Reduce previously computed per-token losses over a target family."""
+    if token_losses.shape != mask.shape:
+        raise ValueError("Token-loss and mask shapes are inconsistent")
     selected = mask.bool()
     if not selected.any():
         raise ValueError("Loss mask selects no targets")
-    return F.cross_entropy(shifted_logits[selected], shifted_targets[selected])
+    return token_losses[selected].mean()
+
+
+def _optional_masked_token_mean(
+    token_losses: torch.Tensor, mask: torch.Tensor
+) -> torch.Tensor | None:
+    return masked_token_mean(token_losses, mask) if mask.any() else None
+
+
+def _validate_disjoint_masks(
+    audio_target_mask: torch.Tensor,
+    id_target_mask: torch.Tensor,
+    boundary_target_mask: torch.Tensor,
+) -> None:
+    if (
+        (audio_target_mask & id_target_mask).any()
+        or (audio_target_mask & boundary_target_mask).any()
+        or (id_target_mask & boundary_target_mask).any()
+    ):
+        raise ValueError("Causal target masks must be disjoint")
+
+
+def _weighted_token_loss(
+    token_losses: torch.Tensor,
+    audio_target_mask: torch.Tensor,
+    id_target_mask: torch.Tensor,
+    boundary_target_mask: torch.Tensor,
+    id_digit_weight: float,
+) -> torch.Tensor:
+    _validate_disjoint_masks(
+        audio_target_mask, id_target_mask, boundary_target_mask
+    )
+    weights = (
+        audio_target_mask.to(token_losses.dtype)
+        + float(id_digit_weight) * id_target_mask.to(token_losses.dtype)
+        + boundary_target_mask.to(token_losses.dtype)
+    )
+    if not weights.any():
+        raise ValueError("Combined loss mask selects no targets")
+    return (token_losses * weights).sum() / weights.sum()
 
 
 def causal_audio_id_losses(
@@ -30,25 +86,10 @@ def causal_audio_id_losses(
         raise ValueError("id_digit_weight must be positive")
     shifted_logits = logits[:, :-1, :]
     shifted_targets = input_ids[:, 1:]
-    audio_loss = masked_cross_entropy(shifted_logits, shifted_targets, audio_target_mask)
-    id_loss = masked_cross_entropy(shifted_logits, shifted_targets, id_target_mask)
-    boundary_loss = masked_cross_entropy(
-        shifted_logits, shifted_targets, boundary_target_mask
-    )
-    token_losses = F.cross_entropy(
-        shifted_logits.transpose(1, 2), shifted_targets, reduction="none"
-    )
-    weights = (
-        audio_target_mask.to(token_losses.dtype)
-        + float(id_digit_weight) * id_target_mask.to(token_losses.dtype)
-        + boundary_target_mask.to(token_losses.dtype)
-    )
-    if ((audio_target_mask & id_target_mask).any()
-        or (audio_target_mask & boundary_target_mask).any()
-        or (id_target_mask & boundary_target_mask).any()):
-        raise ValueError("Causal target masks must be disjoint")
-    if not weights.any():
-        raise ValueError("Combined loss mask selects no targets")
+    token_losses = unreduced_cross_entropy(shifted_logits, shifted_targets)
+    audio_loss = masked_token_mean(token_losses, audio_target_mask)
+    id_loss = masked_token_mean(token_losses, id_target_mask)
+    boundary_loss = masked_token_mean(token_losses, boundary_target_mask)
     predictions = shifted_logits.argmax(dim=-1)
     id_correct = (predictions == shifted_targets) & id_target_mask
     digit_accuracy = id_correct.sum() / id_target_mask.sum()
@@ -56,7 +97,13 @@ def causal_audio_id_losses(
         (predictions == shifted_targets) | ~id_target_mask
     ).all(dim=1).float().mean()
     return {
-        "loss": (token_losses * weights).sum() / weights.sum(),
+        "loss": _weighted_token_loss(
+            token_losses,
+            audio_target_mask,
+            id_target_mask,
+            boundary_target_mask,
+            id_digit_weight,
+        ),
         "audio_loss": audio_loss,
         "audio_perplexity": audio_loss.detach().clamp(max=math.log(1e6)).exp(),
         "id_loss": id_loss,
@@ -117,18 +164,6 @@ def causal_losses_by_view(
     return loss, overall, per_view
 
 
-def _optional_masked_cross_entropy(
-    shifted_logits: torch.Tensor,
-    shifted_targets: torch.Tensor,
-    mask: torch.Tensor,
-) -> torch.Tensor | None:
-    return (
-        masked_cross_entropy(shifted_logits, shifted_targets, mask)
-        if mask.any()
-        else None
-    )
-
-
 def degraded_causal_base_losses(
     logits: torch.Tensor,
     input_ids: torch.Tensor,
@@ -152,25 +187,26 @@ def degraded_causal_base_losses(
         raise ValueError("The base loss requires at least one clean document")
     clean_mask = clean_rows[:, None]
     degraded_mask = degraded_rows[:, None]
-
-    clean_audio_loss = masked_cross_entropy(
-        shifted_logits, shifted_targets, audio_target_mask & clean_mask
+    _validate_disjoint_masks(
+        audio_target_mask, id_target_mask, boundary_target_mask
     )
-    digit_loss = masked_cross_entropy(shifted_logits, shifted_targets, id_target_mask)
-    boundary_loss = masked_cross_entropy(
-        shifted_logits, shifted_targets, boundary_target_mask
+    token_losses = unreduced_cross_entropy(shifted_logits, shifted_targets)
+    clean_audio_loss = masked_token_mean(
+        token_losses, audio_target_mask & clean_mask
     )
-    clean_digit_loss = masked_cross_entropy(
-        shifted_logits, shifted_targets, id_target_mask & clean_mask
+    digit_loss = masked_token_mean(token_losses, id_target_mask)
+    boundary_loss = masked_token_mean(token_losses, boundary_target_mask)
+    clean_digit_loss = masked_token_mean(
+        token_losses, id_target_mask & clean_mask
     )
-    degraded_digit_loss = _optional_masked_cross_entropy(
-        shifted_logits, shifted_targets, id_target_mask & degraded_mask
+    degraded_digit_loss = _optional_masked_token_mean(
+        token_losses, id_target_mask & degraded_mask
     )
-    clean_boundary_loss = masked_cross_entropy(
-        shifted_logits, shifted_targets, boundary_target_mask & clean_mask
+    clean_boundary_loss = masked_token_mean(
+        token_losses, boundary_target_mask & clean_mask
     )
-    degraded_boundary_loss = _optional_masked_cross_entropy(
-        shifted_logits, shifted_targets, boundary_target_mask & degraded_mask
+    degraded_boundary_loss = _optional_masked_token_mean(
+        token_losses, boundary_target_mask & degraded_mask
     )
 
     audio_counts = audio_target_mask.sum(dim=1)
@@ -211,13 +247,12 @@ def degraded_causal_base_losses(
         if degraded_rows.any()
         else torch.full_like(clean_digit_accuracy, float("nan"))
     )
-    legacy = causal_audio_id_losses(
-        logits,
-        input_ids,
+    legacy_weighted_token_loss = _weighted_token_loss(
+        token_losses,
         audio_target_mask,
         id_target_mask,
         boundary_target_mask,
-        id_digit_weight=id_digit_weight,
+        id_digit_weight,
     )
     return base_loss, {
         "base_loss": base_loss,
@@ -244,9 +279,10 @@ def degraded_causal_base_losses(
         * digit_count
         / family_weight,
         "boundary_family_coefficient": boundary_count / family_weight,
-        "legacy_weighted_token_loss": legacy["loss"].detach(),
-        "teacher_forced_digit_accuracy": legacy["teacher_forced_digit_accuracy"],
-        "teacher_forced_exact_accuracy": legacy["teacher_forced_exact_accuracy"],
+        "legacy_weighted_token_loss": legacy_weighted_token_loss.detach(),
+        "teacher_forced_digit_accuracy": digit_correct.sum()
+        / id_target_mask.sum(),
+        "teacher_forced_exact_accuracy": row_exact.float().mean(),
         "clean_teacher_forced_digit_accuracy": clean_digit_accuracy,
         "degraded_teacher_forced_digit_accuracy": degraded_digit_accuracy,
         "clean_teacher_forced_exact_accuracy": clean_exact,

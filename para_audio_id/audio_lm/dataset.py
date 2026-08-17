@@ -416,25 +416,30 @@ class CataloguePassBatchSampler(Sampler[list[int]]):
 def collate_causal_documents(
     examples: list[dict], vocabulary: AudioLMVocabulary, max_positions: int
 ) -> dict:
+    if not examples:
+        raise ValueError("Cannot collate an empty document batch")
+    device = examples[0]["audio_tokens"].device
     sequences = []
     audio_target_masks = []
     id_target_masks = []
     boundary_target_masks = []
     for example in examples:
         audio = example["audio_tokens"].long()
+        if audio.device != device:
+            raise ValueError("All audio-token tensors must use the same device")
         code = example["code"]
         if not isinstance(code, str) or len(code) != 5 or not all(
             "0" <= character <= "9" for character in code
         ):
             raise ValueError("Every catalogue code must contain five decimal digits")
-        digits = vocabulary.encode_code(code)
+        digits = vocabulary.encode_code(code).to(device)
         sequence = torch.cat(
             (
-                torch.tensor([vocabulary.bos_token_id]),
+                torch.tensor([vocabulary.bos_token_id], device=device),
                 audio,
-                torch.tensor([vocabulary.id_token_id]),
+                torch.tensor([vocabulary.id_token_id], device=device),
                 digits,
-                torch.tensor([vocabulary.eos_token_id]),
+                torch.tensor([vocabulary.eos_token_id], device=device),
             )
         )
         if len(sequence) > max_positions:
@@ -442,11 +447,15 @@ def collate_causal_documents(
                 f"Document length {len(sequence)} exceeds max_position_embeddings={max_positions}"
             )
         # Masks describe next-token labels after the causal shift.
-        audio_mask = torch.zeros(len(sequence) - 1, dtype=torch.bool)
+        audio_mask = torch.zeros(
+            len(sequence) - 1, dtype=torch.bool, device=device
+        )
         audio_mask[: len(audio)] = True
-        id_mask = torch.zeros(len(sequence) - 1, dtype=torch.bool)
+        id_mask = torch.zeros(len(sequence) - 1, dtype=torch.bool, device=device)
         id_mask[-6:-1] = True
-        boundary_mask = torch.zeros(len(sequence) - 1, dtype=torch.bool)
+        boundary_mask = torch.zeros(
+            len(sequence) - 1, dtype=torch.bool, device=device
+        )
         boundary_mask[len(audio)] = True  # [ID]
         boundary_mask[-1] = True  # [EOS]
         sequences.append(sequence)
@@ -456,12 +465,23 @@ def collate_causal_documents(
 
     maximum = max(len(sequence) for sequence in sequences)
     input_ids = torch.full(
-        (len(sequences), maximum), vocabulary.bos_token_id, dtype=torch.long
+        (len(sequences), maximum),
+        vocabulary.bos_token_id,
+        dtype=torch.long,
+        device=device,
     )
-    attention_mask = torch.zeros((len(sequences), maximum), dtype=torch.long)
-    audio_mask = torch.zeros((len(sequences), maximum - 1), dtype=torch.bool)
-    id_mask = torch.zeros((len(sequences), maximum - 1), dtype=torch.bool)
-    boundary_mask = torch.zeros((len(sequences), maximum - 1), dtype=torch.bool)
+    attention_mask = torch.zeros(
+        (len(sequences), maximum), dtype=torch.long, device=device
+    )
+    audio_mask = torch.zeros(
+        (len(sequences), maximum - 1), dtype=torch.bool, device=device
+    )
+    id_mask = torch.zeros(
+        (len(sequences), maximum - 1), dtype=torch.bool, device=device
+    )
+    boundary_mask = torch.zeros(
+        (len(sequences), maximum - 1), dtype=torch.bool, device=device
+    )
     for row, sequence in enumerate(sequences):
         input_ids[row, : len(sequence)] = sequence
         attention_mask[row, : len(sequence)] = 1

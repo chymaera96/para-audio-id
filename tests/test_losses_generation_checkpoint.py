@@ -21,6 +21,7 @@ from para_audio_id.audio_lm.generation import (
     batched_joint_beam_generate,
     beam_generate,
     greedy_generate,
+    prompt_from_audio_tokens,
 )
 from para_audio_id.audio_lm.losses import (
     causal_audio_id_losses,
@@ -102,6 +103,19 @@ def test_generation_emits_exactly_five_digits_then_eos():
     batched_beam = batched_beam_generate(model, prompts, vocabulary, width=5)
     assert len(batched_greedy) == 2
     assert [len(results) for results in batched_beam] == [5, 5]
+
+
+def test_tc15_four_codebook_generation_fits_512_position_context():
+    vocabulary = AudioLMVocabulary(num_codebooks=4)
+    cfg = tiny_config()
+    cfg["model"]["max_position_embeddings"] = 512
+    model = AudioCausalLM(cfg, vocabulary).eval()
+    audio_tokens = torch.arange(500) % vocabulary.audio_size
+    prompt = prompt_from_audio_tokens(audio_tokens, vocabulary)
+    assert prompt.shape == (502,)
+    result = greedy_generate(model, prompt, vocabulary)
+    assert len(result.code) == 5
+    assert result.ended_with_eos
 
 
 def test_one_window_joint_beam_matches_regular_beam():

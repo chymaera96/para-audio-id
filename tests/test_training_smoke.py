@@ -30,12 +30,12 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
         frame_rate=25.0,
         waveform_normalization="none_before_muq_internal_preprocessing",
         num_available_codebooks=8,
-        selected_codebooks=3,
+        selected_codebooks=4,
         codebook_size=1024,
         serialization="time_major_codebook_interleaved",
         preprocessing_version=1,
     )
-    vocabulary = AudioLMVocabulary(num_codebooks=3)
+    vocabulary = AudioLMVocabulary(num_codebooks=4)
     audio_root = tmp_path / "audio"
     audio_root.mkdir()
     waveform = np.sin(
@@ -98,7 +98,7 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
             self.device = torch.device(kwargs.get("device", "cpu"))
 
         def tokenize(self, waveforms):
-            frame = torch.tensor([3, 1027, 2051], device=waveforms.device)
+            frame = torch.tensor([3, 1027, 2051, 3075], device=waveforms.device)
             return frame.repeat(waveforms.shape[0], 125)
 
     monkeypatch.setattr(
@@ -106,7 +106,7 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
         FakeOnlineTokenizer,
     )
     distillation_profile = {
-        "protocol": "tc14_logit_distillation_v1",
+        "protocol": "tc15_four_codebook_logit_distillation_v1",
         "temperature": 2.0,
         "maximum_weight": 0.1,
         "weight_schedule": {
@@ -122,7 +122,7 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
         "tokenizer": {
             "model_name": "dummy",
             "revision": "resolved",
-            "selected_codebooks": 3,
+            "selected_codebooks": 4,
             "sample_rate": 24_000,
             "device": "cpu",
         },
@@ -172,12 +172,12 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
             "warmup_steps": 1,
             "evaluation_interval": 1,
             "checkpoint_interval": 1,
-            "id_digit_weight": 30.0,
+            "id_digit_weight": 40.0,
             "gradient_clip_norm": 1.0,
             "schedule": {
                 "name": "noise-rir",
-                "protocol": "tc14_logit_distillation_v1",
-                "loss_protocol": "tc14_logit_distillation_v1",
+                "protocol": "tc15_four_codebook_logit_distillation_v1",
+                "loss_protocol": "tc15_four_codebook_logit_distillation_v1",
                 "curriculum": "tc12_noise_rir_curriculum_v1",
                 "clean_until_step": 10_000,
                 "degradation_ramp_until_step": 30_000,
@@ -189,8 +189,8 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
             "wandb": {"enabled": False},
         },
         "resolved_training_profile": {
-            "version": 5,
-            "variant": "tc14-logit-distillation",
+            "version": 6,
+            "variant": "tc15-four-codebook-logit-distillation",
             "database_size": 40,
             "training_tracks_manifest": str(manifest),
             "decoder": {
@@ -201,8 +201,8 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
             },
             "schedule": {
                 "name": "noise-rir",
-                "protocol": "tc14_logit_distillation_v1",
-                "loss_protocol": "tc14_logit_distillation_v1",
+                "protocol": "tc15_four_codebook_logit_distillation_v1",
+                "loss_protocol": "tc15_four_codebook_logit_distillation_v1",
                 "max_steps": 2,
                 "curriculum": "tc12_noise_rir_curriculum_v1",
                 "clean_until_step": 10_000,
@@ -251,16 +251,22 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
     assert checkpoint["global_step"] == 2
     assert (
         checkpoint["training_protocol"]
-        == "tc14_logit_distillation_v1"
+        == "tc15_four_codebook_logit_distillation_v1"
     )
-    assert checkpoint["loss_protocol"] == "tc14_logit_distillation_v1"
-    assert checkpoint["distillation_protocol"] == "tc14_logit_distillation_v1"
+    assert checkpoint["loss_protocol"] == "tc15_four_codebook_logit_distillation_v1"
+    assert (
+        checkpoint["distillation_protocol"]
+        == "tc15_four_codebook_logit_distillation_v1"
+    )
     assert checkpoint["distillation_profile"] == distillation_profile
     assert not any(
         key.startswith("task_auxiliary.") for key in checkpoint["state_dict"]
     )
     assert checkpoint["monitor_protocol"] == "compact_beam_monitor_v2"
-    assert checkpoint["crop_policy"] == "tc14_five_second_online_random_crop_24k_v1"
+    assert (
+        checkpoint["crop_policy"]
+        == "tc15_four_codebook_five_second_online_random_crop_24k_v1"
+    )
     assert checkpoint["room_ir_manifest"]["training_files"] == 1
     assert len(checkpoint["monitor_recipes"]) == 6
     assert {
@@ -275,26 +281,26 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
         "sample_rate": 24_000,
         "waveform_samples": 120_000,
         "frame_rate": 25.0,
-        "selected_codebooks": 3,
+        "selected_codebooks": 4,
         "frames": 125,
-        "audio_targets": 375,
+        "audio_targets": 500,
         "digit_targets": 5,
         "boundary_targets": 2,
-        "document_tokens": 383,
-        "id_digit_weight": 30.0,
+        "document_tokens": 508,
+        "id_digit_weight": 40.0,
         "max_position_embeddings": 512,
     }
     assert checkpoint["batch_spec"] == {
         "tracks_per_microbatch": 40,
         "documents_per_track": 2,
         "documents_per_microbatch": 80,
-        "audio_targets_per_microbatch": 30_000,
-        "causal_tokens_per_microbatch": 30_640,
+        "audio_targets_per_microbatch": 40_000,
+        "causal_tokens_per_microbatch": 40_640,
         "waveform_seconds_per_microbatch": 400.0,
         "gradient_accumulation_steps": 2,
         "tracks_per_optimizer_step": 80,
         "documents_per_optimizer_step": 160,
-        "audio_targets_per_optimizer_step": 60_000,
+        "audio_targets_per_optimizer_step": 80_000,
         "waveform_seconds_per_optimizer_step": 800.0,
     }
     assert not (tmp_path / "logs" / "smoke" / "auxiliary_metrics.jsonl").exists()
@@ -313,7 +319,7 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
         train(cfg, checkpoint=invalid)
 
 
-def test_tc14_wandb_keys_add_only_epoch_distillation():
+def test_tc15_wandb_keys_add_only_epoch_distillation():
     assert TRAIN_METRICS == {
         "clean_audio_loss",
         "digit_loss",

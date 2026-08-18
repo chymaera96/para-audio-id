@@ -65,7 +65,7 @@ The repository still contains the older cache-preparation commands, but current 
 does not use canonical, shifted, or half-offset token stores for training or
 evaluation. They remain useful only when reproducing tc2–tc6 from Git history.
 
-tc14 uses the existing 25K identity manifest. Prepare it if it is not already
+tc15 uses the existing 25K identity manifest. Prepare it if it is not already
 available:
 
 ```bash
@@ -77,7 +77,7 @@ python prepare_training_cohort.py configs/fma_large.yaml
 
 The default causal LM is a randomly initialized 12-layer GPT-2-style decoder with
 hidden size 768, 12 heads, tied embeddings, and no dropout. The vocabulary has
-3,072 codebook-separated audio tokens, `[BOS]`, `[ID]`, ten dedicated digit tokens,
+4,096 codebook-separated audio tokens, `[BOS]`, `[ID]`, ten dedicated digit tokens,
 and `[EOS]`.
 
 Training samples online five-second crops from the fixed 25K cohort. Each
@@ -89,22 +89,26 @@ tokenizes all 80 final waveforms in each physical microbatch.
 ```text
 loss =
     (
-        375 * mean(clean audio-token CE)
-        + 150 * mean(all digit CE)
+        500 * mean(clean audio-token CE)
+        + 200 * mean(all digit CE)
         + 2 * mean(all boundary CE)
-    ) / 527
+    ) / 702
     + lambda_KD * identifier-logit distillation
 ```
 
-For every degraded secondary, tc14 uses its clean anchor as a stop-gradient
+For every degraded secondary, tc15 uses its clean anchor as a stop-gradient
 teacher at the five causal positions that predict the next identifier digit.
 The KL divergence is computed only over the ten digit-token logits with
 temperature 2. This uses the existing single decoder pass and adds no model
 parameters or inference-time modules. The causal coefficients remain
-approximately 0.712 audio, 0.285 digits, and 0.004 boundaries with identifier
-weight 30. Checkpoints record `tc14_logit_distillation_v1`.
+approximately 0.712 audio, 0.285 digits, and 0.003 boundaries with identifier
+weight 40. Checkpoints record `tc15_four_codebook_logit_distillation_v1`.
 
-For tc14, the secondary-view curriculum is:
+Four codebooks produce 500 audio tokens and a 508-token complete causal
+document. The existing 512-position table is retained: the inference prompt is
+502 tokens before the five generated digits, so no context expansion is needed.
+
+For tc15, the secondary-view curriculum is:
 
 | Raw steps | Clean | Noise | RIR | Noise + RIR | RIR severity |
 | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -122,20 +126,20 @@ IRs at 60K. Convolution remains full-wet at every severity.
 
 Noisy examples use fixed SNR-bin probabilities `0.40/0.30/0.20/0.10` for
 `0–5/5–10/10–20/20–30 dB`; 10% of noisy views are exactly 0 dB. The LR uses
-the tc14 schedule: linear warm-up over 500 steps to `3e-4`, hold through 60K,
+the tc15 schedule: linear warm-up over 500 steps to `3e-4`, hold through 60K,
 linear decay to `1.5e-4` at 140K, then cosine decay to `1.5e-5` at 225K.
 
 The single-GPU logical batch is 80 tracks × 2 segments: a physical microbatch of
 40 tracks × two segments with two gradient-accumulation steps. Each
-microbatch contains 30,000 audio targets and 400 seconds of waveform; each
-optimizer update contains 60,000 audio targets and 800 seconds of waveform.
+microbatch contains 40,000 audio targets and 400 seconds of waveform; each
+optimizer update contains 80,000 audio targets and 800 seconds of waveform.
 
 RIR uses full-wet causal convolution with two seconds of preceding audio;
 the prefix is discarded after convolution so reverberant tails from preceding
 music enter the query. Room IR train/test assets are source- and content-disjoint.
 
-tc14 runs for 225K optimizer steps. Checkpoints and monitoring both run every 2,500 steps. Monitoring
-remains every 2,500 steps. For direct comparison with tc6, the same seeded 100-track cohort is
+tc15 runs for 225K optimizer steps. Checkpoints and monitoring both run every
+2,500 steps. For direct comparison with tc6, the same seeded 100-track cohort is
 evaluated using one balanced canonical, integer-shifted, and held-out
 half-offset crop per track. All three groups are evaluated clean and at
 0/5/10/20/30 dB at step zero, every 2,500 steps, and at completion. Evaluation
@@ -149,15 +153,15 @@ Top-1/5/10 and MRR results are appended to `probe_metrics.jsonl`.
 python train.py configs/fma_large.yaml \
   --decoder small \
   --schedule noise-rir \
-  --codebooks 3 \
+  --codebooks 4 \
   --distillation-weight 0.1 \
-  --run-id tc14 \
+  --run-id tc15 \
   --devices 1 \
   --wandb-online
 ```
 
 This branch accepts only `--decoder small`, `--schedule noise-rir`, and
-`--codebooks 3`. The resolved tc14 profile and distillation maximum are embedded
+`--codebooks 4`. The resolved tc15 profile and distillation maximum are embedded
 in every checkpoint. Use `--distillation-weight 0.0` for the matched ablation.
 
 The only new W&B key is `train/distillation_loss_epoch`; it remains available
@@ -169,12 +173,12 @@ state:
 ```bash
 python train.py configs/fma_large.yaml \
   --devices 1 \
-  --run-id tc14 \
+  --run-id tc15 \
   --wandb-online \
   --resume
 ```
 
-On resume, profile values are recovered from the checkpoint. Any pre-tc14
+On resume, profile values are recovered from the checkpoint. Any pre-tc15
 checkpoint or incompatible explicit override fails before model construction.
 
 Checkpoints are written every 2,500 optimizer steps under:
@@ -186,7 +190,7 @@ Checkpoints are written every 2,500 optimizer steps under:
 Checkpoints embed the vocabulary, exact cohort, resolved profile, random-crop and replacement
 policies, fixed monitor manifest, noise/tokenizer fingerprints, sampler state,
 RNG state, query specification, and code mapping. Resume is accepted only for
-compatible tc14 checkpoints. Backward compatibility with earlier experiments
+compatible tc15 checkpoints. Backward compatibility with earlier experiments
 is intentionally not provided on this trial branch.
 
 PyTorch deterministic algorithms and seeded Python, NumPy, Torch, samplers, and

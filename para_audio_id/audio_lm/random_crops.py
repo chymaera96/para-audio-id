@@ -23,7 +23,7 @@ from .noise import (
 from .rir import RoomImpulseResponseAssets, convolve_full_wet
 
 
-CROP_POLICY = "tc15_four_codebook_five_second_online_random_crop_24k_v1"
+CROP_POLICY = "tc16_four_codebook_two_second_online_random_crop_24k_v1"
 REPLACEMENT_POLICY = "deterministic_identity_replacement_v1"
 TC6_MONITOR_GRIDS = {
     "canonical": (0.0, 5.0, 10.0, 15.0, 20.0, 25.0),

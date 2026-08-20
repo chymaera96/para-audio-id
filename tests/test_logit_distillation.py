@@ -106,12 +106,12 @@ def test_distillation_rejects_invalid_pair_layout_or_track():
         _kd(logits, batch, vocabulary, torch.tensor([False, True]))
 
 
-def test_tc15_base_loss_masks_degraded_audio_and_has_expected_coefficients():
+def test_tc16_base_loss_masks_degraded_audio_and_has_expected_coefficients():
     vocabulary = AudioLMVocabulary(num_codebooks=4)
     audio = torch.tensor(
         [
             value
-            for frame in range(125)
+            for frame in range(50)
             for value in (frame, 1024 + frame, 2048 + frame, 3072 + frame)
         ]
     )
@@ -138,11 +138,11 @@ def test_tc15_base_loss_masks_degraded_audio_and_has_expected_coefficients():
         batch["id_target_mask"],
         batch["boundary_target_mask"],
         torch.tensor([False, True]),
-        id_digit_weight=40.0,
+        id_digit_weight=16.0,
     )
-    assert metrics["audio_family_coefficient"] == pytest.approx(500 / 702)
-    assert metrics["digit_family_coefficient"] == pytest.approx(200 / 702)
-    assert metrics["boundary_family_coefficient"] == pytest.approx(2 / 702)
+    assert metrics["audio_family_coefficient"] == pytest.approx(200 / 282)
+    assert metrics["digit_family_coefficient"] == pytest.approx(80 / 282)
+    assert metrics["boundary_family_coefficient"] == pytest.approx(2 / 282)
     base.backward()
     degraded_audio = batch["audio_target_mask"][1].nonzero().flatten()
     assert not logits.grad[1, degraded_audio].any()
@@ -150,7 +150,7 @@ def test_tc15_base_loss_masks_degraded_audio_and_has_expected_coefficients():
     assert logits.grad[1, batch["boundary_target_mask"][1].nonzero().flatten()].any()
 
 
-def test_tc15_base_computes_vocabulary_cross_entropy_once(monkeypatch):
+def test_tc16_base_computes_vocabulary_cross_entropy_once(monkeypatch):
     batch, vocabulary = _batch(["01234", "01234"])
     logits = torch.randn(2, batch["input_ids"].shape[1], vocabulary.size)
     calls = 0
@@ -169,6 +169,6 @@ def test_tc15_base_computes_vocabulary_cross_entropy_once(monkeypatch):
         batch["id_target_mask"],
         batch["boundary_target_mask"],
         torch.tensor([False, True]),
-        id_digit_weight=40.0,
+        id_digit_weight=16.0,
     )
     assert calls == 1

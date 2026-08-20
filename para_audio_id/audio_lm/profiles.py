@@ -16,12 +16,12 @@ DECODER_PROFILES = {
 }
 SCHEDULE_NAMES = ("noise-rir",)
 SUPPORTED_SELECTED_CODEBOOKS = (4,)
-TC15_ID_DIGIT_WEIGHT = 40.0
+TC16_ID_DIGIT_WEIGHT = 16.0
 DEFAULT_DISTILLATION_WEIGHT = 0.10
-NEW_TRAINING_PROTOCOL = "tc15_four_codebook_logit_distillation_v1"
-LOSS_PROTOCOL = "tc15_four_codebook_logit_distillation_v1"
+NEW_TRAINING_PROTOCOL = "tc16_two_second_four_codebook_logit_distillation_v1"
+LOSS_PROTOCOL = NEW_TRAINING_PROTOCOL
 TC12_CURRICULUM = "tc12_noise_rir_curriculum_v1"
-TC15_LR_POLICY = "tc15_warmup_hold_linear_cosine_v1"
+TC16_LR_POLICY = "tc16_warmup_hold_linear_cosine_v1"
 
 
 def cohort_manifest(database_size: int) -> str:
@@ -84,7 +84,7 @@ def schedule_profile(name: str, database_size: int) -> dict[str, Any]:
     if name not in SCHEDULE_NAMES:
         raise ValueError(f"schedule must be one of {SCHEDULE_NAMES}, got {name!r}")
     if database_size != 25_000:
-        raise ValueError("tc15 requires the 25K training cohort")
+        raise ValueError("tc16 requires the 25K training cohort")
     common = {
         "name": name,
         "protocol": NEW_TRAINING_PROTOCOL,
@@ -119,18 +119,18 @@ def canonical_training_profile(
     distillation_weight: float = DEFAULT_DISTILLATION_WEIGHT,
 ) -> dict[str, Any]:
     if database_size != 25_000:
-        raise ValueError("tc15 requires database_size=25000")
+        raise ValueError("tc16 requires database_size=25000")
     if decoder != "small":
-        raise ValueError("tc15 requires the small decoder")
+        raise ValueError("tc16 requires the small decoder")
     if schedule != "noise-rir":
-        raise ValueError("tc15 requires the noise-rir schedule")
+        raise ValueError("tc16 requires the noise-rir schedule")
     if selected_codebooks != 4:
-        raise ValueError("tc15 requires four MuQ codebooks")
+        raise ValueError("tc16 requires four MuQ codebooks")
     if not math.isfinite(distillation_weight) or distillation_weight < 0:
         raise ValueError("distillation_weight must be finite and non-negative")
     profile = {
-        "version": 6,
-        "variant": "tc15-four-codebook-logit-distillation",
+        "version": 7,
+        "variant": "tc16-two-second-four-codebook-logit-distillation",
         "database_size": database_size,
         "training_tracks_manifest": cohort_manifest(database_size),
         "decoder": decoder_profile(decoder),
@@ -149,7 +149,7 @@ def canonical_training_profile(
         },
     }
     profile["learning_rate_schedule"] = {
-        "policy": TC15_LR_POLICY,
+        "policy": TC16_LR_POLICY,
         "warmup_steps": 500,
         "hold_until_step": 60_000,
         "linear_decay_until_step": 140_000,
@@ -162,10 +162,11 @@ def historical_checkpoint_profile(checkpoint: dict) -> dict[str, Any]:
     stored = checkpoint.get("resolved_training_profile")
     if (
         stored is None
-        or stored.get("variant") != "tc15-four-codebook-logit-distillation"
+        or stored.get("variant")
+        != "tc16-two-second-four-codebook-logit-distillation"
     ):
         raise ValueError(
-            "Only tc15 four-codebook logit-distillation checkpoints can be "
+            "Only tc16 two-second four-codebook checkpoints can be "
             "resumed on this branch"
         )
     return stored
@@ -190,7 +191,7 @@ def _checkpoint_query_profile(checkpoint: dict[str, Any]) -> dict[str, Any] | No
         query.get(
             "id_digit_weight",
             train.get(
-                "id_digit_weight", TC15_ID_DIGIT_WEIGHT
+                "id_digit_weight", TC16_ID_DIGIT_WEIGHT
             ),
         )
     )
@@ -208,7 +209,7 @@ def resolve_query_profile(selected_codebooks: int) -> dict[str, Any]:
         )
     return {
         "selected_codebooks": selected_codebooks,
-        "id_digit_weight": TC15_ID_DIGIT_WEIGHT,
+        "id_digit_weight": TC16_ID_DIGIT_WEIGHT,
     }
 
 

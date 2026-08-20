@@ -32,7 +32,7 @@ def base_config() -> dict:
     }
 
 
-def test_tc15_profile_is_fixed_and_resolves_defaults():
+def test_tc16_profile_is_fixed_and_resolves_defaults():
     profile = canonical_training_profile(
         database_size=25_000,
         decoder="small",
@@ -40,8 +40,8 @@ def test_tc15_profile_is_fixed_and_resolves_defaults():
         selected_codebooks=4,
     )
     assert cohort_manifest(25_000) == "data/training_tracks_25k.json"
-    assert profile["version"] == 6
-    assert profile["variant"] == "tc15-four-codebook-logit-distillation"
+    assert profile["version"] == 7
+    assert profile["variant"] == "tc16-two-second-four-codebook-logit-distillation"
     assert profile["decoder"] == {
         "name": "small",
         "num_layers": 12,
@@ -51,7 +51,7 @@ def test_tc15_profile_is_fixed_and_resolves_defaults():
     assert profile["schedule"]["protocol"] == NEW_TRAINING_PROTOCOL
     assert profile["schedule"]["max_steps"] == 225_000
     assert profile["distillation"] == {
-        "protocol": "tc15_four_codebook_logit_distillation_v1",
+        "protocol": "tc16_two_second_four_codebook_logit_distillation_v1",
         "temperature": 2.0,
         "maximum_weight": 0.1,
         "weight_schedule": {
@@ -66,7 +66,7 @@ def test_tc15_profile_is_fixed_and_resolves_defaults():
     assert resolved["resolved_training_profile"] == profile
     assert resolved["resolved_query_profile"] == {
         "selected_codebooks": 4,
-        "id_digit_weight": 40.0,
+        "id_digit_weight": 16.0,
     }
     assert resolved["train"]["max_steps"] == 225_000
     assert resolved["train"]["warmup_steps"] == 500
@@ -82,7 +82,7 @@ def test_tc15_profile_is_fixed_and_resolves_defaults():
         ({"distillation_weight": -0.1}, "non-negative"),
     ],
 )
-def test_tc15_rejects_other_training_profiles(kwargs, message):
+def test_tc16_rejects_other_training_profiles(kwargs, message):
     values = {
         "database_size": 25_000,
         "decoder": "small",
@@ -94,7 +94,7 @@ def test_tc15_rejects_other_training_profiles(kwargs, message):
         canonical_training_profile(**values)
 
 
-def test_tc15_resume_inherits_weight_and_rejects_overrides(tmp_path):
+def test_tc16_resume_inherits_weight_and_rejects_overrides(tmp_path):
     profile = canonical_training_profile(
         database_size=25_000,
         decoder="small",
@@ -102,12 +102,12 @@ def test_tc15_resume_inherits_weight_and_rejects_overrides(tmp_path):
         selected_codebooks=4,
         distillation_weight=0.0,
     )
-    path = tmp_path / "tc15.ckpt"
+    path = tmp_path / "tc16.ckpt"
     torch.save(
         {
             "resolved_training_profile": profile,
             "tokenizer_spec": {"selected_codebooks": 4},
-            "query_spec": {"id_digit_weight": 40.0},
+            "query_spec": {"id_digit_weight": 16.0},
         },
         path,
     )
@@ -119,21 +119,25 @@ def test_tc15_resume_inherits_weight_and_rejects_overrides(tmp_path):
             base_config(), distillation_weight=0.1, checkpoint=path
         )
 
-    old = tmp_path / "tc14.ckpt"
-    torch.save(
-        {
-            "resolved_training_profile": {
-                "version": 5,
-                "variant": "tc14-logit-distillation",
-            }
-        },
-        old,
-    )
-    with pytest.raises(ValueError, match="Only tc15"):
-        resolve_training_config(base_config(), checkpoint=old)
+    for version, variant in (
+        (5, "tc14-logit-distillation"),
+        (6, "tc15-four-codebook-logit-distillation"),
+    ):
+        old = tmp_path / f"old-{version}.ckpt"
+        torch.save(
+            {
+                "resolved_training_profile": {
+                    "version": version,
+                    "variant": variant,
+                }
+            },
+            old,
+        )
+        with pytest.raises(ValueError, match="Only tc16"):
+            resolve_training_config(base_config(), checkpoint=old)
 
 
-def test_tc15_noise_rir_boundaries_remain_unchanged():
+def test_tc16_noise_rir_boundaries_remain_unchanged():
     profile = schedule_profile("noise-rir", 25_000)
     expected = {
         9_999: (1.0, 0.0, 0.0, 0.0),
@@ -167,12 +171,12 @@ def test_tc15_noise_rir_boundaries_remain_unchanged():
     ("step", "expected"),
     [(15_000, 0.0), (22_500, 0.05), (30_000, 0.1), (225_000, 0.1)],
 )
-def test_tc15_distillation_weight_schedule(step, expected):
+def test_tc16_distillation_weight_schedule(step, expected):
     assert distillation_weight(step, maximum_weight=0.1) == pytest.approx(expected)
     assert distillation_weight(step, maximum_weight=0.0) == 0.0
 
 
-def test_tc15_learning_rate_schedule_extends_to_225k():
+def test_tc16_learning_rate_schedule_extends_to_225k():
     profile = canonical_training_profile(
         database_size=25_000,
         decoder="small",

@@ -23,6 +23,7 @@ should be taken from the corresponding W&B run or evaluation JSON.
 | `tc13` | Same seeded 25K tracks | Five-second online crops with tc12-cb2 noise/RIR curriculum | 20 | 225K | Returns to five-second evidence while preserving the 80-track optimizer batch |
 | `tc14` | Same seeded 25K tracks | Five-second, three-codebook clean/degraded pairs | 30 | 225K | Replaces tc13 representation auxiliaries with clean-to-degraded digit-logit distillation |
 | `tc15` | Same seeded 25K tracks | Five-second, four-codebook clean/degraded pairs | 40 | 225K | Increases acoustic serialization while preserving tc14's supervision ratio and distillation |
+| `tc16` | Same seeded 25K tracks | Two-second, four-codebook clean/degraded pairs | 16 | 225K | Shortens tc15 queries while preserving its causal-loss ratio, cohort, batch, schedules, and distillation |
 
 Each entry is a from-scratch model unless explicitly documented otherwise.
 In particular, `tc4` is not initialized from `tc3`, `tc5` is not initialized
@@ -42,9 +43,9 @@ From `tc2` onward, the system is a discrete-audio causal language model:
 - Historical tc2–tc11 runs serialize the first two of MuQ's eight 1,024-entry codebooks in
   time-major, codebook-interleaved order. A five-second crop produces 125 frames
   and 250 audio tokens; tc8's two-second crop produces 50 frames and 100 tokens.
-- The active tc15 profile selects four codebooks. Its five-second crop has 500
-  audio tokens, a 508-token causal document, and uses `id_digit_weight: 40`.
-- tc15's vocabulary has 4,109 entries: 4,096 audio tokens, `[BOS]`, `[ID]`, ten
+- The active tc16 profile selects four codebooks. Its two-second crop has 200
+  audio tokens, a 208-token causal document, and uses `id_digit_weight: 16`.
+- tc16's vocabulary has 4,109 entries: 4,096 audio tokens, `[BOS]`, `[ID]`, ten
   digit tokens, and `[EOS]`. Historical checkpoint vocabularies remain embedded
   in their respective checkpoints.
 - The model is a randomly initialized GPT-2-style causal transformer: 12 layers,
@@ -391,16 +392,30 @@ The full document contains 508 tokens and therefore still fits the unchanged
 512-position table. Each optimizer update retains 80 identities and 160
 documents while increasing audio-token exposure from 60K to 80K.
 
+## `tc16`: two-second four-codebook duration ablation
+
+`tc16` retains tc15's 25K cohort, small decoder, four codebooks, causal proxy
+loss, corruption and LR schedules, temperature-2 identifier-logit distillation,
+`40×2` physical batch, accumulation two, and 225K endpoint. Reducing the query
+to two seconds yields 200 audio targets and a 208-token document. Identifier
+weight scales from 40 to 16, giving
+`(200 audio + 80 digit + 2 boundary) / 282` and preserving the 2.5:1 aggregate
+audio-to-identifier supervision ratio.
+
+Identity and document exposure remain fixed at 80 tracks and 160 documents per
+optimizer step. Consequently, tc16 intentionally receives 40% of tc15's audio
+tokens and waveform duration per optimizer step.
+
 ## Unified training profiles
 
-The active `medium` branch is single-purpose for tc15: small decoder, 25K
-cohort, noise-RIR schedule, four codebooks, and five-second queries. Checkpoints
-store the resolved distillation profile and reject tc14 and all earlier runs.
+The active `mel-rvq` branch is single-purpose for tc16: small decoder, 25K
+cohort, noise-RIR schedule, four codebooks, and two-second queries. Checkpoints
+store the resolved distillation profile and reject tc15 and all earlier runs.
 W&B retains existing causal names and adds only epoch-level distillation loss.
 
 ## Interpretation
 
-The progression isolates twelve questions:
+The progression isolates thirteen questions:
 
 1. `tc2`: can the causal formulation memorize audio-token-to-code mappings?
 2. `tc3`: does a smaller catalogue and stronger ID supervision make that
@@ -426,6 +441,8 @@ The progression isolates twelve questions:
     robustness without adding an inference-time representation head?
 12. `tc15`: does a fourth acoustic codebook improve identification when the
     aggregate audio-to-identifier supervision ratio is held fixed?
+13. `tc16`: with tc15 otherwise fixed, how does reducing evidence from five
+    seconds to two affect identification and robustness?
 
 Teacher-forced digit accuracy is useful for optimization diagnostics, but the
 scientific identification result is free-running exact accuracy and beam

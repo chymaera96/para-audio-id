@@ -75,17 +75,17 @@ from .vocabulary import AudioLMVocabulary
 
 TRAINING_PROTOCOL = NEW_TRAINING_PROTOCOL
 MONITOR_PROTOCOL = "compact_beam_monitor_v2"
-TC15_SEGMENT_DURATION = 5.0
-TC15_SAMPLE_RATE = 24_000
-TC15_FRAME_RATE = 25.0
-TC15_SELECTED_CODEBOOKS = 4
-TC15_ID_DIGIT_WEIGHT = 40.0
-TC15_DIGIT_TARGETS = 5
-TC15_BOUNDARY_TARGETS = 2
-TC15_TRACKS_PER_MICROBATCH = 40
-TC15_SEGMENTS_PER_TRACK = 2
-TC15_DOCUMENTS_PER_MICROBATCH = 80
-TC15_ACCUMULATE_GRAD_BATCHES = 2
+TC16_SEGMENT_DURATION = 2.0
+TC16_SAMPLE_RATE = 24_000
+TC16_FRAME_RATE = 25.0
+TC16_SELECTED_CODEBOOKS = 4
+TC16_ID_DIGIT_WEIGHT = 16.0
+TC16_DIGIT_TARGETS = 5
+TC16_BOUNDARY_TARGETS = 2
+TC16_TRACKS_PER_MICROBATCH = 40
+TC16_SEGMENTS_PER_TRACK = 2
+TC16_DOCUMENTS_PER_MICROBATCH = 80
+TC16_ACCUMULATE_GRAD_BATCHES = 2
 TRAIN_METRICS = {
     "clean_audio_loss",
     "digit_loss",
@@ -120,16 +120,16 @@ def learning_rate_multiplier(step: int, train_cfg: dict) -> float:
         return 0.5 * (
             1 + math.cos(math.pi * min(max(progress, 0.0), 1.0))
         )
-    if policy != "tc15_warmup_hold_linear_cosine_v1":
+    if policy != "tc16_warmup_hold_linear_cosine_v1":
         raise ValueError(f"Unknown learning-rate policy {policy!r}")
     lr_cfg = train_cfg["learning_rate_schedule"]
     hold_end = int(lr_cfg["hold_until_step"])
     linear_end = int(lr_cfg["linear_decay_until_step"])
     final_ratio = float(lr_cfg["final_learning_rate_ratio"])
     if not warmup_steps < hold_end < linear_end < max_steps:
-        raise ValueError("Invalid tc15 learning-rate boundaries")
+        raise ValueError("Invalid tc16 learning-rate boundaries")
     if not 0.0 < final_ratio < 0.5:
-        raise ValueError("tc15 final learning-rate ratio must be in (0, 0.5)")
+        raise ValueError("tc16 final learning-rate ratio must be in (0, 0.5)")
     if step < warmup_steps:
         return step / warmup_steps
     if step < hold_end:
@@ -169,7 +169,7 @@ def tc6_probe_wandb_keys(snr_values: list[float]) -> set[str]:
     }
 
 
-def validate_tc15_query_configuration(
+def validate_tc16_query_configuration(
     cfg: dict,
     tokenizer_spec: TokenizerSpec,
     vocabulary: AudioLMVocabulary,
@@ -177,34 +177,34 @@ def validate_tc15_query_configuration(
     duration = float(cfg["data"]["segment_duration"])
     id_digit_weight = float(cfg["train"]["id_digit_weight"])
     max_positions = int(cfg["model"]["max_position_embeddings"])
-    if not math.isclose(duration, TC15_SEGMENT_DURATION):
+    if not math.isclose(duration, TC16_SEGMENT_DURATION):
         raise ValueError(
-            f"tc15 requires segment_duration={TC15_SEGMENT_DURATION}, got {duration}"
+            f"tc16 requires segment_duration={TC16_SEGMENT_DURATION}, got {duration}"
         )
-    if tokenizer_spec.sample_rate != TC15_SAMPLE_RATE:
+    if tokenizer_spec.sample_rate != TC16_SAMPLE_RATE:
         raise ValueError(
-            f"tc15 requires a {TC15_SAMPLE_RATE} Hz tokenizer, got "
+            f"tc16 requires a {TC16_SAMPLE_RATE} Hz tokenizer, got "
             f"{tokenizer_spec.sample_rate}"
         )
-    if not math.isclose(tokenizer_spec.frame_rate, TC15_FRAME_RATE):
+    if not math.isclose(tokenizer_spec.frame_rate, TC16_FRAME_RATE):
         raise ValueError(
-            f"tc15 requires {TC15_FRAME_RATE:g} MuQ frames/s, got "
+            f"tc16 requires {TC16_FRAME_RATE:g} MuQ frames/s, got "
             f"{tokenizer_spec.frame_rate:g}"
         )
     selected_codebooks = int(tokenizer_spec.selected_codebooks)
-    if selected_codebooks != TC15_SELECTED_CODEBOOKS:
+    if selected_codebooks != TC16_SELECTED_CODEBOOKS:
         raise ValueError(
-            f"tc15 requires selected_codebooks={TC15_SELECTED_CODEBOOKS}, "
+            f"tc16 requires selected_codebooks={TC16_SELECTED_CODEBOOKS}, "
             f"got {selected_codebooks}"
         )
-    if not math.isclose(id_digit_weight, TC15_ID_DIGIT_WEIGHT):
+    if not math.isclose(id_digit_weight, TC16_ID_DIGIT_WEIGHT):
         raise ValueError(
-            f"tc15 requires id_digit_weight={TC15_ID_DIGIT_WEIGHT:g}, "
+            f"tc16 requires id_digit_weight={TC16_ID_DIGIT_WEIGHT:g}, "
             f"got {id_digit_weight:g}"
         )
     if max_positions != 512:
         raise ValueError(
-            f"tc15 requires max_position_embeddings=512, got {max_positions}"
+            f"tc16 requires max_position_embeddings=512, got {max_positions}"
         )
     audio_targets = round(
         duration
@@ -212,11 +212,11 @@ def validate_tc15_query_configuration(
         * tokenizer_spec.selected_codebooks
     )
     expected_audio_targets = round(
-        TC15_SEGMENT_DURATION * TC15_FRAME_RATE * selected_codebooks
+        TC16_SEGMENT_DURATION * TC16_FRAME_RATE * selected_codebooks
     )
     if audio_targets != expected_audio_targets:
         raise ValueError(
-            f"tc15 requires {expected_audio_targets} audio targets "
+            f"tc16 requires {expected_audio_targets} audio targets "
             f"with {selected_codebooks} codebook(s), got {audio_targets}"
         )
     if (
@@ -227,32 +227,32 @@ def validate_tc15_query_configuration(
     example = {
         "audio_tokens": torch.zeros(audio_targets, dtype=torch.long),
         "code": "00000",
-        "track_id": "tc15-startup-probe",
+        "track_id": "tc16-startup-probe",
         "document_index": -1,
     }
     batch = collate_causal_documents([example], vocabulary, max_positions)
     digit_targets = int(batch["id_target_mask"].sum())
     boundary_targets = int(batch["boundary_target_mask"].sum())
     document_tokens = int(batch["attention_mask"].sum())
-    if digit_targets != TC15_DIGIT_TARGETS:
+    if digit_targets != TC16_DIGIT_TARGETS:
         raise ValueError(
-            f"tc15 requires {TC15_DIGIT_TARGETS} digit targets, got {digit_targets}"
+            f"tc16 requires {TC16_DIGIT_TARGETS} digit targets, got {digit_targets}"
         )
-    if boundary_targets != TC15_BOUNDARY_TARGETS:
+    if boundary_targets != TC16_BOUNDARY_TARGETS:
         raise ValueError(
-            f"tc15 requires {TC15_BOUNDARY_TARGETS} boundary targets, got "
+            f"tc16 requires {TC16_BOUNDARY_TARGETS} boundary targets, got "
             f"{boundary_targets}"
         )
     expected_document_tokens = expected_audio_targets + 8
     if document_tokens != expected_document_tokens:
         raise ValueError(
-            f"tc15 requires {expected_document_tokens} document "
+            f"tc16 requires {expected_document_tokens} document "
             "tokens, got "
             f"{document_tokens}"
         )
     if document_tokens > max_positions:
         raise ValueError(
-            f"tc15 document length {document_tokens} exceeds context {max_positions}"
+            f"tc16 document length {document_tokens} exceeds context {max_positions}"
         )
     return {
         "segment_duration_seconds": duration,
@@ -270,32 +270,32 @@ def validate_tc15_query_configuration(
     }
 
 
-def validate_tc15_batch_configuration(cfg: dict, query_spec: dict) -> dict:
+def validate_tc16_batch_configuration(cfg: dict, query_spec: dict) -> dict:
     tracks = int(cfg["train"]["tracks_per_microbatch"])
     segments = int(cfg["train"]["segments_per_track"])
     accumulation = int(cfg["trainer"]["accumulate_grad_batches"])
-    if tracks != TC15_TRACKS_PER_MICROBATCH:
+    if tracks != TC16_TRACKS_PER_MICROBATCH:
         raise ValueError(
-            f"tc15 requires {TC15_TRACKS_PER_MICROBATCH} tracks per microbatch, "
+            f"tc16 requires {TC16_TRACKS_PER_MICROBATCH} tracks per microbatch, "
             f"got {tracks}"
         )
-    if segments != TC15_SEGMENTS_PER_TRACK:
+    if segments != TC16_SEGMENTS_PER_TRACK:
         raise ValueError(
-            f"tc15 requires {TC15_SEGMENTS_PER_TRACK} documents per track, "
+            f"tc16 requires {TC16_SEGMENTS_PER_TRACK} documents per track, "
             f"got {segments}"
         )
-    if accumulation != TC15_ACCUMULATE_GRAD_BATCHES:
+    if accumulation != TC16_ACCUMULATE_GRAD_BATCHES:
         raise ValueError(
-            f"tc15 requires accumulate_grad_batches="
-            f"{TC15_ACCUMULATE_GRAD_BATCHES}, got {accumulation}"
+            f"tc16 requires accumulate_grad_batches="
+            f"{TC16_ACCUMULATE_GRAD_BATCHES}, got {accumulation}"
         )
     documents = tracks * segments
     audio_targets = documents * int(query_spec["audio_targets"])
     causal_tokens = documents * int(query_spec["document_tokens"])
     waveform_seconds = documents * float(query_spec["segment_duration_seconds"])
-    if documents != TC15_DOCUMENTS_PER_MICROBATCH:
+    if documents != TC16_DOCUMENTS_PER_MICROBATCH:
         raise ValueError(
-            f"tc15 requires {TC15_DOCUMENTS_PER_MICROBATCH} documents per "
+            f"tc16 requires {TC16_DOCUMENTS_PER_MICROBATCH} documents per "
             f"microbatch, got {documents}"
         )
     return {
@@ -1462,7 +1462,7 @@ class AudioLMModule(pl.LightningModule):
             int(self.global_step) == 0
             and self.cfg["evaluation"].get("online_monitor_enabled", True)
         ):
-            self._generation_probe_tc15()
+            self._generation_probe_tc16()
 
     def _verify_cached_token_equivalence(self) -> None:
         count = int(
@@ -1519,13 +1519,13 @@ class AudioLMModule(pl.LightningModule):
             torch.cuda.reset_peak_memory_stats(self.device)
 
     def on_validation_epoch_end(self) -> None:
-        self._generation_probe_tc15()
+        self._generation_probe_tc16()
 
     def on_train_end(self) -> None:
         if self._last_probe_step != int(self.global_step):
-            self._generation_probe_tc15()
+            self._generation_probe_tc16()
 
-    def _generation_probe_tc15(self) -> None:
+    def _generation_probe_tc16(self) -> None:
         if not self.cfg["evaluation"].get("online_monitor_enabled", True):
             self._last_probe_step = int(self.global_step)
             return
@@ -1941,7 +1941,7 @@ class AudioLMModule(pl.LightningModule):
         unexpected = set(metrics) - allowed_probe_keys
         if unexpected:
             raise RuntimeError(
-                f"tc15 produced non-tc6 W&B probe keys: {sorted(unexpected)}"
+                f"tc16 produced non-tc6 W&B probe keys: {sorted(unexpected)}"
             )
         if self.logger is not None:
             self.logger.log_metrics(metrics, step=self.global_step)
@@ -2339,9 +2339,9 @@ class AudioLMModule(pl.LightningModule):
         if checkpoint.get("room_ir_manifest") != self.rir_manifest:
             raise ValueError("Resume checkpoint room-IR assets do not match")
         if checkpoint.get("query_spec") != self.query_spec:
-            raise ValueError("Resume checkpoint tc15 query specification differs")
+            raise ValueError("Resume checkpoint tc16 query specification differs")
         if checkpoint.get("batch_spec") != self.batch_spec:
-            raise ValueError("Resume checkpoint tc15 batch specification differs")
+            raise ValueError("Resume checkpoint tc16 batch specification differs")
         if checkpoint.get("resolved_training_profile") is not None and (
             checkpoint.get("training_corpus_fingerprint")
             != self.training_corpus_fingerprint
@@ -2447,7 +2447,7 @@ def train(cfg: dict, *, checkpoint: str | Path | None = None) -> None:
     ].get(
         "distillation"
     ):
-        raise ValueError("Resolved tc15 distillation profile differs")
+        raise ValueError("Resolved tc16 distillation profile differs")
     seed = int(cfg["train"]["seed"])
     pl.seed_everything(seed, workers=True)
     torch.use_deterministic_algorithms(
@@ -2475,10 +2475,10 @@ def train(cfg: dict, *, checkpoint: str | Path | None = None) -> None:
         device=tokenizer_cfg.get("device", "cuda"),
         lightweight=True,
     )
-    query_spec = validate_tc15_query_configuration(
+    query_spec = validate_tc16_query_configuration(
         cfg, online_tokenizer.spec, online_tokenizer.vocabulary
     )
-    batch_spec = validate_tc15_batch_configuration(cfg, query_spec)
+    batch_spec = validate_tc16_batch_configuration(cfg, query_spec)
     startup_waveform = torch.zeros(
         (1, int(query_spec["waveform_samples"])),
         device=online_tokenizer.device,
@@ -2489,7 +2489,7 @@ def train(cfg: dict, *, checkpoint: str | Path | None = None) -> None:
     if tuple(startup_tokens.shape) != expected_startup_shape:
         raise ValueError(
             "The loaded MuQ tokenizer must produce exactly "
-            f"{expected_audio_targets} audio targets for a five-second waveform; "
+            f"{expected_audio_targets} audio targets for a two-second waveform; "
             f"got {tuple(startup_tokens.shape)}"
         )
     datamodule = AudioLMDataModule(

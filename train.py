@@ -19,7 +19,7 @@ def main() -> None:
         "--codebooks",
         type=int,
         choices=(4,),
-        help="tc15 requires four MuQ Mel-RVQ codebooks",
+        help="tc16 requires four MuQ Mel-RVQ codebooks",
     )
     parser.add_argument(
         "--distillation-weight",

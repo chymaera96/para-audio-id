@@ -19,7 +19,7 @@ data:
   audio_root: /gpfs/scratch/acw723/fma_data/fma_large
   catalogue: data/fma_large_100k.jsonl
   database_size: 25000
-  segment_duration: 5.0
+  segment_duration: 2.0
   crop_retries: 4
   replacement_retries: 32
   background_noise:
@@ -45,10 +45,10 @@ train:
   warmup_steps: 500
   evaluation_interval: 2500
   checkpoint_interval: 2500
-  id_digit_weight: 40.0
+  id_digit_weight: 16.0
   gradient_clip_norm: 1.0
   distillation:
-    protocol: tc15_four_codebook_logit_distillation_v1
+    protocol: tc16_two_second_four_codebook_logit_distillation_v1
     temperature: 2.0
     maximum_weight: 0.10
   wandb:

@@ -155,7 +155,7 @@ python train.py configs/fma_large.yaml \
   --schedule noise-rir \
   --codebooks 6 \
   --distillation-weight 0.1 \
-  --run-id ablate-6cb \
+  --run-id tc17 \
   --devices 1 \
   --wandb-online
 ```
@@ -173,7 +173,7 @@ state:
 ```bash
 python train.py configs/fma_large.yaml \
   --devices 1 \
-  --run-id ablate-6cb \
+  --run-id tc17 \
   --wandb-online \
   --resume
 ```

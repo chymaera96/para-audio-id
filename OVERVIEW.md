@@ -17,6 +17,7 @@ should be taken from the corresponding W&B run or evaluation JSON.
 | `tc8` | Same 10K tracks | Continuous random two-second crops | 8 | 70K | Tests shorter queries at the same audio-to-ID loss ratio |
 | `tc9` | Same 10K tracks | Two-second crops, tc7-matched acoustic budget | 8 | 70K | Raises the physical batch from 8 to 20 documents |
 | `tc11` | Fresh seeded 25K tracks | Two-second online crops with clean/noise/RIR/combined secondary views | 8 | 175K | Adds full-IR past reverberation and scales the catalogue |
+| `tc17` | Same seeded 25K tracks | Two-second, six-codebook clean/degraded pairs | 24 | 225K | Tests denser acoustic serialization with logit distillation at a matched supervision ratio |
 
 Each entry is a from-scratch model unless explicitly documented otherwise.
 In particular, `tc4` is not initialized from `tc3`, `tc5` is not initialized
@@ -285,6 +286,21 @@ probes are added for RIR-only and noise+RIR; complete condition/SNR details are
 stored in probe JSONL and checkpoints. tc11 checkpoints are incompatible with
 all earlier protocols.
 
+## `tc17`: two-second six-codebook ablation
+
+`tc17` is a from-scratch 25K-track GPT-2-small-style run with two-second online
+crops, six MuQ codebooks, the mature noise/RIR curriculum, and temperature-2
+clean-to-degraded identifier-logit distillation. Fifty frames across six
+codebooks produce 300 audio targets and a 308-token causal document. Identifier
+weight is 24, giving `(300 audio + 120 digit + 2 boundary) / 422` and preserving
+the 2.5:1 aggregate audio-to-identifier supervision ratio.
+
+The vocabulary contains 6,157 entries and the complete document fits within
+the unchanged 512-position context. Training retains a `40×2` physical batch,
+accumulation two, 80 identity selections per optimizer update, and a 225K-step
+endpoint. Its immutable checkpoint protocol is
+`ablate_two_second_six_codebook_logit_distillation_v1`.
+
 ## Unified training profiles
 
 Current runs select the causal decoder (`small` or `medium`) and robustness
@@ -321,7 +337,7 @@ remain directly comparable without creating renamed plots.
 
 ## Interpretation
 
-The progression isolates eight questions:
+The progression isolates nine questions:
 
 1. `tc2`: can the causal formulation memorize audio-token-to-code mappings?
 2. `tc3`: does a smaller catalogue and stronger ID supervision make that
@@ -339,6 +355,8 @@ The progression isolates eight questions:
 8. `tc9`: does matching tc7's acoustic-token and waveform budget recover the
    two-second model's deficit, or is the remaining difficulty intrinsic to the
    shorter and more ambiguous query?
+9. `tc17`: in the two-second setting, does increasing to six codebooks improve
+   identification and robustness at a matched supervision ratio?
 
 Teacher-forced digit accuracy is useful for optimization diagnostics, but the
 scientific identification result is free-running exact accuracy and beam

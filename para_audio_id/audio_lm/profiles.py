@@ -15,13 +15,13 @@ DECODER_PROFILES = {
     "small": {"num_layers": 12, "hidden_size": 768, "num_attention_heads": 12},
 }
 SCHEDULE_NAMES = ("noise-rir",)
-SUPPORTED_SELECTED_CODEBOOKS = (4,)
-TC16_ID_DIGIT_WEIGHT = 16.0
+SUPPORTED_SELECTED_CODEBOOKS = (6,)
+ACTIVE_ID_DIGIT_WEIGHT = 24.0
 DEFAULT_DISTILLATION_WEIGHT = 0.10
-NEW_TRAINING_PROTOCOL = "tc16_two_second_four_codebook_logit_distillation_v1"
+NEW_TRAINING_PROTOCOL = "ablate_two_second_six_codebook_logit_distillation_v1"
 LOSS_PROTOCOL = NEW_TRAINING_PROTOCOL
 TC12_CURRICULUM = "tc12_noise_rir_curriculum_v1"
-TC16_LR_POLICY = "tc16_warmup_hold_linear_cosine_v1"
+ACTIVE_LR_POLICY = "ablate_warmup_hold_linear_cosine_v1"
 
 
 def cohort_manifest(database_size: int) -> str:
@@ -84,7 +84,9 @@ def schedule_profile(name: str, database_size: int) -> dict[str, Any]:
     if name not in SCHEDULE_NAMES:
         raise ValueError(f"schedule must be one of {SCHEDULE_NAMES}, got {name!r}")
     if database_size != 25_000:
-        raise ValueError("tc16 requires the 25K training cohort")
+        raise ValueError(
+            "the six-codebook ablation requires the 25K training cohort"
+        )
     common = {
         "name": name,
         "protocol": NEW_TRAINING_PROTOCOL,
@@ -115,22 +117,26 @@ def canonical_training_profile(
     database_size: int,
     decoder: str,
     schedule: str,
-    selected_codebooks: int = 4,
+    selected_codebooks: int = 6,
     distillation_weight: float = DEFAULT_DISTILLATION_WEIGHT,
 ) -> dict[str, Any]:
     if database_size != 25_000:
-        raise ValueError("tc16 requires database_size=25000")
+        raise ValueError(
+            "the six-codebook ablation requires database_size=25000"
+        )
     if decoder != "small":
-        raise ValueError("tc16 requires the small decoder")
+        raise ValueError("the six-codebook ablation requires the small decoder")
     if schedule != "noise-rir":
-        raise ValueError("tc16 requires the noise-rir schedule")
-    if selected_codebooks != 4:
-        raise ValueError("tc16 requires four MuQ codebooks")
+        raise ValueError(
+            "the six-codebook ablation requires the noise-rir schedule"
+        )
+    if selected_codebooks != 6:
+        raise ValueError("the six-codebook ablation requires six MuQ codebooks")
     if not math.isfinite(distillation_weight) or distillation_weight < 0:
         raise ValueError("distillation_weight must be finite and non-negative")
     profile = {
-        "version": 7,
-        "variant": "tc16-two-second-four-codebook-logit-distillation",
+        "version": 8,
+        "variant": "ablate-two-second-six-codebook-logit-distillation",
         "database_size": database_size,
         "training_tracks_manifest": cohort_manifest(database_size),
         "decoder": decoder_profile(decoder),
@@ -149,7 +155,7 @@ def canonical_training_profile(
         },
     }
     profile["learning_rate_schedule"] = {
-        "policy": TC16_LR_POLICY,
+        "policy": ACTIVE_LR_POLICY,
         "warmup_steps": 500,
         "hold_until_step": 60_000,
         "linear_decay_until_step": 140_000,
@@ -163,10 +169,10 @@ def historical_checkpoint_profile(checkpoint: dict) -> dict[str, Any]:
     if (
         stored is None
         or stored.get("variant")
-        != "tc16-two-second-four-codebook-logit-distillation"
+        != "ablate-two-second-six-codebook-logit-distillation"
     ):
         raise ValueError(
-            "Only tc16 two-second four-codebook checkpoints can be "
+            "Only ablate two-second six-codebook checkpoints can be "
             "resumed on this branch"
         )
     return stored
@@ -191,7 +197,7 @@ def _checkpoint_query_profile(checkpoint: dict[str, Any]) -> dict[str, Any] | No
         query.get(
             "id_digit_weight",
             train.get(
-                "id_digit_weight", TC16_ID_DIGIT_WEIGHT
+                "id_digit_weight", ACTIVE_ID_DIGIT_WEIGHT
             ),
         )
     )
@@ -209,7 +215,7 @@ def resolve_query_profile(selected_codebooks: int) -> dict[str, Any]:
         )
     return {
         "selected_codebooks": selected_codebooks,
-        "id_digit_weight": TC16_ID_DIGIT_WEIGHT,
+        "id_digit_weight": ACTIVE_ID_DIGIT_WEIGHT,
     }
 
 
@@ -264,7 +270,7 @@ def resolve_training_config(
         profile = deepcopy(resumed)
     else:
         configured_codebooks = int(
-            cfg.setdefault("tokenizer", {}).get("selected_codebooks", 4)
+            cfg.setdefault("tokenizer", {}).get("selected_codebooks", 6)
         )
         profile_codebooks = (
             selected_codebooks
@@ -308,7 +314,7 @@ def resolve_training_config(
                 "Resume checkpoint has an incompatible codebook/loss profile"
             )
     else:
-        configured_codebooks = int(tokenizer.get("selected_codebooks", 4))
+        configured_codebooks = int(tokenizer.get("selected_codebooks", 6))
         query_profile = resolve_query_profile(
             selected_codebooks
             if selected_codebooks is not None

@@ -18,7 +18,7 @@ from para_audio_id.audio_lm.training import learning_rate_multiplier
 
 def base_config() -> dict:
     return {
-        "tokenizer": {"selected_codebooks": 4},
+        "tokenizer": {"selected_codebooks": 6},
         "data": {
             "database_size": 25_000,
             "room_ir": {
@@ -37,11 +37,11 @@ def test_tc16_profile_is_fixed_and_resolves_defaults():
         database_size=25_000,
         decoder="small",
         schedule="noise-rir",
-        selected_codebooks=4,
+        selected_codebooks=6,
     )
     assert cohort_manifest(25_000) == "data/training_tracks_25k.json"
-    assert profile["version"] == 7
-    assert profile["variant"] == "tc16-two-second-four-codebook-logit-distillation"
+    assert profile["version"] == 8
+    assert profile["variant"] == "ablate-two-second-six-codebook-logit-distillation"
     assert profile["decoder"] == {
         "name": "small",
         "num_layers": 12,
@@ -51,7 +51,7 @@ def test_tc16_profile_is_fixed_and_resolves_defaults():
     assert profile["schedule"]["protocol"] == NEW_TRAINING_PROTOCOL
     assert profile["schedule"]["max_steps"] == 225_000
     assert profile["distillation"] == {
-        "protocol": "tc16_two_second_four_codebook_logit_distillation_v1",
+        "protocol": "ablate_two_second_six_codebook_logit_distillation_v1",
         "temperature": 2.0,
         "maximum_weight": 0.1,
         "weight_schedule": {
@@ -65,8 +65,8 @@ def test_tc16_profile_is_fixed_and_resolves_defaults():
     resolved = resolve_training_config(base_config())
     assert resolved["resolved_training_profile"] == profile
     assert resolved["resolved_query_profile"] == {
-        "selected_codebooks": 4,
-        "id_digit_weight": 16.0,
+        "selected_codebooks": 6,
+        "id_digit_weight": 24.0,
     }
     assert resolved["train"]["max_steps"] == 225_000
     assert resolved["train"]["warmup_steps"] == 500
@@ -78,7 +78,7 @@ def test_tc16_profile_is_fixed_and_resolves_defaults():
         ({"database_size": 10_000}, "database_size=25000"),
         ({"decoder": "medium"}, "small decoder"),
         ({"schedule": "noise"}, "noise-rir schedule"),
-        ({"selected_codebooks": 3}, "four MuQ codebooks"),
+        ({"selected_codebooks": 4}, "six MuQ codebooks"),
         ({"distillation_weight": -0.1}, "non-negative"),
     ],
 )
@@ -87,7 +87,7 @@ def test_tc16_rejects_other_training_profiles(kwargs, message):
         "database_size": 25_000,
         "decoder": "small",
         "schedule": "noise-rir",
-        "selected_codebooks": 4,
+        "selected_codebooks": 6,
     }
     values.update(kwargs)
     with pytest.raises(ValueError, match=message):
@@ -99,21 +99,24 @@ def test_tc16_resume_inherits_weight_and_rejects_overrides(tmp_path):
         database_size=25_000,
         decoder="small",
         schedule="noise-rir",
-        selected_codebooks=4,
+        selected_codebooks=6,
         distillation_weight=0.0,
     )
-    path = tmp_path / "tc16.ckpt"
+    path = tmp_path / "ablate.ckpt"
     torch.save(
         {
             "resolved_training_profile": profile,
-            "tokenizer_spec": {"selected_codebooks": 4},
-            "query_spec": {"id_digit_weight": 16.0},
+            "tokenizer_spec": {"selected_codebooks": 6},
+            "query_spec": {"id_digit_weight": 24.0},
         },
         path,
     )
     resolved = resolve_training_config(base_config(), checkpoint=path)
     assert resolved["train"]["distillation"]["maximum_weight"] == 0.0
-    assert historical_checkpoint_profile(torch.load(path, weights_only=False)) == profile
+    assert (
+        historical_checkpoint_profile(torch.load(path, weights_only=False))
+        == profile
+    )
     with pytest.raises(ValueError, match="distillation weight"):
         resolve_training_config(
             base_config(), distillation_weight=0.1, checkpoint=path
@@ -122,6 +125,7 @@ def test_tc16_resume_inherits_weight_and_rejects_overrides(tmp_path):
     for version, variant in (
         (5, "tc14-logit-distillation"),
         (6, "tc15-four-codebook-logit-distillation"),
+        (7, "tc16-two-second-four-codebook-logit-distillation"),
     ):
         old = tmp_path / f"old-{version}.ckpt"
         torch.save(
@@ -133,7 +137,7 @@ def test_tc16_resume_inherits_weight_and_rejects_overrides(tmp_path):
             },
             old,
         )
-        with pytest.raises(ValueError, match="Only tc16"):
+        with pytest.raises(ValueError, match="Only ablate"):
             resolve_training_config(base_config(), checkpoint=old)
 
 
@@ -181,7 +185,7 @@ def test_tc16_learning_rate_schedule_extends_to_225k():
         database_size=25_000,
         decoder="small",
         schedule="noise-rir",
-        selected_codebooks=4,
+        selected_codebooks=6,
     )
     train = {
         "max_steps": 225_000,

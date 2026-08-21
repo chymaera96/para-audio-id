@@ -24,6 +24,7 @@ should be taken from the corresponding W&B run or evaluation JSON.
 | `tc14` | Same seeded 25K tracks | Five-second, three-codebook clean/degraded pairs | 30 | 225K | Replaces tc13 representation auxiliaries with clean-to-degraded digit-logit distillation |
 | `tc15` | Same seeded 25K tracks | Five-second, four-codebook clean/degraded pairs | 40 | 225K | Increases acoustic serialization while preserving tc14's supervision ratio and distillation |
 | `tc16` | Same seeded 25K tracks | Two-second, four-codebook clean/degraded pairs | 16 | 225K | Shortens tc15 queries while preserving its causal-loss ratio, cohort, batch, schedules, and distillation |
+| `ablate-6cb` | Same seeded 25K tracks | Two-second, six-codebook clean/degraded pairs | 24 | 225K | Increases tc16 acoustic serialization while preserving its supervision ratio and training recipe |
 
 Each entry is a from-scratch model unless explicitly documented otherwise.
 In particular, `tc4` is not initialized from `tc3`, `tc5` is not initialized
@@ -43,9 +44,9 @@ From `tc2` onward, the system is a discrete-audio causal language model:
 - Historical tc2–tc11 runs serialize the first two of MuQ's eight 1,024-entry codebooks in
   time-major, codebook-interleaved order. A five-second crop produces 125 frames
   and 250 audio tokens; tc8's two-second crop produces 50 frames and 100 tokens.
-- The active tc16 profile selects four codebooks. Its two-second crop has 200
-  audio tokens, a 208-token causal document, and uses `id_digit_weight: 16`.
-- tc16's vocabulary has 4,109 entries: 4,096 audio tokens, `[BOS]`, `[ID]`, ten
+- The active ablation profile selects six codebooks. Its two-second crop has 300
+  audio tokens, a 308-token causal document, and uses `id_digit_weight: 24`.
+- Its vocabulary has 6,157 entries: 6,144 audio tokens, `[BOS]`, `[ID]`, ten
   digit tokens, and `[EOS]`. Historical checkpoint vocabularies remain embedded
   in their respective checkpoints.
 - The model is a randomly initialized GPT-2-style causal transformer: 12 layers,
@@ -406,16 +407,27 @@ Identity and document exposure remain fixed at 80 tracks and 160 documents per
 optimizer step. Consequently, tc16 intentionally receives 40% of tc15's audio
 tokens and waveform duration per optimizer step.
 
+## `ablate-6cb`: two-second six-codebook ablation
+
+This branch retains tc16's two-second queries, 25K cohort, small decoder,
+noise/RIR and learning-rate schedules, logit distillation, `40×2` physical
+batch, accumulation two, and 225K endpoint. Six codebooks yield 300 audio
+targets and a 308-token document. Identifier weight scales to 24, giving
+`(300 audio + 120 digit + 2 boundary) / 422` and preserving the 2.5:1 aggregate
+audio-to-identifier supervision ratio. The 308-token document remains within
+the unchanged 512-position context.
+
 ## Unified training profiles
 
-The active `mel-rvq` branch is single-purpose for tc16: small decoder, 25K
-cohort, noise-RIR schedule, four codebooks, and two-second queries. Checkpoints
-store the resolved distillation profile and reject tc15 and all earlier runs.
+The active `ablate` branch is single-purpose for the six-codebook ablation:
+small decoder, 25K cohort, noise-RIR schedule, six codebooks, and two-second
+queries. Checkpoints store the resolved distillation profile and reject tc16
+and all earlier runs.
 W&B retains existing causal names and adds only epoch-level distillation loss.
 
 ## Interpretation
 
-The progression isolates thirteen questions:
+The progression isolates fourteen questions:
 
 1. `tc2`: can the causal formulation memorize audio-token-to-code mappings?
 2. `tc3`: does a smaller catalogue and stronger ID supervision make that
@@ -443,6 +455,8 @@ The progression isolates thirteen questions:
     aggregate audio-to-identifier supervision ratio is held fixed?
 13. `tc16`: with tc15 otherwise fixed, how does reducing evidence from five
     seconds to two affect identification and robustness?
+14. `ablate-6cb`: with tc16 otherwise fixed, does adding two more acoustic
+    codebooks improve identification and robustness?
 
 Teacher-forced digit accuracy is useful for optimization diagnostics, but the
 scientific identification result is free-running exact accuracy and beam

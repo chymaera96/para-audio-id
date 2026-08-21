@@ -78,8 +78,8 @@ MONITOR_PROTOCOL = "compact_beam_monitor_v2"
 TC16_SEGMENT_DURATION = 2.0
 TC16_SAMPLE_RATE = 24_000
 TC16_FRAME_RATE = 25.0
-TC16_SELECTED_CODEBOOKS = 4
-TC16_ID_DIGIT_WEIGHT = 16.0
+TC16_SELECTED_CODEBOOKS = 6
+TC16_ID_DIGIT_WEIGHT = 24.0
 TC16_DIGIT_TARGETS = 5
 TC16_BOUNDARY_TARGETS = 2
 TC16_TRACKS_PER_MICROBATCH = 40
@@ -120,16 +120,16 @@ def learning_rate_multiplier(step: int, train_cfg: dict) -> float:
         return 0.5 * (
             1 + math.cos(math.pi * min(max(progress, 0.0), 1.0))
         )
-    if policy != "tc16_warmup_hold_linear_cosine_v1":
+    if policy != "ablate_warmup_hold_linear_cosine_v1":
         raise ValueError(f"Unknown learning-rate policy {policy!r}")
     lr_cfg = train_cfg["learning_rate_schedule"]
     hold_end = int(lr_cfg["hold_until_step"])
     linear_end = int(lr_cfg["linear_decay_until_step"])
     final_ratio = float(lr_cfg["final_learning_rate_ratio"])
     if not warmup_steps < hold_end < linear_end < max_steps:
-        raise ValueError("Invalid tc16 learning-rate boundaries")
+        raise ValueError("Invalid ablation learning-rate boundaries")
     if not 0.0 < final_ratio < 0.5:
-        raise ValueError("tc16 final learning-rate ratio must be in (0, 0.5)")
+        raise ValueError("Ablation final learning-rate ratio must be in (0, 0.5)")
     if step < warmup_steps:
         return step / warmup_steps
     if step < hold_end:
@@ -179,32 +179,33 @@ def validate_tc16_query_configuration(
     max_positions = int(cfg["model"]["max_position_embeddings"])
     if not math.isclose(duration, TC16_SEGMENT_DURATION):
         raise ValueError(
-            f"tc16 requires segment_duration={TC16_SEGMENT_DURATION}, got {duration}"
+            f"ablation requires segment_duration={TC16_SEGMENT_DURATION}, "
+            f"got {duration}"
         )
     if tokenizer_spec.sample_rate != TC16_SAMPLE_RATE:
         raise ValueError(
-            f"tc16 requires a {TC16_SAMPLE_RATE} Hz tokenizer, got "
+            f"ablation requires a {TC16_SAMPLE_RATE} Hz tokenizer, got "
             f"{tokenizer_spec.sample_rate}"
         )
     if not math.isclose(tokenizer_spec.frame_rate, TC16_FRAME_RATE):
         raise ValueError(
-            f"tc16 requires {TC16_FRAME_RATE:g} MuQ frames/s, got "
+            f"ablation requires {TC16_FRAME_RATE:g} MuQ frames/s, got "
             f"{tokenizer_spec.frame_rate:g}"
         )
     selected_codebooks = int(tokenizer_spec.selected_codebooks)
     if selected_codebooks != TC16_SELECTED_CODEBOOKS:
         raise ValueError(
-            f"tc16 requires selected_codebooks={TC16_SELECTED_CODEBOOKS}, "
+            f"ablation requires selected_codebooks={TC16_SELECTED_CODEBOOKS}, "
             f"got {selected_codebooks}"
         )
     if not math.isclose(id_digit_weight, TC16_ID_DIGIT_WEIGHT):
         raise ValueError(
-            f"tc16 requires id_digit_weight={TC16_ID_DIGIT_WEIGHT:g}, "
+            f"ablation requires id_digit_weight={TC16_ID_DIGIT_WEIGHT:g}, "
             f"got {id_digit_weight:g}"
         )
     if max_positions != 512:
         raise ValueError(
-            f"tc16 requires max_position_embeddings=512, got {max_positions}"
+            f"ablation requires max_position_embeddings=512, got {max_positions}"
         )
     audio_targets = round(
         duration
@@ -216,7 +217,7 @@ def validate_tc16_query_configuration(
     )
     if audio_targets != expected_audio_targets:
         raise ValueError(
-            f"tc16 requires {expected_audio_targets} audio targets "
+            f"ablation requires {expected_audio_targets} audio targets "
             f"with {selected_codebooks} codebook(s), got {audio_targets}"
         )
     if (
@@ -236,23 +237,24 @@ def validate_tc16_query_configuration(
     document_tokens = int(batch["attention_mask"].sum())
     if digit_targets != TC16_DIGIT_TARGETS:
         raise ValueError(
-            f"tc16 requires {TC16_DIGIT_TARGETS} digit targets, got {digit_targets}"
+            f"ablation requires {TC16_DIGIT_TARGETS} digit targets, got {digit_targets}"
         )
     if boundary_targets != TC16_BOUNDARY_TARGETS:
         raise ValueError(
-            f"tc16 requires {TC16_BOUNDARY_TARGETS} boundary targets, got "
+            f"ablation requires {TC16_BOUNDARY_TARGETS} boundary targets, got "
             f"{boundary_targets}"
         )
     expected_document_tokens = expected_audio_targets + 8
     if document_tokens != expected_document_tokens:
         raise ValueError(
-            f"tc16 requires {expected_document_tokens} document "
+            f"ablation requires {expected_document_tokens} document "
             "tokens, got "
             f"{document_tokens}"
         )
     if document_tokens > max_positions:
         raise ValueError(
-            f"tc16 document length {document_tokens} exceeds context {max_positions}"
+            f"ablation document length {document_tokens} exceeds context "
+            f"{max_positions}"
         )
     return {
         "segment_duration_seconds": duration,
@@ -276,17 +278,17 @@ def validate_tc16_batch_configuration(cfg: dict, query_spec: dict) -> dict:
     accumulation = int(cfg["trainer"]["accumulate_grad_batches"])
     if tracks != TC16_TRACKS_PER_MICROBATCH:
         raise ValueError(
-            f"tc16 requires {TC16_TRACKS_PER_MICROBATCH} tracks per microbatch, "
+            f"ablation requires {TC16_TRACKS_PER_MICROBATCH} tracks per microbatch, "
             f"got {tracks}"
         )
     if segments != TC16_SEGMENTS_PER_TRACK:
         raise ValueError(
-            f"tc16 requires {TC16_SEGMENTS_PER_TRACK} documents per track, "
+            f"ablation requires {TC16_SEGMENTS_PER_TRACK} documents per track, "
             f"got {segments}"
         )
     if accumulation != TC16_ACCUMULATE_GRAD_BATCHES:
         raise ValueError(
-            f"tc16 requires accumulate_grad_batches="
+            f"ablation requires accumulate_grad_batches="
             f"{TC16_ACCUMULATE_GRAD_BATCHES}, got {accumulation}"
         )
     documents = tracks * segments
@@ -295,7 +297,7 @@ def validate_tc16_batch_configuration(cfg: dict, query_spec: dict) -> dict:
     waveform_seconds = documents * float(query_spec["segment_duration_seconds"])
     if documents != TC16_DOCUMENTS_PER_MICROBATCH:
         raise ValueError(
-            f"tc16 requires {TC16_DOCUMENTS_PER_MICROBATCH} documents per "
+            f"ablation requires {TC16_DOCUMENTS_PER_MICROBATCH} documents per "
             f"microbatch, got {documents}"
         )
     return {
@@ -1941,7 +1943,7 @@ class AudioLMModule(pl.LightningModule):
         unexpected = set(metrics) - allowed_probe_keys
         if unexpected:
             raise RuntimeError(
-                f"tc16 produced non-tc6 W&B probe keys: {sorted(unexpected)}"
+                f"ablation produced non-tc6 W&B probe keys: {sorted(unexpected)}"
             )
         if self.logger is not None:
             self.logger.log_metrics(metrics, step=self.global_step)
@@ -2339,9 +2341,9 @@ class AudioLMModule(pl.LightningModule):
         if checkpoint.get("room_ir_manifest") != self.rir_manifest:
             raise ValueError("Resume checkpoint room-IR assets do not match")
         if checkpoint.get("query_spec") != self.query_spec:
-            raise ValueError("Resume checkpoint tc16 query specification differs")
+            raise ValueError("Resume checkpoint ablation query specification differs")
         if checkpoint.get("batch_spec") != self.batch_spec:
-            raise ValueError("Resume checkpoint tc16 batch specification differs")
+            raise ValueError("Resume checkpoint ablation batch specification differs")
         if checkpoint.get("resolved_training_profile") is not None and (
             checkpoint.get("training_corpus_fingerprint")
             != self.training_corpus_fingerprint
@@ -2447,7 +2449,7 @@ def train(cfg: dict, *, checkpoint: str | Path | None = None) -> None:
     ].get(
         "distillation"
     ):
-        raise ValueError("Resolved tc16 distillation profile differs")
+        raise ValueError("Resolved ablation distillation profile differs")
     seed = int(cfg["train"]["seed"])
     pl.seed_everything(seed, workers=True)
     torch.use_deterministic_algorithms(

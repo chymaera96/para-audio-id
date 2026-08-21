@@ -204,7 +204,7 @@ def resolved_augmentation_schedule(
         snr_bins = tuple(
             float(value) for value in schedule["snr_bin_probabilities"]
         )
-        # The active tc16 objective schedules distillation independently from
+        # The active ablation schedules distillation independently from
         # the unchanged corruption curriculum.
         legacy_consistency = 0.0
         if step < clean_end:

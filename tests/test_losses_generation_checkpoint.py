@@ -105,14 +105,14 @@ def test_generation_emits_exactly_five_digits_then_eos():
     assert [len(results) for results in batched_beam] == [5, 5]
 
 
-def test_tc16_four_codebook_generation_fits_512_position_context():
-    vocabulary = AudioLMVocabulary(num_codebooks=4)
+def test_six_codebook_generation_fits_512_position_context():
+    vocabulary = AudioLMVocabulary(num_codebooks=6)
     cfg = tiny_config()
     cfg["model"]["max_position_embeddings"] = 512
     model = AudioCausalLM(cfg, vocabulary).eval()
-    audio_tokens = torch.arange(200) % vocabulary.audio_size
+    audio_tokens = torch.arange(300) % vocabulary.audio_size
     prompt = prompt_from_audio_tokens(audio_tokens, vocabulary)
-    assert prompt.shape == (202,)
+    assert prompt.shape == (302,)
     result = greedy_generate(model, prompt, vocabulary)
     assert len(result.code) == 5
     assert result.ended_with_eos

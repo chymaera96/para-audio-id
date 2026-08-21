@@ -7,7 +7,7 @@ fixed 100,000-track catalogue into its parameters. Each training document is:
 [BOS] audio-token-1 ... audio-token-N [ID] digit-1 ... digit-5 [EOS]
 ```
 
-Audio tokens use the first four Mel-RVQ codebooks from the frozen
+Audio tokens use the first six Mel-RVQ codebooks from the frozen
 `OpenMuQ/MuQ-large-msd-iter` checkpoint. The causal LM jointly predicts the audio
 sequence and the track's arbitrary five-digit code. Identification performs model
 generation only: it does not search fingerprints, embeddings, an ANN index, token
@@ -65,7 +65,7 @@ The repository still contains the older cache-preparation commands, but current 
 does not use canonical, shifted, or half-offset token stores for training or
 evaluation. They remain useful only when reproducing tc2–tc6 from Git history.
 
-tc16 uses the existing 25K identity manifest. Prepare it if it is not already
+The six-codebook ablation uses the existing 25K identity manifest. Prepare it if it is not already
 available:
 
 ```bash
@@ -77,7 +77,7 @@ python prepare_training_cohort.py configs/fma_large.yaml
 
 The default causal LM is a randomly initialized 12-layer GPT-2-style decoder with
 hidden size 768, 12 heads, tied embeddings, and no dropout. The vocabulary has
-4,096 codebook-separated audio tokens, `[BOS]`, `[ID]`, ten dedicated digit tokens,
+6,144 codebook-separated audio tokens, `[BOS]`, `[ID]`, ten dedicated digit tokens,
 and `[EOS]`.
 
 Training samples online two-second crops from the fixed 25K cohort. Each
@@ -89,26 +89,26 @@ tokenizes all 80 final waveforms in each physical microbatch.
 ```text
 loss =
     (
-        200 * mean(clean audio-token CE)
-        + 80 * mean(all digit CE)
+        300 * mean(clean audio-token CE)
+        + 120 * mean(all digit CE)
         + 2 * mean(all boundary CE)
-    ) / 282
+    ) / 422
     + lambda_KD * identifier-logit distillation
 ```
 
-For every degraded secondary, tc16 uses its clean anchor as a stop-gradient
+For every degraded secondary, the ablation uses its clean anchor as a stop-gradient
 teacher at the five causal positions that predict the next identifier digit.
 The KL divergence is computed only over the ten digit-token logits with
 temperature 2. This uses the existing single decoder pass and adds no model
 parameters or inference-time modules. The causal coefficients are approximately
 0.709 audio, 0.284 digits, and 0.007 boundaries with identifier
-weight 16. Checkpoints record `tc16_two_second_four_codebook_logit_distillation_v1`.
+weight 24. Checkpoints record `ablate_two_second_six_codebook_logit_distillation_v1`.
 
-Four codebooks produce 200 audio tokens and a 208-token complete causal
+Six codebooks produce 300 audio tokens and a 308-token complete causal
 document. The existing 512-position table is retained: the inference prompt is
-202 tokens before the five generated digits, so no context expansion is needed.
+302 tokens before the five generated digits, so no context expansion is needed.
 
-For tc16, the secondary-view curriculum remains identical to tc15:
+The secondary-view curriculum remains identical to tc15/tc16:
 
 | Raw steps | Clean | Noise | RIR | Noise + RIR | RIR severity |
 | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -126,19 +126,19 @@ IRs at 60K. Convolution remains full-wet at every severity.
 
 Noisy examples use fixed SNR-bin probabilities `0.40/0.30/0.20/0.10` for
 `0–5/5–10/10–20/20–30 dB`; 10% of noisy views are exactly 0 dB. The LR uses
-the tc16 schedule: linear warm-up over 500 steps to `3e-4`, hold through 60K,
+the same schedule: linear warm-up over 500 steps to `3e-4`, hold through 60K,
 linear decay to `1.5e-4` at 140K, then cosine decay to `1.5e-5` at 225K.
 
 The single-GPU logical batch is 80 tracks × 2 segments: a physical microbatch of
 40 tracks × two segments with two gradient-accumulation steps. Each
-microbatch contains 16,000 audio targets and 160 seconds of waveform; each
-optimizer update contains 32,000 audio targets and 320 seconds of waveform.
+microbatch contains 24,000 audio targets and 160 seconds of waveform; each
+optimizer update contains 48,000 audio targets and 320 seconds of waveform.
 
 RIR uses full-wet causal convolution with two seconds of preceding audio;
 the prefix is discarded after convolution so reverberant tails from preceding
 music enter the query. Room IR train/test assets are source- and content-disjoint.
 
-tc16 runs for 225K optimizer steps. Checkpoints and monitoring both run every
+The ablation runs for 225K optimizer steps. Checkpoints and monitoring both run every
 2,500 steps. For direct comparison with tc6, the same seeded 100-track cohort is
 evaluated using one balanced canonical, integer-shifted, and held-out
 half-offset crop per track. All three groups are evaluated clean and at
@@ -153,15 +153,15 @@ Top-1/5/10 and MRR results are appended to `probe_metrics.jsonl`.
 python train.py configs/fma_large.yaml \
   --decoder small \
   --schedule noise-rir \
-  --codebooks 4 \
+  --codebooks 6 \
   --distillation-weight 0.1 \
-  --run-id tc16 \
+  --run-id ablate-6cb \
   --devices 1 \
   --wandb-online
 ```
 
 This branch accepts only `--decoder small`, `--schedule noise-rir`, and
-`--codebooks 4`. The resolved tc16 profile and distillation maximum are embedded
+`--codebooks 6`. The resolved ablation profile and distillation maximum are embedded
 in every checkpoint. Use `--distillation-weight 0.0` for the matched ablation.
 
 The only new W&B key is `train/distillation_loss_epoch`; it remains available
@@ -173,12 +173,12 @@ state:
 ```bash
 python train.py configs/fma_large.yaml \
   --devices 1 \
-  --run-id tc16 \
+  --run-id ablate-6cb \
   --wandb-online \
   --resume
 ```
 
-On resume, profile values are recovered from the checkpoint. Any pre-tc16
+On resume, profile values are recovered from the checkpoint. Any non-matching
 checkpoint or incompatible explicit override fails before model construction.
 
 Checkpoints are written every 2,500 optimizer steps under:
@@ -190,7 +190,7 @@ Checkpoints are written every 2,500 optimizer steps under:
 Checkpoints embed the vocabulary, exact cohort, resolved profile, random-crop and replacement
 policies, fixed monitor manifest, noise/tokenizer fingerprints, sampler state,
 RNG state, query specification, and code mapping. Resume is accepted only for
-compatible tc16 checkpoints. Backward compatibility with earlier experiments
+compatible six-codebook ablation checkpoints. Backward compatibility with earlier experiments
 is intentionally not provided on this trial branch.
 
 PyTorch deterministic algorithms and seeded Python, NumPy, Torch, samplers, and

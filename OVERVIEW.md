@@ -24,6 +24,7 @@ should be taken from the corresponding W&B run or evaluation JSON.
 | `tc14` | Same seeded 25K tracks | Five-second, three-codebook clean/degraded pairs | 30 | 225K | Replaces tc13 representation auxiliaries with clean-to-degraded digit-logit distillation |
 | `tc15` | Same seeded 25K tracks | Five-second, four-codebook clean/degraded pairs | 40 | 225K | Increases acoustic serialization while preserving tc14's supervision ratio and distillation |
 | `tc16` | Same seeded 25K tracks | Two-second, four-codebook clean/degraded pairs | 16 | 225K | Shortens tc15 queries while preserving its causal-loss ratio, cohort, batch, schedules, and distillation |
+| `tc17` | Same seeded 25K tracks | Two-second, six-codebook clean/degraded pairs | 24 | 225K | Increases tc16 acoustic serialization while preserving its supervision ratio and training recipe |
 
 Each entry is a from-scratch model unless explicitly documented otherwise.
 In particular, `tc4` is not initialized from `tc3`, `tc5` is not initialized
@@ -406,6 +407,22 @@ Identity and document exposure remain fixed at 80 tracks and 160 documents per
 optimizer step. Consequently, tc16 intentionally receives 40% of tc15's audio
 tokens and waveform duration per optimizer step.
 
+## `tc17`: two-second six-codebook ablation
+
+`tc17` retains tc16's two-second queries, 25K cohort, GPT-2-small-style decoder,
+noise/RIR and learning-rate schedules, temperature-2 identifier-logit
+distillation, `40×2` physical batch, accumulation two, and 225K endpoint. Six
+codebooks yield 300 audio targets and a 308-token causal document. Identifier
+weight scales from 16 to 24, giving
+`(300 audio + 120 digit + 2 boundary) / 422` and preserving the 2.5:1 aggregate
+audio-to-identifier supervision ratio.
+
+The vocabulary contains 6,157 entries: 6,144 codebook-separated audio tokens
+and 13 special/digit tokens. The complete 308-token document remains within
+the unchanged 512-position context. tc17 uses the immutable protocol
+`ablate_two_second_six_codebook_logit_distillation_v1` and starts from random
+weights.
+
 ## Unified training profiles
 
 The active `mel-rvq` branch is single-purpose for tc16: small decoder, 25K
@@ -415,7 +432,7 @@ W&B retains existing causal names and adds only epoch-level distillation loss.
 
 ## Interpretation
 
-The progression isolates thirteen questions:
+The progression isolates fourteen questions:
 
 1. `tc2`: can the causal formulation memorize audio-token-to-code mappings?
 2. `tc3`: does a smaller catalogue and stronger ID supervision make that
@@ -443,6 +460,8 @@ The progression isolates thirteen questions:
     aggregate audio-to-identifier supervision ratio is held fixed?
 13. `tc16`: with tc15 otherwise fixed, how does reducing evidence from five
     seconds to two affect identification and robustness?
+14. `tc17`: with tc16 otherwise fixed, does adding two more acoustic codebooks
+    improve identification and robustness?
 
 Teacher-forced digit accuracy is useful for optimization diagnostics, but the
 scientific identification result is free-running exact accuracy and beam

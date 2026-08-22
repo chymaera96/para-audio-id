@@ -53,43 +53,6 @@ TC6_MONITOR_GRIDS = {
 }
 
 
-def convolve_with_training_rir_candidates(
-    context: np.ndarray,
-    rir_assets: RoomImpulseResponseAssets,
-    *,
-    key: object,
-    severity_quantile: float,
-    past_context_samples: int,
-    output_samples: int,
-) -> tuple[np.ndarray, str, list[dict[str, str]]]:
-    """Retry pair-dependent convolution failures over deterministic IRs."""
-    failures = []
-    for ir, path in rir_assets.iter_training(
-        key,
-        severity_quantile=severity_quantile,
-    ):
-        try:
-            waveform = convolve_full_wet(
-                context,
-                ir,
-                past_context_samples=past_context_samples,
-                output_samples=output_samples,
-            )
-        except Exception as exc:
-            failures.append(
-                {
-                    "rir_path": path,
-                    "error": f"{type(exc).__name__}: {exc}",
-                }
-            )
-            continue
-        return waveform, path, failures
-    raise RuntimeError(
-        "All eligible room impulse responses failed convolution: "
-        f"{failures[-3:]}"
-    )
-
-
 def random_start_sample(
     record: CatalogueRecord,
     *,
@@ -742,39 +705,27 @@ class RandomCropCollator:
                 context = mixed[0].numpy()
             if self.rir_assets is None:
                 raise RuntimeError("RIR category selected without room-IR assets")
-            rir_key = stable_uint64(
-                self.seed,
-                optimizer_step,
-                batch_idx,
-                pair_index,
-                pair["record"].track_id,
-                "room-ir-file",
-            )
             try:
-                second, rir_path, rir_failures = (
-                    convolve_with_training_rir_candidates(
-                        context,
-                        self.rir_assets,
-                        key=rir_key,
-                        severity_quantile=float(
-                            schedule.rir_severity_quantile or 1.0
-                        ),
-                        past_context_samples=self.past_context_samples,
-                        output_samples=self.crop_samples,
-                    )
+                ir, rir_path = self.rir_assets.load_training(
+                    stable_uint64(
+                        self.seed,
+                        optimizer_step,
+                        batch_idx,
+                        pair_index,
+                        pair["record"].track_id,
+                        "room-ir-file",
+                    ),
+                    severity_quantile=float(
+                        schedule.rir_severity_quantile or 1.0
+                    ),
                 )
-                pair["second"] = second
+                pair["second"] = convolve_full_wet(
+                    context,
+                    ir,
+                    past_context_samples=self.past_context_samples,
+                    output_samples=self.crop_samples,
+                )
                 pair["rir_path"] = rir_path
-                for failure in rir_failures:
-                    failures.append(
-                        {
-                            "track_id": pair["record"].track_id,
-                            "source_path": pair["record"].path,
-                            "pair_slot": pair_index,
-                            "category": category,
-                            **failure,
-                        }
-                    )
             except Exception as exc:
                 failures.append(
                     {

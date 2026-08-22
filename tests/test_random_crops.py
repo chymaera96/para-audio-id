@@ -18,7 +18,6 @@ from para_audio_id.audio_lm.random_crops import (
     OnlineTrackDataset,
     RandomCropCollator,
     RandomEvaluationCollator,
-    convolve_with_training_rir_candidates,
     make_tc6_evaluation_manifest,
     random_start_sample,
 )
@@ -315,33 +314,6 @@ def test_full_wet_convolution_uses_past_context_and_normalizes_peak():
     assert np.allclose(result[1:], 0.0, atol=1e-6)
 
 
-def test_training_convolution_retries_pair_dependent_silent_ir():
-    context = np.zeros(8, dtype=np.float32)
-    context[4] = 1.0
-    delayed = np.zeros(9, dtype=np.float32)
-    delayed[8] = 1.0
-
-    class CandidateAssets:
-        def iter_training(self, key, *, severity_quantile):
-            assert key == 7
-            assert severity_quantile == 1.0
-            yield delayed, "silent-for-context.wav"
-            yield np.array([1.0], dtype=np.float32), "usable.wav"
-
-    result, path, failures = convolve_with_training_rir_candidates(
-        context,
-        CandidateAssets(),
-        key=7,
-        severity_quantile=1.0,
-        past_context_samples=4,
-        output_samples=4,
-    )
-    assert path == "usable.wav"
-    assert result.shape == (4,)
-    assert len(failures) == 1
-    assert failures[0]["rir_path"] == "silent-for-context.wav"
-
-
 def test_training_collator_falls_back_to_clean_if_all_rirs_fail(
     tmp_path, monkeypatch
 ):
@@ -363,8 +335,8 @@ def test_training_collator_falls_back_to_clean_if_all_rirs_fail(
     delayed[-1] = 1.0
 
     class FailingAssets:
-        def iter_training(self, key, *, severity_quantile):
-            yield delayed, "always-silent.wav"
+        def load_training(self, key, *, severity_quantile):
+            return delayed, "always-silent.wav"
 
     monkeypatch.setattr(
         "para_audio_id.audio_lm.random_crops."

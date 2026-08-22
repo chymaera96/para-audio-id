@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
 import hashlib
 import json
 import math
@@ -141,29 +140,13 @@ class RoomImpulseResponseAssets:
     def load_training(
         self, key: object, *, severity_quantile: float = 1.0
     ) -> tuple[np.ndarray, str]:
-        try:
-            return next(
-                self.iter_training(
-                    key,
-                    severity_quantile=severity_quantile,
-                )
-            )
-        except StopIteration as exc:
-            raise RuntimeError(
-                "No readable non-silent room impulse responses remain"
-            ) from exc
-
-    def iter_training(
-        self, key: object, *, severity_quantile: float = 1.0
-    ) -> Iterator[tuple[np.ndarray, str]]:
-        """Yield each eligible readable IR once in deterministic order."""
         if not 0.0 < severity_quantile <= 1.0:
             raise ValueError("RIR severity quantile must be in (0, 1]")
         eligible = max(
             1,
             math.ceil(len(self.training_files_by_severity) * severity_quantile),
         )
-        yield from self._iter_load(
+        return self._load(
             self.training_root,
             self.training_files_by_severity[:eligible],
             stable_uint64("train-room-ir", key),
@@ -179,16 +162,6 @@ class RoomImpulseResponseAssets:
     def _load(
         self, root: Path, files: list[Path], seed: int
     ) -> tuple[np.ndarray, str]:
-        try:
-            return next(self._iter_load(root, files, seed))
-        except StopIteration as exc:
-            raise RuntimeError(
-                "No readable non-silent room impulse responses remain"
-            ) from exc
-
-    def _iter_load(
-        self, root: Path, files: list[Path], seed: int
-    ) -> Iterator[tuple[np.ndarray, str]]:
         for attempt in range(len(files)):
             path = files[(seed + attempt) % len(files)]
             try:
@@ -203,12 +176,13 @@ class RoomImpulseResponseAssets:
                 rms = float(np.sqrt(np.mean(np.square(ir, dtype=np.float64))))
                 if not len(ir) or not np.isfinite(ir).all() or rms <= 1e-8:
                     raise ValueError("invalid or silent room impulse response")
-                yield (
+                return (
                     np.asarray(ir, dtype=np.float32),
                     path.relative_to(root).as_posix(),
                 )
             except Exception:
                 continue
+        raise RuntimeError("No readable non-silent room impulse responses remain")
 
 
 def convolve_full_wet(

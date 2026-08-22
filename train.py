@@ -18,8 +18,8 @@ def main() -> None:
     parser.add_argument(
         "--codebooks",
         type=int,
-        choices=(6,),
-        help="this ablation requires six MuQ Mel-RVQ codebooks",
+        choices=(8,),
+        help="tc18 requires all eight MuQ Mel-RVQ codebooks",
     )
     parser.add_argument(
         "--distillation-weight",

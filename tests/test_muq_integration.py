@@ -19,23 +19,23 @@ from para_audio_id.audio_lm.tokenizer import MuQRVQTokenizer
     os.environ.get("RUN_MUQ_INTEGRATION") != "1",
     reason="set RUN_MUQ_INTEGRATION=1 to load the real MuQ checkpoint",
 )
-def test_real_muq_six_codebook_eighty_document_probe():
+def test_real_muq_eight_codebook_eighty_document_probe():
     tokenizer = MuQRVQTokenizer(
         "OpenMuQ/MuQ-large-msd-iter",
-        selected_codebooks=6,
+        selected_codebooks=8,
         device=os.environ.get("MUQ_DEVICE", "cuda"),
     )
     waveform = torch.sin(
         2 * torch.pi * 220 * torch.arange(48_000) / 24_000
     ).unsqueeze(0)
     report = tokenizer.probe(waveform)
-    assert report["raw_shape"][1] == 6
-    assert report["serialized_tokens_per_example"] == 300
+    assert report["raw_shape"][1] == 8
+    assert report["serialized_tokens_per_example"] == 400
     audio_tokens = tokenizer.tokenize(waveform)[0].cpu()
     lightweight = MuQRVQTokenizer(
         "OpenMuQ/MuQ-large-msd-iter",
         revision=tokenizer.revision,
-        selected_codebooks=6,
+        selected_codebooks=8,
         device=os.environ.get("MUQ_DEVICE", "cuda"),
         lightweight=True,
     )
@@ -57,7 +57,7 @@ def test_real_muq_six_codebook_eighty_document_probe():
     )
     lightweight_tokens = lightweight.tokenize(online_waveforms)
     assert torch.equal(lightweight_tokens[0].cpu(), audio_tokens)
-    assert lightweight_tokens.shape == (80, 300)
+    assert lightweight_tokens.shape == (80, 400)
     cfg = {
         "model": {
             "architecture": "gpt2",
@@ -89,8 +89,8 @@ def test_real_muq_six_codebook_eighty_document_probe():
             )
             is_degraded.append(bool(role))
     batch = collate_causal_documents(examples, tokenizer.vocabulary, 512)
-    assert batch["input_ids"].shape == (80, 308)
-    assert int(batch["audio_target_mask"].sum()) == 24_000
+    assert batch["input_ids"].shape == (80, 408)
+    assert int(batch["audio_target_mask"].sum()) == 32_000
     logits = model(
         batch["input_ids"].to(tokenizer.device),
         batch["attention_mask"].to(tokenizer.device),
@@ -103,7 +103,7 @@ def test_real_muq_six_codebook_eighty_document_probe():
         batch["id_target_mask"].to(tokenizer.device),
         batch["boundary_target_mask"].to(tokenizer.device),
         degraded,
-        id_digit_weight=24.0,
+        id_digit_weight=32.0,
     )
     kd_loss = identifier_logit_distillation_loss(
         logits,

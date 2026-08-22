@@ -30,12 +30,12 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
         frame_rate=25.0,
         waveform_normalization="none_before_muq_internal_preprocessing",
         num_available_codebooks=8,
-        selected_codebooks=6,
+        selected_codebooks=8,
         codebook_size=1024,
         serialization="time_major_codebook_interleaved",
         preprocessing_version=1,
     )
-    vocabulary = AudioLMVocabulary(num_codebooks=6)
+    vocabulary = AudioLMVocabulary(num_codebooks=8)
     audio_root = tmp_path / "audio"
     audio_root.mkdir()
     waveform = np.sin(
@@ -99,7 +99,8 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
 
         def tokenize(self, waveforms):
             frame = torch.tensor(
-                [3, 1027, 2051, 3075, 4099, 5123], device=waveforms.device
+                [3, 1027, 2051, 3075, 4099, 5123, 6147, 7171],
+                device=waveforms.device,
             )
             return frame.repeat(waveforms.shape[0], 50)
 
@@ -108,7 +109,7 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
         FakeOnlineTokenizer,
     )
     distillation_profile = {
-        "protocol": "ablate_two_second_six_codebook_logit_distillation_v1",
+        "protocol": "tc18_two_second_eight_codebook_logit_distillation_v1",
         "temperature": 2.0,
         "maximum_weight": 0.1,
         "weight_schedule": {
@@ -124,7 +125,7 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
         "tokenizer": {
             "model_name": "dummy",
             "revision": "resolved",
-            "selected_codebooks": 6,
+            "selected_codebooks": 8,
             "sample_rate": 24_000,
             "device": "cpu",
         },
@@ -174,12 +175,12 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
             "warmup_steps": 1,
             "evaluation_interval": 1,
             "checkpoint_interval": 1,
-            "id_digit_weight": 24.0,
+            "id_digit_weight": 32.0,
             "gradient_clip_norm": 1.0,
             "schedule": {
                 "name": "noise-rir",
-                "protocol": "ablate_two_second_six_codebook_logit_distillation_v1",
-                "loss_protocol": "ablate_two_second_six_codebook_logit_distillation_v1",
+                "protocol": "tc18_two_second_eight_codebook_logit_distillation_v1",
+                "loss_protocol": "tc18_two_second_eight_codebook_logit_distillation_v1",
                 "curriculum": "tc12_noise_rir_curriculum_v1",
                 "clean_until_step": 10_000,
                 "degradation_ramp_until_step": 30_000,
@@ -191,8 +192,8 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
             "wandb": {"enabled": False},
         },
         "resolved_training_profile": {
-            "version": 8,
-            "variant": "ablate-two-second-six-codebook-logit-distillation",
+            "version": 9,
+            "variant": "tc18-two-second-eight-codebook-logit-distillation",
             "database_size": 40,
             "training_tracks_manifest": str(manifest),
             "decoder": {
@@ -203,8 +204,8 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
             },
             "schedule": {
                 "name": "noise-rir",
-                "protocol": "ablate_two_second_six_codebook_logit_distillation_v1",
-                "loss_protocol": "ablate_two_second_six_codebook_logit_distillation_v1",
+                "protocol": "tc18_two_second_eight_codebook_logit_distillation_v1",
+                "loss_protocol": "tc18_two_second_eight_codebook_logit_distillation_v1",
                 "max_steps": 2,
                 "curriculum": "tc12_noise_rir_curriculum_v1",
                 "clean_until_step": 10_000,
@@ -253,15 +254,15 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
     assert checkpoint["global_step"] == 2
     assert (
         checkpoint["training_protocol"]
-        == "ablate_two_second_six_codebook_logit_distillation_v1"
+        == "tc18_two_second_eight_codebook_logit_distillation_v1"
     )
     assert (
         checkpoint["loss_protocol"]
-        == "ablate_two_second_six_codebook_logit_distillation_v1"
+        == "tc18_two_second_eight_codebook_logit_distillation_v1"
     )
     assert (
         checkpoint["distillation_protocol"]
-        == "ablate_two_second_six_codebook_logit_distillation_v1"
+        == "tc18_two_second_eight_codebook_logit_distillation_v1"
     )
     assert checkpoint["distillation_profile"] == distillation_profile
     assert not any(
@@ -270,7 +271,7 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
     assert checkpoint["monitor_protocol"] == "compact_beam_monitor_v2"
     assert (
         checkpoint["crop_policy"]
-        == "ablate_six_codebook_two_second_online_random_crop_24k_v1"
+        == "tc18_eight_codebook_two_second_online_random_crop_24k_v1"
     )
     assert checkpoint["room_ir_manifest"]["training_files"] == 1
     assert len(checkpoint["monitor_recipes"]) == 6
@@ -286,26 +287,26 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
         "sample_rate": 24_000,
         "waveform_samples": 48_000,
         "frame_rate": 25.0,
-        "selected_codebooks": 6,
+        "selected_codebooks": 8,
         "frames": 50,
-        "audio_targets": 300,
+        "audio_targets": 400,
         "digit_targets": 5,
         "boundary_targets": 2,
-        "document_tokens": 308,
-        "id_digit_weight": 24.0,
+        "document_tokens": 408,
+        "id_digit_weight": 32.0,
         "max_position_embeddings": 512,
     }
     assert checkpoint["batch_spec"] == {
         "tracks_per_microbatch": 40,
         "documents_per_track": 2,
         "documents_per_microbatch": 80,
-        "audio_targets_per_microbatch": 24_000,
-        "causal_tokens_per_microbatch": 24_640,
+        "audio_targets_per_microbatch": 32_000,
+        "causal_tokens_per_microbatch": 32_640,
         "waveform_seconds_per_microbatch": 160.0,
         "gradient_accumulation_steps": 2,
         "tracks_per_optimizer_step": 80,
         "documents_per_optimizer_step": 160,
-        "audio_targets_per_optimizer_step": 48_000,
+        "audio_targets_per_optimizer_step": 64_000,
         "waveform_seconds_per_optimizer_step": 320.0,
     }
     assert not (tmp_path / "logs" / "smoke" / "auxiliary_metrics.jsonl").exists()
@@ -324,7 +325,7 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
         train(cfg, checkpoint=invalid)
 
 
-def test_tc16_wandb_keys_add_only_epoch_distillation():
+def test_tc18_wandb_keys_add_only_epoch_distillation():
     assert TRAIN_METRICS == {
         "clean_audio_loss",
         "digit_loss",

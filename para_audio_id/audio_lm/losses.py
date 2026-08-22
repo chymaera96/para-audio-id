@@ -174,7 +174,7 @@ def degraded_causal_base_losses(
     *,
     id_digit_weight: float,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-    """Active ablation base loss with degraded audio targets excluded."""
+    """tc18 base loss with degraded audio targets excluded."""
     if is_degraded.shape != (logits.shape[0],):
         raise ValueError("is_degraded must contain one value per document")
     if id_digit_weight <= 0:
@@ -217,7 +217,7 @@ def degraded_causal_base_losses(
         or digit_counts.unique().numel() != 1
         or boundary_counts.unique().numel() != 1
     ):
-        raise ValueError("Ablation family weighting requires uniform target counts")
+        raise ValueError("tc18 family weighting requires uniform target counts")
     audio_count = audio_counts[0].to(clean_audio_loss.dtype)
     digit_count = digit_counts[0].to(clean_audio_loss.dtype)
     boundary_count = boundary_counts[0].to(clean_audio_loss.dtype)

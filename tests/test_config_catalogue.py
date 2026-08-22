@@ -10,8 +10,8 @@ from para_audio_id.audio_lm.generation import prompt_from_audio_tokens
 from para_audio_id.audio_lm.tokenizer import TokenizerSpec
 from para_audio_id.audio_lm.profiles import resolve_training_config
 from para_audio_id.audio_lm.training import (
-    validate_tc16_batch_configuration,
-    validate_tc16_query_configuration,
+    validate_tc18_batch_configuration,
+    validate_tc18_query_configuration,
 )
 from para_audio_id.audio_lm.vocabulary import AudioLMVocabulary
 from para_audio_id.codes import assign_codes
@@ -25,7 +25,7 @@ def test_primary_config_is_audio_lm_and_matches_logical_batch():
         )
     )
     assert cfg["architecture"] == "audio_lm_v1"
-    assert cfg["tokenizer"]["selected_codebooks"] == 6
+    assert cfg["tokenizer"]["selected_codebooks"] == 8
     assert cfg["model"]["max_position_embeddings"] == 512
     physical_documents = (
         cfg["train"]["tracks_per_microbatch"] * cfg["train"]["segments_per_track"]
@@ -36,10 +36,10 @@ def test_primary_config_is_audio_lm_and_matches_logical_batch():
     assert cfg["train"]["deterministic"]
     assert cfg["data"]["segment_duration"] == 2.0
     assert cfg["tokenizer"]["sample_rate"] * cfg["data"]["segment_duration"] == 48_000
-    assert cfg["train"]["id_digit_weight"] == 24.0
+    assert cfg["train"]["id_digit_weight"] == 32.0
     assert cfg["resolved_query_profile"] == {
-        "selected_codebooks": 6,
-        "id_digit_weight": 24.0,
+        "selected_codebooks": 8,
+        "id_digit_weight": 32.0,
     }
     assert cfg["data"]["max_training_tracks"] == 25_000
     assert cfg["train"]["max_steps"] == 225_000
@@ -49,17 +49,17 @@ def test_primary_config_is_audio_lm_and_matches_logical_batch():
     assert cfg["resolved_training_profile"]["decoder"]["name"] == "small"
     assert (
         cfg["resolved_training_profile"]["variant"]
-        == "ablate-two-second-six-codebook-logit-distillation"
+        == "tc18-two-second-eight-codebook-logit-distillation"
     )
     assert (
         cfg["train"]["distillation"]["protocol"]
-        == "ablate_two_second_six_codebook_logit_distillation_v1"
+        == "tc18_two_second_eight_codebook_logit_distillation_v1"
     )
     assert cfg["train"]["distillation"]["maximum_weight"] == 0.1
     assert cfg["train"]["schedule"]["name"] == "noise-rir"
     assert (
         cfg["train"]["schedule"]["loss_protocol"]
-        == "ablate_two_second_six_codebook_logit_distillation_v1"
+        == "tc18_two_second_eight_codebook_logit_distillation_v1"
     )
     assert cfg["train"]["schedule"]["clean_until_step"] == 10_000
     assert cfg["train"]["schedule"]["degradation_ramp_until_step"] == 30_000
@@ -81,7 +81,7 @@ def test_primary_config_is_audio_lm_and_matches_logical_batch():
     assert not any(key.startswith("id_loss_") for key in cfg["train"])
 
 
-def test_tc16_startup_query_invariants_are_enforced():
+def test_tc18_startup_query_invariants_are_enforced():
     cfg = resolve_training_config(
         yaml.safe_load(
             (Path(__file__).parents[1] / "configs" / "fma_large.yaml").read_text()
@@ -96,63 +96,64 @@ def test_tc16_startup_query_invariants_are_enforced():
         frame_rate=25.0,
         waveform_normalization="none_before_muq_internal_preprocessing",
         num_available_codebooks=8,
-        selected_codebooks=6,
+        selected_codebooks=8,
         codebook_size=1024,
         serialization="time_major_codebook_interleaved",
         preprocessing_version=1,
     )
-    query_spec = validate_tc16_query_configuration(
-        cfg, tokenizer_spec, AudioLMVocabulary(num_codebooks=6)
-    )
-    batch_spec = validate_tc16_batch_configuration(cfg, query_spec)
+    vocabulary = AudioLMVocabulary(num_codebooks=8)
+    assert vocabulary.audio_size == 8_192
+    assert vocabulary.size == 8_205
+    query_spec = validate_tc18_query_configuration(cfg, tokenizer_spec, vocabulary)
+    batch_spec = validate_tc18_batch_configuration(cfg, query_spec)
     assert query_spec["waveform_samples"] == 48_000
     assert query_spec["frames"] == 50
-    assert query_spec["audio_targets"] == 300
+    assert query_spec["audio_targets"] == 400
     assert query_spec["digit_targets"] == 5
     assert query_spec["boundary_targets"] == 2
-    assert query_spec["document_tokens"] == 308
+    assert query_spec["document_tokens"] == 408
     prompt = prompt_from_audio_tokens(
-        torch.zeros(300, dtype=torch.long), AudioLMVocabulary(num_codebooks=6)
+        torch.zeros(400, dtype=torch.long), vocabulary
     )
-    assert len(prompt) == 302
-    assert len(prompt) + 6 == 308
+    assert len(prompt) == 402
+    assert len(prompt) + 6 == 408
     assert len(prompt) + 6 <= cfg["model"]["max_position_embeddings"]
     assert batch_spec["documents_per_microbatch"] == 80
-    assert batch_spec["audio_targets_per_microbatch"] == 24_000
-    assert batch_spec["causal_tokens_per_microbatch"] == 24_640
+    assert batch_spec["audio_targets_per_microbatch"] == 32_000
+    assert batch_spec["causal_tokens_per_microbatch"] == 32_640
     assert batch_spec["waveform_seconds_per_microbatch"] == 160.0
     assert batch_spec["tracks_per_optimizer_step"] == 80
     assert batch_spec["documents_per_optimizer_step"] == 160
-    assert batch_spec["audio_targets_per_optimizer_step"] == 48_000
+    assert batch_spec["audio_targets_per_optimizer_step"] == 64_000
     assert batch_spec["waveform_seconds_per_optimizer_step"] == 320.0
 
     wrong_batch = deepcopy(cfg)
     wrong_batch["train"]["tracks_per_microbatch"] = 10
     with pytest.raises(ValueError, match="40 tracks per microbatch"):
-        validate_tc16_batch_configuration(wrong_batch, query_spec)
+        validate_tc18_batch_configuration(wrong_batch, query_spec)
 
     wrong_duration = deepcopy(cfg)
     wrong_duration["data"]["segment_duration"] = 5.0
     with pytest.raises(ValueError, match="segment_duration=2.0"):
-        validate_tc16_query_configuration(
-            wrong_duration, tokenizer_spec, AudioLMVocabulary(num_codebooks=6)
+        validate_tc18_query_configuration(
+            wrong_duration, tokenizer_spec, AudioLMVocabulary(num_codebooks=8)
         )
 
     wrong_weight = deepcopy(cfg)
-    wrong_weight["train"]["id_digit_weight"] = 16.0
-    with pytest.raises(ValueError, match="id_digit_weight=24"):
-        validate_tc16_query_configuration(
-            wrong_weight, tokenizer_spec, AudioLMVocabulary(num_codebooks=6)
+    wrong_weight["train"]["id_digit_weight"] = 24.0
+    with pytest.raises(ValueError, match="id_digit_weight=32"):
+        validate_tc18_query_configuration(
+            wrong_weight, tokenizer_spec, AudioLMVocabulary(num_codebooks=8)
         )
 
 
 def test_ablation_rejects_other_codebook_query_profile():
-    with pytest.raises(ValueError, match="six MuQ codebooks"):
+    with pytest.raises(ValueError, match="all eight MuQ codebooks"):
         resolve_training_config(
             yaml.safe_load(
                 (Path(__file__).parents[1] / "configs" / "fma_large.yaml").read_text()
             ),
-            selected_codebooks=4,
+            selected_codebooks=6,
         )
 
 

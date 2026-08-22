@@ -106,8 +106,8 @@ def test_distillation_rejects_invalid_pair_layout_or_track():
         _kd(logits, batch, vocabulary, torch.tensor([False, True]))
 
 
-def test_six_codebook_base_loss_masks_degraded_audio_and_has_expected_coefficients():
-    vocabulary = AudioLMVocabulary(num_codebooks=6)
+def test_eight_codebook_base_loss_masks_degraded_audio_and_has_expected_coefficients():
+    vocabulary = AudioLMVocabulary(num_codebooks=8)
     audio = torch.tensor(
         [
             value
@@ -119,6 +119,8 @@ def test_six_codebook_base_loss_masks_degraded_audio_and_has_expected_coefficien
                 3072 + frame,
                 4096 + frame,
                 5120 + frame,
+                6144 + frame,
+                7168 + frame,
             )
         ]
     )
@@ -145,11 +147,11 @@ def test_six_codebook_base_loss_masks_degraded_audio_and_has_expected_coefficien
         batch["id_target_mask"],
         batch["boundary_target_mask"],
         torch.tensor([False, True]),
-        id_digit_weight=24.0,
+        id_digit_weight=32.0,
     )
-    assert metrics["audio_family_coefficient"] == pytest.approx(300 / 422)
-    assert metrics["digit_family_coefficient"] == pytest.approx(120 / 422)
-    assert metrics["boundary_family_coefficient"] == pytest.approx(2 / 422)
+    assert metrics["audio_family_coefficient"] == pytest.approx(400 / 562)
+    assert metrics["digit_family_coefficient"] == pytest.approx(160 / 562)
+    assert metrics["boundary_family_coefficient"] == pytest.approx(2 / 562)
     base.backward()
     degraded_audio = batch["audio_target_mask"][1].nonzero().flatten()
     assert not logits.grad[1, degraded_audio].any()
@@ -157,7 +159,7 @@ def test_six_codebook_base_loss_masks_degraded_audio_and_has_expected_coefficien
     assert logits.grad[1, batch["boundary_target_mask"][1].nonzero().flatten()].any()
 
 
-def test_tc16_base_computes_vocabulary_cross_entropy_once(monkeypatch):
+def test_tc18_base_computes_vocabulary_cross_entropy_once(monkeypatch):
     batch, vocabulary = _batch(["01234", "01234"])
     logits = torch.randn(2, batch["input_ids"].shape[1], vocabulary.size)
     calls = 0
@@ -176,6 +178,6 @@ def test_tc16_base_computes_vocabulary_cross_entropy_once(monkeypatch):
         batch["id_target_mask"],
         batch["boundary_target_mask"],
         torch.tensor([False, True]),
-        id_digit_weight=24.0,
+        id_digit_weight=32.0,
     )
     assert calls == 1

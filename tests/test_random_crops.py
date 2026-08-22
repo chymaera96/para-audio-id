@@ -314,6 +314,63 @@ def test_full_wet_convolution_uses_past_context_and_normalizes_peak():
     assert np.allclose(result[1:], 0.0, atol=1e-6)
 
 
+def test_training_collator_falls_back_to_clean_if_rir_fails(
+    tmp_path, monkeypatch
+):
+    audio_root = tmp_path / "audio"
+    audio_root.mkdir()
+    waveform = np.sin(
+        2 * np.pi * 220 * np.arange(10 * 8_000, dtype=np.float32) / 8_000
+    )
+    sf.write(audio_root / "0.wav", waveform, 8_000)
+    selected = records(1)
+    dataset = OnlineTrackDataset(selected)
+    example = {
+        **dataset[0],
+        "optimizer_step": 60_000,
+        "batch_idx": 0,
+        "pair_slot": 0,
+    }
+    delayed = np.zeros(32_001, dtype=np.float32)
+    delayed[-1] = 1.0
+
+    class FailingAssets:
+        def load_training(self, key, *, severity_quantile):
+            return delayed, "silent.wav"
+
+    monkeypatch.setattr(
+        "para_audio_id.audio_lm.random_crops."
+        "deterministic_augmentation_parameters",
+        lambda *args, **kwargs: (["rir"], [0.0], [None]),
+    )
+    batch = RandomCropCollator(
+        records=selected,
+        audio_root=audio_root,
+        noise_assets=object(),
+        rir_assets=FailingAssets(),
+        schedule={
+            "name": "noise-rir",
+            "curriculum": "tc12_noise_rir_curriculum_v1",
+            "clean_until_step": 10_000,
+            "degradation_ramp_until_step": 30_000,
+            "combined_ramp_until_step": 60_000,
+            "snr_bin_probabilities": [0.4, 0.3, 0.2, 0.1],
+        },
+        sample_rate=8_000,
+        crop_duration=2.0,
+        past_context_duration=2.0,
+        seed=3,
+        reserved_starts={},
+    )([example])
+    assert batch["categories"] == ["clean"]
+    assert batch["skipped_documents"] == 0
+    assert not batch["metadata"][1]["is_noisy"]
+    assert any(
+        failure.get("fallback") == "clean_anchor_copy"
+        for failure in batch["failed_crop_attempts"]
+    )
+
+
 def test_joint_manifest_is_deterministic_and_backfills_bad_candidates(tmp_path):
     sample_rate = 8_000
     audio_root = tmp_path / "audio"

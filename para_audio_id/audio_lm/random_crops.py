@@ -705,24 +705,41 @@ class RandomCropCollator:
                 context = mixed[0].numpy()
             if self.rir_assets is None:
                 raise RuntimeError("RIR category selected without room-IR assets")
-            ir, rir_path = self.rir_assets.load_training(
-                stable_uint64(
-                    self.seed,
-                    optimizer_step,
-                    batch_idx,
-                    pair_index,
-                    pair["record"].track_id,
-                    "room-ir-file",
-                ),
-                severity_quantile=float(schedule.rir_severity_quantile or 1.0),
-            )
-            pair["second"] = convolve_full_wet(
-                context,
-                ir,
-                past_context_samples=self.past_context_samples,
-                output_samples=self.crop_samples,
-            )
-            pair["rir_path"] = rir_path
+            try:
+                ir, rir_path = self.rir_assets.load_training(
+                    stable_uint64(
+                        self.seed,
+                        optimizer_step,
+                        batch_idx,
+                        pair_index,
+                        pair["record"].track_id,
+                        "room-ir-file",
+                    ),
+                    severity_quantile=float(
+                        schedule.rir_severity_quantile or 1.0
+                    ),
+                )
+                pair["second"] = convolve_full_wet(
+                    context,
+                    ir,
+                    past_context_samples=self.past_context_samples,
+                    output_samples=self.crop_samples,
+                )
+                pair["rir_path"] = rir_path
+            except Exception as exc:
+                failures.append(
+                    {
+                        "track_id": pair["record"].track_id,
+                        "source_path": pair["record"].path,
+                        "pair_slot": pair_index,
+                        "category": category,
+                        "error": f"{type(exc).__name__}: {exc}",
+                        "fallback": "clean_anchor_copy",
+                    }
+                )
+                pair["category"] = "clean"
+                pair["second"] = pair["first"].copy()
+                pair["rir_path"] = None
         augmentation_seconds = time.perf_counter() - augmentation_started
         waveforms = []
         metadata = []

@@ -53,6 +53,11 @@ from .noise import (
 )
 from .profiles import (
     CAPACITY_TRAINING_PROTOCOL,
+    CAPACITY_AUDIO_TARGETS,
+    CAPACITY_DOCUMENT_TOKENS,
+    CAPACITY_ID_DIGIT_WEIGHT,
+    CAPACITY_SEGMENT_DURATION,
+    CAPACITY_SELECTED_CODEBOOKS,
     LOSS_PROTOCOL,
     NEW_TRAINING_PROTOCOL,
     historical_checkpoint_profile,
@@ -90,6 +95,10 @@ TC9_TRACKS_PER_MICROBATCH = 10
 TC9_SEGMENTS_PER_TRACK = 2
 TC9_DOCUMENTS_PER_MICROBATCH = 20
 TC9_AUDIO_TARGETS_PER_MICROBATCH = 2_000
+CAPACITY_SAMPLE_RATE = 24_000
+CAPACITY_FRAME_RATE = 25.0
+CAPACITY_DIGIT_TARGETS = 5
+CAPACITY_BOUNDARY_TARGETS = 2
 TRAIN_METRICS = {
     "clean_audio_loss",
     "digit_loss",
@@ -262,6 +271,108 @@ def validate_tc9_query_configuration(
         "id_digit_weight": id_digit_weight,
         "max_position_embeddings": max_positions,
     }
+
+
+def validate_capacity_query_configuration(
+    cfg: dict,
+    tokenizer_spec: TokenizerSpec,
+    vocabulary: AudioLMVocabulary,
+) -> dict:
+    duration = float(cfg["data"]["segment_duration"])
+    id_digit_weight = float(cfg["train"]["id_digit_weight"])
+    max_positions = int(cfg["model"]["max_position_embeddings"])
+    if not math.isclose(duration, CAPACITY_SEGMENT_DURATION):
+        raise ValueError(
+            "capacity diagnostics require "
+            f"segment_duration={CAPACITY_SEGMENT_DURATION}, got {duration}"
+        )
+    if tokenizer_spec.sample_rate != CAPACITY_SAMPLE_RATE:
+        raise ValueError(
+            f"capacity diagnostics require a {CAPACITY_SAMPLE_RATE} Hz tokenizer, "
+            f"got {tokenizer_spec.sample_rate}"
+        )
+    if not math.isclose(tokenizer_spec.frame_rate, CAPACITY_FRAME_RATE):
+        raise ValueError(
+            f"capacity diagnostics require {CAPACITY_FRAME_RATE:g} MuQ frames/s, "
+            f"got {tokenizer_spec.frame_rate:g}"
+        )
+    if tokenizer_spec.selected_codebooks != CAPACITY_SELECTED_CODEBOOKS:
+        raise ValueError(
+            "capacity diagnostics require all eight MuQ codebooks, got "
+            f"{tokenizer_spec.selected_codebooks}"
+        )
+    if vocabulary.num_codebooks != CAPACITY_SELECTED_CODEBOOKS:
+        raise ValueError("capacity vocabulary must contain eight audio codebooks")
+    if vocabulary.size != 8_205:
+        raise ValueError(f"capacity vocabulary must contain 8205 tokens, got {vocabulary.size}")
+    if not math.isclose(id_digit_weight, CAPACITY_ID_DIGIT_WEIGHT):
+        raise ValueError(
+            f"capacity diagnostics require id_digit_weight={CAPACITY_ID_DIGIT_WEIGHT:g}, "
+            f"got {id_digit_weight:g}"
+        )
+    if max_positions != 512:
+        raise ValueError(
+            "capacity diagnostics preserve max_position_embeddings=512, got "
+            f"{max_positions}"
+        )
+    audio_targets = round(
+        duration * tokenizer_spec.frame_rate * tokenizer_spec.selected_codebooks
+    )
+    if audio_targets != CAPACITY_AUDIO_TARGETS:
+        raise ValueError(
+            f"capacity diagnostics require {CAPACITY_AUDIO_TARGETS} audio targets, "
+            f"got {audio_targets}"
+        )
+    example = {
+        "audio_tokens": torch.zeros(audio_targets, dtype=torch.long),
+        "code": "00000",
+        "track_id": "capacity-startup-probe",
+        "document_index": -1,
+    }
+    batch = collate_causal_documents([example], vocabulary, max_positions)
+    digit_targets = int(batch["id_target_mask"].sum())
+    boundary_targets = int(batch["boundary_target_mask"].sum())
+    document_tokens = int(batch["attention_mask"].sum())
+    if digit_targets != CAPACITY_DIGIT_TARGETS:
+        raise ValueError(
+            f"capacity diagnostics require {CAPACITY_DIGIT_TARGETS} digit targets, "
+            f"got {digit_targets}"
+        )
+    if boundary_targets != CAPACITY_BOUNDARY_TARGETS:
+        raise ValueError(
+            "capacity diagnostics require "
+            f"{CAPACITY_BOUNDARY_TARGETS} boundary targets, got {boundary_targets}"
+        )
+    if document_tokens != CAPACITY_DOCUMENT_TOKENS:
+        raise ValueError(
+            f"capacity diagnostics require {CAPACITY_DOCUMENT_TOKENS} document tokens, "
+            f"got {document_tokens}"
+        )
+    if document_tokens > max_positions:
+        raise ValueError(
+            f"capacity document length {document_tokens} exceeds context {max_positions}"
+        )
+    return {
+        "segment_duration_seconds": duration,
+        "sample_rate": tokenizer_spec.sample_rate,
+        "waveform_samples": round(duration * tokenizer_spec.sample_rate),
+        "frame_rate": tokenizer_spec.frame_rate,
+        "selected_codebooks": tokenizer_spec.selected_codebooks,
+        "frames": audio_targets // tokenizer_spec.selected_codebooks,
+        "audio_targets": audio_targets,
+        "digit_targets": digit_targets,
+        "boundary_targets": boundary_targets,
+        "document_tokens": document_tokens,
+        "id_digit_weight": id_digit_weight,
+        "max_position_embeddings": max_positions,
+        "vocabulary_size": vocabulary.size,
+    }
+
+
+def validate_capacity_batch_configuration(cfg: dict, query_spec: dict) -> dict:
+    if cfg.get("resolved_training_profile", {}).get("experiment") != "clean_capacity":
+        raise ValueError("Capacity batch validation requires a clean-capacity profile")
+    return validate_tc9_batch_configuration(cfg, query_spec)
 
 
 def validate_tc9_batch_configuration(cfg: dict, query_spec: dict) -> dict:
@@ -2797,20 +2908,29 @@ def train(cfg: dict, *, checkpoint: str | Path | None = None) -> None:
         device=_tokenizer_startup_device(cfg),
         lightweight=True,
     )
-    query_spec = validate_tc9_query_configuration(
-        cfg, online_tokenizer.spec, online_tokenizer.vocabulary
-    )
-    batch_spec = validate_tc9_batch_configuration(cfg, query_spec)
+    is_capacity = protocol == CAPACITY_TRAINING_PROTOCOL
+    if is_capacity:
+        query_spec = validate_capacity_query_configuration(
+            cfg, online_tokenizer.spec, online_tokenizer.vocabulary
+        )
+        batch_spec = validate_capacity_batch_configuration(cfg, query_spec)
+    else:
+        query_spec = validate_tc9_query_configuration(
+            cfg, online_tokenizer.spec, online_tokenizer.vocabulary
+        )
+        batch_spec = validate_tc9_batch_configuration(cfg, query_spec)
     startup_waveform = torch.zeros(
         (1, int(query_spec["waveform_samples"])),
         device=online_tokenizer.device,
     )
     startup_tokens = online_tokenizer.tokenize(startup_waveform)
-    expected_startup_shape = (1, TC9_AUDIO_TARGETS)
+    expected_audio_targets = int(query_spec["audio_targets"])
+    expected_startup_shape = (1, expected_audio_targets)
     if tuple(startup_tokens.shape) != expected_startup_shape:
         raise ValueError(
-            "tc9 requires the loaded MuQ tokenizer to produce exactly "
-            f"{TC9_AUDIO_TARGETS} audio targets for a two-second waveform; "
+            f"{('capacity diagnostics' if is_capacity else 'tc9')} require the "
+            "loaded MuQ tokenizer to produce exactly "
+            f"{expected_audio_targets} audio targets for a two-second waveform; "
             f"got {tuple(startup_tokens.shape)}"
         )
     datamodule = AudioLMDataModule(

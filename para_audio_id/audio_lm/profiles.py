@@ -17,10 +17,16 @@ DECODER_PROFILES = {
 }
 SCHEDULE_NAMES = ("noise", "noise-rir")
 NEW_TRAINING_PROTOCOL = "online_random_crop_consistency_profile_v2"
-CAPACITY_TRAINING_PROTOCOL = "online_random_crop_clean_capacity_v1"
+CAPACITY_TRAINING_PROTOCOL = "online_random_crop_clean_capacity_eight_codebook_v2"
 LOSS_PROTOCOL = "tc5_family_weighted_consistency_v2"
 CAPACITY_GLOBAL_TRACKS_PER_STEP = 80
 CAPACITY_MAX_TRACKS_PER_DEVICE = 40
+CAPACITY_SELECTED_CODEBOOKS = 8
+CAPACITY_SEGMENT_DURATION = 2.0
+CAPACITY_ID_DIGIT_WEIGHT = 32.0
+CAPACITY_AUDIO_TARGETS = 400
+CAPACITY_DOCUMENT_TOKENS = 408
+CAPACITY_VOCABULARY_SIZE = 8_205
 
 
 def cohort_manifest(database_size: int) -> str:
@@ -170,11 +176,20 @@ def canonical_capacity_profile(
     ):
         raise ValueError("Capacity parallelism does not match the global batch")
     return {
-        "version": 2,
+        "version": 3,
         "experiment": "clean_capacity",
         "database_size": database_size,
         "training_tracks_manifest": cohort_manifest(database_size),
         "decoder": decoder_profile(decoder),
+        "query": {
+            "segment_duration_seconds": CAPACITY_SEGMENT_DURATION,
+            "selected_codebooks": CAPACITY_SELECTED_CODEBOOKS,
+            "audio_targets": CAPACITY_AUDIO_TARGETS,
+            "document_tokens": CAPACITY_DOCUMENT_TOKENS,
+            "vocabulary_size": CAPACITY_VOCABULARY_SIZE,
+            "id_digit_weight": CAPACITY_ID_DIGIT_WEIGHT,
+            "max_position_embeddings": 512,
+        },
         "parallelism": {
             "world_size": world_size,
             "tracks_per_device_microbatch": tracks_per_device_microbatch,
@@ -220,6 +235,8 @@ def historical_checkpoint_profile(checkpoint: dict) -> dict[str, Any]:
         if (
             stored.get("experiment") == "clean_capacity"
             and "parallelism" not in stored
+            and stored.get("schedule", {}).get("protocol")
+            == CAPACITY_TRAINING_PROTOCOL
         ):
             schedule = stored["schedule"]
             return canonical_capacity_profile(
@@ -335,6 +352,11 @@ def resolve_capacity_config(
     if resumed is not None:
         if resumed.get("experiment") != "clean_capacity":
             raise ValueError("Capacity runs cannot resume a corruption-training checkpoint")
+        if resumed.get("schedule", {}).get("protocol") != CAPACITY_TRAINING_PROTOCOL:
+            raise ValueError(
+                "Two-codebook capacity checkpoints cannot resume the "
+                "eight-codebook capacity experiment"
+            )
         if configured_size != int(resumed["database_size"]):
             raise ValueError("Configured database size does not match capacity checkpoint")
         resolved_decoder = resumed["decoder"]["name"] if decoder is None else decoder
@@ -368,6 +390,11 @@ def resolve_capacity_config(
     model = cfg.setdefault("model", {})
     model.update(profile["decoder"])
     model.pop("name", None)
+    model["max_position_embeddings"] = 512
+    tokenizer = cfg.setdefault("tokenizer", {})
+    tokenizer["selected_codebooks"] = CAPACITY_SELECTED_CODEBOOKS
+    data["segment_duration"] = CAPACITY_SEGMENT_DURATION
+    train["id_digit_weight"] = CAPACITY_ID_DIGIT_WEIGHT
     train["tracks_per_microbatch"] = int(
         parallelism["tracks_per_device_microbatch"]
     )

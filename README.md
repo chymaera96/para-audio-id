@@ -246,9 +246,11 @@ evidence that catalogue acquisition succeeded.
 ## Clean capacity diagnostics
 
 Capacity experiments use a separate entry point and configuration, leaving the
-tc9–tc11 corruption-training interface unchanged. They train on two distinct
+historical corruption-training interface unchanged. They train on two distinct
 clean two-second random crops per identity, with no background-noise or RIR
-asset access and no consistency objective.
+asset access and no consistency objective. The active capacity profile uses all
+eight MuQ codebooks: 50 frames produce 400 audio targets and 408-token causal
+documents in an 8,205-token vocabulary.
 
 Choose `data.database_size` from `10000`, `25000`, `50000`, or `100000` in
 `configs/capacity.yaml`, then prepare or validate its size-specific manifest:
@@ -282,6 +284,11 @@ exposures, the four catalogue sizes resolve to 70K, 175K, 350K, and 700K
 optimizer steps. The LR warms up linearly for 200 steps and then remains fixed
 at `3e-4`.
 
+Identifier weight is `32`, so the clean weighted objective is
+`(400 L_audio + 160 L_digit + 2 L_boundary) / 562`. This preserves the 2.5:1
+audio-to-identifier supervision ratio while retaining the 512-position decoder
+context.
+
 Capacity diagnostics use 40 identities per physical microbatch: 40 tracks ×
 two clean documents with `accumulate_grad_batches: 2`. This preserves
 the original effective batch of 80 tracks/160 documents per update while using
@@ -313,8 +320,15 @@ The device count is checkpointed. Exact resume therefore uses the same
 `--devices` value as the original run.
 
 Existing valid manifests are reused byte-for-byte; incompatible manifests fail
-rather than being overwritten. Capacity W&B logging retains the established
-clean training and clean probe names and omits undefined corruption metrics.
+rather than being overwritten. They contain catalogue identities and codes,
+not cached RVQ tokens, so selecting eight codebooks does not require manifest
+regeneration. Capacity W&B logging retains the established clean training and
+clean probe names and omits undefined corruption metrics.
+
+Eight-codebook checkpoints use
+`online_random_crop_clean_capacity_eight_codebook_v2`. Earlier two-codebook
+capacity checkpoints remain standalone-evaluation inputs but cannot resume the
+new training profile.
 Resume with:
 
 ```bash

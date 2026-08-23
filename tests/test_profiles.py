@@ -188,6 +188,16 @@ def test_capacity_profiles_resolve_560_exposures(size, steps):
         tracks_per_optimizer_step=80,
     )
     assert profile["schedule"]["protocol"] == CAPACITY_TRAINING_PROTOCOL
+    assert profile["version"] == 3
+    assert profile["query"] == {
+        "segment_duration_seconds": 2.0,
+        "selected_codebooks": 8,
+        "audio_targets": 400,
+        "document_tokens": 408,
+        "vocabulary_size": 8_205,
+        "id_digit_weight": 32.0,
+        "max_position_embeddings": 512,
+    }
     assert profile["schedule"]["max_steps"] == steps
     assert profile["training_tracks_manifest"] == (
         f"data/training_tracks_{size // 1000}k.json"
@@ -227,6 +237,9 @@ def test_capacity_decoder_profiles_and_defaults():
     }
     default = resolve_capacity_config(base)
     assert default["resolved_training_profile"]["decoder"]["name"] == "small"
+    assert default["tokenizer"]["selected_codebooks"] == 8
+    assert default["data"]["segment_duration"] == 2.0
+    assert default["train"]["id_digit_weight"] == 32.0
     tiny = resolve_capacity_config(base, decoder="tiny")
     assert tiny["model"]["num_layers"] == 6
     assert tiny["model"]["hidden_size"] == 512
@@ -317,7 +330,7 @@ def test_capacity_resume_inherits_decoder_and_rejects_mismatch(tmp_path):
         resolve_capacity_config(wrong_database, checkpoint=path)
 
 
-def test_legacy_single_gpu_capacity_profile_is_normalized_for_resume(tmp_path):
+def test_old_two_codebook_capacity_profile_is_rejected_for_resume(tmp_path):
     profile = canonical_capacity_profile(
         database_size=10_000,
         decoder="small",
@@ -325,8 +338,9 @@ def test_legacy_single_gpu_capacity_profile_is_normalized_for_resume(tmp_path):
         tracks_per_optimizer_step=80,
     )
     legacy = deepcopy(profile)
-    legacy["version"] = 1
-    legacy.pop("parallelism")
+    legacy["version"] = 2
+    legacy.pop("query")
+    legacy["schedule"]["protocol"] = "online_random_crop_clean_capacity_v1"
     path = tmp_path / "legacy-capacity.ckpt"
     torch.save({"resolved_training_profile": legacy}, path)
     base = {
@@ -335,6 +349,5 @@ def test_legacy_single_gpu_capacity_profile_is_normalized_for_resume(tmp_path):
         "train": {"target_exposures": 560, "tracks_per_microbatch": 40},
         "trainer": {"accumulate_grad_batches": 2},
     }
-    resumed = resolve_capacity_config(base, checkpoint=path)
-    assert resumed["resolved_training_profile"] == profile
-    assert resumed["trainer"]["devices"] == 1
+    with pytest.raises(ValueError, match="Two-codebook capacity checkpoints"):
+        resolve_capacity_config(base, checkpoint=path)

@@ -5,7 +5,7 @@ import torch
 
 from para_audio_id.audio_lm.dataset import collate_causal_documents
 from para_audio_id.audio_lm.generation import greedy_generate, prompt_from_audio_tokens
-from para_audio_id.audio_lm.losses import noise_consistency_losses
+from para_audio_id.audio_lm.losses import causal_audio_id_losses, noise_consistency_losses
 from para_audio_id.audio_lm.model import AudioCausalLM
 from para_audio_id.audio_lm.noise import mix_background_noise
 from para_audio_id.audio_lm.tokenizer import MuQRVQTokenizer
@@ -119,6 +119,88 @@ def test_real_muq_tc11_twenty_document_probe():
         model.eval(),
         prompt_from_audio_tokens(audio_tokens.to(tokenizer.device), tokenizer.vocabulary),
         tokenizer.vocabulary,
+    )
+    assert len(generated.code) == 5
+    assert generated.ended_with_eos
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(
+    os.environ.get("RUN_MUQ_INTEGRATION") != "1",
+    reason="set RUN_MUQ_INTEGRATION=1 to load the real MuQ checkpoint",
+)
+def test_real_muq_eight_codebook_clean_capacity_probe():
+    device = os.environ.get("MUQ_DEVICE", "cuda")
+    tokenizer = MuQRVQTokenizer(
+        "OpenMuQ/MuQ-large-msd-iter",
+        selected_codebooks=8,
+        device=device,
+    )
+    waveform = torch.sin(
+        2 * torch.pi * 220 * torch.arange(48_000) / 24_000
+    ).unsqueeze(0)
+    report = tokenizer.probe(waveform)
+    assert report["raw_shape"][1] == 8
+    assert report["serialized_tokens_per_example"] == 400
+    reference_tokens = tokenizer.tokenize(waveform)[0].cpu()
+    lightweight = MuQRVQTokenizer(
+        "OpenMuQ/MuQ-large-msd-iter",
+        revision=tokenizer.revision,
+        selected_codebooks=8,
+        device=device,
+        lightweight=True,
+    )
+    waveforms = torch.cat(
+        [waveform.roll(index * 379, dims=1) for index in range(80)]
+    ).to(lightweight.device)
+    audio_tokens = lightweight.tokenize(waveforms)
+    assert torch.equal(audio_tokens[0].cpu(), reference_tokens)
+    assert audio_tokens.shape == (80, 400)
+
+    cfg = {
+        "model": {
+            "architecture": "gpt2",
+            "num_layers": 1,
+            "hidden_size": 64,
+            "num_attention_heads": 4,
+            "max_position_embeddings": 512,
+            "resid_pdrop": 0.0,
+            "embd_pdrop": 0.0,
+            "attn_pdrop": 0.0,
+            "tie_word_embeddings": True,
+        }
+    }
+    model = AudioCausalLM(cfg, lightweight.vocabulary).to(lightweight.device)
+    examples = [
+        {
+            "audio_tokens": tokens.cpu(),
+            "code": f"{index // 2:05d}",
+            "track_id": f"capacity-{index // 2}",
+            "document_index": index,
+        }
+        for index, tokens in enumerate(audio_tokens)
+    ]
+    batch = collate_causal_documents(examples, lightweight.vocabulary, 512)
+    assert batch["input_ids"].shape == (80, 408)
+    assert int(batch["audio_target_mask"].sum()) == 32_000
+    logits = model(
+        batch["input_ids"].to(lightweight.device),
+        batch["attention_mask"].to(lightweight.device),
+    )
+    losses = causal_audio_id_losses(
+        logits,
+        batch["input_ids"].to(lightweight.device),
+        batch["audio_target_mask"].to(lightweight.device),
+        batch["id_target_mask"].to(lightweight.device),
+        batch["boundary_target_mask"].to(lightweight.device),
+        id_digit_weight=32.0,
+    )
+    losses["loss"].backward()
+    assert torch.isfinite(losses["loss"])
+    generated = greedy_generate(
+        model.eval(),
+        prompt_from_audio_tokens(reference_tokens.to(lightweight.device), lightweight.vocabulary),
+        lightweight.vocabulary,
     )
     assert len(generated.code) == 5
     assert generated.ended_with_eos

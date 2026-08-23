@@ -1171,6 +1171,7 @@ def evaluate(
         "online_random_crop_noise_consistency_v1",
         "online_random_crop_consistency_profile_v2",
         "online_random_crop_clean_capacity_v1",
+        "online_random_crop_clean_capacity_eight_codebook_v2",
     }:
         return _evaluate_tc6_monitor_manifest(
             model,

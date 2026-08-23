@@ -322,6 +322,14 @@ runs retain the two-second random-crop formulation and weighted identifier loss
 but remove corruption, consistency, and cosine-decay confounds. The LR reaches
 `3e-4` after 200 warm-up steps and stays fixed.
 
+The active capacity formulation uses all eight MuQ codebooks. Each query has
+50 frames, 400 audio targets, five digit targets, and two boundary targets,
+producing a 408-token document in an 8,205-token vocabulary. With identifier
+weight 32, the objective is
+`(400 L_audio + 160 L_digit + 2 L_boundary) / 562`; the 512-position table is
+unchanged. Cohort manifests remain reusable because they store identities and
+code mappings rather than RVQ tokens.
+
 The global optimizer batch is fixed at 80 identity selections. On one GPU this
 uses 40 identities (80 clean documents) with two-step accumulation; on two GPUs
 it uses 40 identities per rank with no accumulation; four and eight GPUs use 20
@@ -334,6 +342,11 @@ decoders. Every run receives 560 average identity exposures, resolving to
 70K/175K/350K/700K optimizer updates respectively. Validation retains only the
 existing clean canonical, shifted, and held-out probe headings so W&B results
 remain directly comparable without creating renamed plots.
+
+The immutable protocol is
+`online_random_crop_clean_capacity_eight_codebook_v2`. Earlier two-codebook
+capacity checkpoints cannot resume it, but remain evaluable from their embedded
+tokenizer, vocabulary, and model specifications.
 
 ## Interpretation
 

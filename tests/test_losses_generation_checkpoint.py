@@ -449,6 +449,46 @@ def test_tc8_two_second_family_weights_match_reported_objective():
     ) == pytest.approx(2.5)
 
 
+def test_eight_codebook_capacity_family_weights_preserve_ratio():
+    vocabulary = AudioLMVocabulary(num_codebooks=8)
+    audio = torch.tensor(
+        [
+            codebook * 1024 + frame % 1024
+            for frame in range(50)
+            for codebook in range(8)
+        ]
+    )
+    examples = [
+        {
+            "audio_tokens": audio,
+            "code": "12345",
+            "track_id": f"capacity-track-{index}",
+            "document_index": index,
+        }
+        for index in range(2)
+    ]
+    batch = collate_causal_documents(examples, vocabulary, 512)
+    torch.manual_seed(31)
+    logits = torch.randn(2, batch["input_ids"].shape[1], vocabulary.size)
+    results = causal_audio_id_losses(
+        logits,
+        batch["input_ids"],
+        batch["audio_target_mask"],
+        batch["id_target_mask"],
+        batch["boundary_target_mask"],
+        id_digit_weight=32.0,
+    )
+    assert batch["input_ids"].shape[1] == 408
+    assert batch["audio_target_mask"].sum(dim=1).tolist() == [400, 400]
+    expected = (
+        400 * results["audio_loss"]
+        + 160 * results["id_loss"]
+        + 2 * results["boundary_eos_loss"]
+    ) / 562
+    assert torch.allclose(results["loss"], expected)
+    assert (400 / 562) / (160 / 562) == pytest.approx(2.5)
+
+
 def test_tc6_noisy_id_path_reaches_input_embeddings_and_transformer():
     vocabulary = AudioLMVocabulary()
     cfg = tiny_config()

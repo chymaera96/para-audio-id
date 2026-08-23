@@ -10,6 +10,8 @@ from para_audio_id.audio_lm.profiles import resolve_training_config
 from para_audio_id.audio_lm.profiles import resolve_capacity_config
 from para_audio_id.audio_lm.training import (
     AudioLMDataModule,
+    validate_capacity_batch_configuration,
+    validate_capacity_query_configuration,
     validate_tc9_query_configuration,
     validate_tc9_batch_configuration,
 )
@@ -124,15 +126,30 @@ def test_capacity_distributed_batch_preserves_global_optimizer_batch():
         frame_rate=25.0,
         waveform_normalization="none_before_muq_internal_preprocessing",
         num_available_codebooks=8,
-        selected_codebooks=2,
+        selected_codebooks=8,
         codebook_size=1024,
         serialization="time_major_codebook_interleaved",
         preprocessing_version=1,
     )
-    query_spec = validate_tc9_query_configuration(
-        cfg, tokenizer_spec, AudioLMVocabulary()
+    query_spec = validate_capacity_query_configuration(
+        cfg, tokenizer_spec, AudioLMVocabulary(num_codebooks=8)
     )
-    batch_spec = validate_tc9_batch_configuration(cfg, query_spec)
+    batch_spec = validate_capacity_batch_configuration(cfg, query_spec)
+    assert query_spec == {
+        "segment_duration_seconds": 2.0,
+        "sample_rate": 24_000,
+        "waveform_samples": 48_000,
+        "frame_rate": 25.0,
+        "selected_codebooks": 8,
+        "frames": 50,
+        "audio_targets": 400,
+        "digit_targets": 5,
+        "boundary_targets": 2,
+        "document_tokens": 408,
+        "id_digit_weight": 32.0,
+        "max_position_embeddings": 512,
+        "vocabulary_size": 8_205,
+    }
     assert batch_spec["tracks_per_microbatch"] == 40
     assert batch_spec["gradient_accumulation_steps"] == 1
     assert batch_spec["world_size"] == 2
@@ -143,20 +160,20 @@ def test_capacity_distributed_batch_preserves_global_optimizer_batch():
     wrong_batch = deepcopy(cfg)
     wrong_batch["train"]["tracks_per_microbatch"] = 4
     with pytest.raises(ValueError, match="40 tracks per microbatch"):
-        validate_tc9_batch_configuration(wrong_batch, query_spec)
+        validate_capacity_batch_configuration(wrong_batch, query_spec)
 
     wrong_duration = deepcopy(cfg)
     wrong_duration["data"]["segment_duration"] = 5.0
     with pytest.raises(ValueError, match="segment_duration=2.0"):
-        validate_tc9_query_configuration(
-            wrong_duration, tokenizer_spec, AudioLMVocabulary()
+        validate_capacity_query_configuration(
+            wrong_duration, tokenizer_spec, AudioLMVocabulary(num_codebooks=8)
         )
 
     wrong_weight = deepcopy(cfg)
     wrong_weight["train"]["id_digit_weight"] = 20.0
-    with pytest.raises(ValueError, match="id_digit_weight=8"):
-        validate_tc9_query_configuration(
-            wrong_weight, tokenizer_spec, AudioLMVocabulary()
+    with pytest.raises(ValueError, match="id_digit_weight=32"):
+        validate_capacity_query_configuration(
+            wrong_weight, tokenizer_spec, AudioLMVocabulary(num_codebooks=8)
         )
 
 
@@ -167,19 +184,19 @@ def test_capacity_batch_is_fixed_at_40_tracks_with_two_accumulation_steps():
         )
     )
     query_spec = {
-        "audio_targets": 100,
-        "document_tokens": 108,
+        "audio_targets": 400,
+        "document_tokens": 408,
         "segment_duration_seconds": 2.0,
     }
-    batch = validate_tc9_batch_configuration(cfg, query_spec)
+    batch = validate_capacity_batch_configuration(cfg, query_spec)
     assert batch["tracks_per_microbatch"] == 40
     assert batch["documents_per_microbatch"] == 80
-    assert batch["audio_targets_per_microbatch"] == 8_000
-    assert batch["causal_tokens_per_microbatch"] == 8_640
+    assert batch["audio_targets_per_microbatch"] == 32_000
+    assert batch["causal_tokens_per_microbatch"] == 32_640
     assert batch["gradient_accumulation_steps"] == 2
     assert batch["tracks_per_optimizer_step"] == 80
     assert batch["documents_per_optimizer_step"] == 160
-    assert batch["audio_targets_per_optimizer_step"] == 16_000
+    assert batch["audio_targets_per_optimizer_step"] == 64_000
 
 
 def test_random_code_mapping_is_complete_unique_and_seeded():
@@ -279,12 +296,14 @@ def test_capacity_datamodule_never_constructs_degradation_assets(tmp_path, monke
         frame_rate=25.0,
         waveform_normalization="none_before_muq_internal_preprocessing",
         num_available_codebooks=8,
-        selected_codebooks=2,
+        selected_codebooks=8,
         codebook_size=1024,
         serialization="time_major_codebook_interleaved",
         preprocessing_version=1,
     )
-    datamodule = AudioLMDataModule(cfg, spec, AudioLMVocabulary())
+    datamodule = AudioLMDataModule(
+        cfg, spec, AudioLMVocabulary(num_codebooks=8)
+    )
     datamodule.setup("fit")
     assert datamodule.noise_assets is None
     assert datamodule.rir_assets is None

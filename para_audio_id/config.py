@@ -54,5 +54,6 @@ def with_overrides(
         selected_codebooks=selected_codebooks,
         distillation_weight=distillation_weight,
         database_size=database_size,
+        devices=devices,
         checkpoint=checkpoint,
     )

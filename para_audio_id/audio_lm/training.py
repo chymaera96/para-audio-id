@@ -4,6 +4,7 @@ from functools import partial
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import random
 import time
@@ -276,6 +277,13 @@ def validate_tc18_batch_configuration(cfg: dict, query_spec: dict) -> dict:
     tracks = int(cfg["train"]["tracks_per_microbatch"])
     segments = int(cfg["train"]["segments_per_track"])
     accumulation = int(cfg["trainer"]["accumulate_grad_batches"])
+    parallelism = cfg["resolved_training_profile"].get("parallelism") or {
+        "world_size": 1,
+        "tracks_per_device_microbatch": 40,
+        "accumulate_grad_batches": 2,
+        "global_tracks_per_optimizer_step": 80,
+    }
+    world_size = int(parallelism["world_size"])
     if tracks != TC18_TRACKS_PER_MICROBATCH:
         raise ValueError(
             f"tc18 requires {TC18_TRACKS_PER_MICROBATCH} tracks per microbatch, "
@@ -286,10 +294,11 @@ def validate_tc18_batch_configuration(cfg: dict, query_spec: dict) -> dict:
             f"tc18 requires {TC18_SEGMENTS_PER_TRACK} documents per track, "
             f"got {segments}"
         )
-    if accumulation != TC18_ACCUMULATE_GRAD_BATCHES:
+    expected_accumulation = int(parallelism["accumulate_grad_batches"])
+    if accumulation != expected_accumulation:
         raise ValueError(
             f"tc18 requires accumulate_grad_batches="
-            f"{TC18_ACCUMULATE_GRAD_BATCHES}, got {accumulation}"
+            f"{expected_accumulation}, got {accumulation}"
         )
     documents = tracks * segments
     audio_targets = documents * int(query_spec["audio_targets"])
@@ -308,10 +317,14 @@ def validate_tc18_batch_configuration(cfg: dict, query_spec: dict) -> dict:
         "causal_tokens_per_microbatch": causal_tokens,
         "waveform_seconds_per_microbatch": waveform_seconds,
         "gradient_accumulation_steps": accumulation,
-        "tracks_per_optimizer_step": tracks * accumulation,
-        "documents_per_optimizer_step": documents * accumulation,
-        "audio_targets_per_optimizer_step": audio_targets * accumulation,
-        "waveform_seconds_per_optimizer_step": waveform_seconds * accumulation,
+        "tracks_per_optimizer_step": tracks * accumulation * world_size,
+        "documents_per_optimizer_step": documents * accumulation * world_size,
+        "audio_targets_per_optimizer_step": (
+            audio_targets * accumulation * world_size
+        ),
+        "waveform_seconds_per_optimizer_step": (
+            waveform_seconds * accumulation * world_size
+        ),
     }
 
 
@@ -796,6 +809,8 @@ class AudioLMDataModule(pl.LightningDataModule):
             ),
             seed=int(self.cfg["train"]["seed"]),
             catalogue_pass=int(self.trainer.current_epoch),
+            world_size=int(self.trainer.world_size),
+            rank=int(self.trainer.global_rank),
         )
         self.batch_sampler = sampler
         self.train_loader = ResumableDataLoader(
@@ -1442,10 +1457,6 @@ class AudioLMModule(pl.LightningModule):
         self.trainer.datamodule.set_catalogue_pass(int(self.current_epoch))
 
     def on_fit_start(self) -> None:
-        if int(self.trainer.world_size) != 1:
-            raise ValueError(
-                f"{TRAINING_PROTOCOL} currently requires one GPU"
-            )
         self.started_at = time.perf_counter()
         self.session_tokens_start = self.tokens_consumed
         tokenizer_cfg = self.cfg["tokenizer"]
@@ -2431,6 +2442,27 @@ def build_logger(cfg: dict, directory: Path):
     )
 
 
+def _environment_global_rank() -> int:
+    if "RANK" in os.environ:
+        return int(os.environ["RANK"])
+    if "SLURM_PROCID" in os.environ:
+        return int(os.environ["SLURM_PROCID"])
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    local_world_size = int(os.environ.get("LOCAL_WORLD_SIZE", "1"))
+    node_rank = int(os.environ.get("NODE_RANK", "0"))
+    return node_rank * local_world_size + local_rank
+
+
+def _tokenizer_startup_device(cfg: dict) -> str:
+    configured = str(cfg["tokenizer"].get("device", "cuda"))
+    if not configured.startswith("cuda") or int(cfg["trainer"]["devices"]) == 1:
+        return configured
+    local_rank = int(
+        os.environ.get("LOCAL_RANK", os.environ.get("SLURM_LOCALID", "0"))
+    )
+    return f"cuda:{local_rank}"
+
+
 def train(cfg: dict, *, checkpoint: str | Path | None = None) -> None:
     if "resolved_training_profile" not in cfg:
         cfg = resolve_training_config(cfg, checkpoint=checkpoint)
@@ -2459,7 +2491,9 @@ def train(cfg: dict, *, checkpoint: str | Path | None = None) -> None:
         torch.backends.cudnn.benchmark = False
     directory = output_dir(cfg)
     directory.mkdir(parents=True, exist_ok=True)
-    save_config(cfg, directory / "config.yaml")
+    environment_global_zero = _environment_global_rank() == 0
+    if environment_global_zero:
+        save_config(cfg, directory / "config.yaml")
     # Validate the catalogue/cohort contract before loading the large MuQ
     # tokenizer or constructing the decoder.
     catalogue = load_catalogue(cfg["data"]["catalogue"])
@@ -2474,7 +2508,7 @@ def train(cfg: dict, *, checkpoint: str | Path | None = None) -> None:
         revision=tokenizer_cfg.get("revision", "main"),
         selected_codebooks=int(tokenizer_cfg["selected_codebooks"]),
         sample_rate=int(tokenizer_cfg["sample_rate"]),
-        device=tokenizer_cfg.get("device", "cuda"),
+        device=_tokenizer_startup_device(cfg),
         lightweight=True,
     )
     query_spec = validate_tc18_query_configuration(
@@ -2498,27 +2532,30 @@ def train(cfg: dict, *, checkpoint: str | Path | None = None) -> None:
         cfg, online_tokenizer.spec, online_tokenizer.vocabulary
     )
     datamodule.setup("fit")
-    (directory / "training_tracks.json").write_text(
-        json.dumps(datamodule.dataset.track_ids, indent=2) + "\n"
-    )
-    (directory / "monitor_recipes.json").write_text(
-        json.dumps(datamodule.monitor_recipes, indent=2, sort_keys=True) + "\n"
-    )
-    (directory / "background_noise_manifest.json").write_text(
-        json.dumps(datamodule.noise_assets.manifest(), indent=2, sort_keys=True)
-        + "\n"
-    )
-    if datamodule.rir_assets is not None:
-        (directory / "room_ir_manifest.json").write_text(
-            json.dumps(datamodule.rir_assets.manifest(), indent=2, sort_keys=True)
+    if environment_global_zero:
+        (directory / "training_tracks.json").write_text(
+            json.dumps(datamodule.dataset.track_ids, indent=2) + "\n"
+        )
+        (directory / "monitor_recipes.json").write_text(
+            json.dumps(datamodule.monitor_recipes, indent=2, sort_keys=True) + "\n"
+        )
+        (directory / "background_noise_manifest.json").write_text(
+            json.dumps(datamodule.noise_assets.manifest(), indent=2, sort_keys=True)
             + "\n"
         )
-    (directory / "query_spec.json").write_text(
-        json.dumps(query_spec, indent=2, sort_keys=True) + "\n"
-    )
-    (directory / "batch_spec.json").write_text(
-        json.dumps(batch_spec, indent=2, sort_keys=True) + "\n"
-    )
+        if datamodule.rir_assets is not None:
+            (directory / "room_ir_manifest.json").write_text(
+                json.dumps(
+                    datamodule.rir_assets.manifest(), indent=2, sort_keys=True
+                )
+                + "\n"
+            )
+        (directory / "query_spec.json").write_text(
+            json.dumps(query_spec, indent=2, sort_keys=True) + "\n"
+        )
+        (directory / "batch_spec.json").write_text(
+            json.dumps(batch_spec, indent=2, sort_keys=True) + "\n"
+        )
     module = AudioLMModule(
         cfg,
         datamodule.vocabulary,
@@ -2556,6 +2593,8 @@ def train(cfg: dict, *, checkpoint: str | Path | None = None) -> None:
         tracks_per_microbatch=int(cfg["train"]["tracks_per_microbatch"]),
         accumulation_steps=accumulation,
         seed=seed,
+        world_size=int(cfg["trainer"]["devices"]),
+        rank=0,
     )
     optimizer_steps_per_pass = len(display_sampler) // accumulation
     display_max_epochs = math.ceil(

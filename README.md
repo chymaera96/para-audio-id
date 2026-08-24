@@ -138,6 +138,13 @@ The single-GPU logical batch is 80 tracks × 2 segments: a physical microbatch o
 microbatch contains 32,000 audio targets and 160 seconds of waveform; each
 optimizer update contains 64,000 audio targets and 320 seconds of waveform.
 
+With `--devices 2`, tc18 uses DDP with 40 tracks per GPU and no gradient
+accumulation. The two ranks receive disjoint identity shards and together still
+form exactly the same global 80-track/160-document optimizer batch. Losses are
+averaged across ranks, so the scientific batch, number of optimizer steps,
+curriculum, and LR schedule are unchanged. Checkpoints embed the device layout;
+resume must use the same device count.
+
 RIR uses full-wet causal convolution with two seconds of preceding audio;
 the prefix is discarded after convolution so reverberant tails from preceding
 music enter the query. Room IR train/test assets are source- and content-disjoint.
@@ -185,8 +192,12 @@ python train.py configs/fma_large.yaml \
   --wandb-online
 ```
 
+For the two-GPU version, change only `--devices 1` to `--devices 2`. The SLURM
+allocation must expose two GPUs to one launcher task; do not launch two separate
+copies of `train.py`.
+
 This branch accepts only `--decoder small`, `--schedule noise-rir`,
-`--codebooks 8`, and database sizes 25K or 100K. The resolved tc18 profile,
+`--codebooks 8`, database sizes 25K or 100K, and one or two devices. The resolved tc18 profile,
 database size, manifest, scaled boundaries, and distillation maximum are
 embedded in every checkpoint. Use `--distillation-weight 0.0` for the matched
 ablation.

@@ -40,13 +40,20 @@ def test_tc18_25k_profile_resolves_defaults_unchanged():
         selected_codebooks=8,
     )
     assert cohort_manifest(25_000) == "data/training_tracks_25k.json"
-    assert profile["version"] == 9
+    assert profile["version"] == 10
     assert profile["variant"] == "tc18-two-second-eight-codebook-logit-distillation"
     assert profile["decoder"] == {
         "name": "small",
         "num_layers": 12,
         "hidden_size": 768,
         "num_attention_heads": 12,
+    }
+    assert profile["parallelism"] == {
+        "protocol": "tc18_ddp_global_80_tracks_v1",
+        "world_size": 1,
+        "tracks_per_device_microbatch": 40,
+        "accumulate_grad_batches": 2,
+        "global_tracks_per_optimizer_step": 80,
     }
     assert profile["schedule"]["protocol"] == NEW_TRAINING_PROTOCOL
     assert profile["schedule"]["max_steps"] == 225_000
@@ -118,6 +125,27 @@ def test_tc18_100k_profile_scales_exposure_dependent_boundaries():
     assert resolved["train"]["max_steps"] == 900_000
 
 
+def test_tc18_two_gpu_profile_preserves_global_batch():
+    profile = canonical_training_profile(
+        database_size=100_000,
+        decoder="small",
+        schedule="noise-rir",
+        devices=2,
+    )
+    assert profile["parallelism"] == {
+        "protocol": "tc18_ddp_global_80_tracks_v1",
+        "world_size": 2,
+        "tracks_per_device_microbatch": 40,
+        "accumulate_grad_batches": 1,
+        "global_tracks_per_optimizer_step": 80,
+    }
+    resolved = resolve_training_config(base_config(), database_size=100_000, devices=2)
+    assert resolved["trainer"]["devices"] == 2
+    assert resolved["trainer"]["accumulate_grad_batches"] == 1
+    assert resolved["train"]["tracks_per_microbatch"] == 40
+    assert resolved["train"]["max_steps"] == 900_000
+
+
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [
@@ -126,6 +154,7 @@ def test_tc18_100k_profile_scales_exposure_dependent_boundaries():
         ({"schedule": "noise"}, "noise-rir schedule"),
         ({"selected_codebooks": 6}, "all eight MuQ codebooks"),
         ({"distillation_weight": -0.1}, "non-negative"),
+        ({"devices": 4}, "devices must be one of"),
     ],
 )
 def test_tc18_rejects_other_training_profiles(kwargs, message):
@@ -171,6 +200,8 @@ def test_tc18_resume_inherits_weight_and_rejects_overrides(tmp_path):
         resolve_training_config(
             base_config(), database_size=100_000, checkpoint=path
         )
+    with pytest.raises(ValueError, match="device count"):
+        resolve_training_config(base_config(), devices=2, checkpoint=path)
 
     for version, variant in (
         (5, "tc14-logit-distillation"),
@@ -190,6 +221,29 @@ def test_tc18_resume_inherits_weight_and_rejects_overrides(tmp_path):
         )
         with pytest.raises(ValueError, match="Only tc18"):
             resolve_training_config(base_config(), checkpoint=old)
+
+
+def test_legacy_single_gpu_tc18_checkpoint_remains_resumable(tmp_path):
+    profile = canonical_training_profile(
+        database_size=25_000,
+        decoder="small",
+        schedule="noise-rir",
+    )
+    profile["version"] = 9
+    profile.pop("parallelism")
+    path = tmp_path / "legacy-tc18.ckpt"
+    torch.save(
+        {
+            "resolved_training_profile": profile,
+            "tokenizer_spec": {"selected_codebooks": 8},
+            "query_spec": {"id_digit_weight": 32.0},
+        },
+        path,
+    )
+    resolved = resolve_training_config(base_config(), checkpoint=path)
+    assert resolved["resolved_training_profile"] == profile
+    assert resolved["trainer"]["devices"] == 1
+    assert resolved["trainer"]["accumulate_grad_batches"] == 2
 
 
 def test_tc18_noise_rir_boundaries_remain_unchanged():

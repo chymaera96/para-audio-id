@@ -325,6 +325,8 @@ class OnlineTrackBatchSampler(Sampler[list[tuple[int, int, int, int]]]):
         accumulation_steps: int,
         seed: int,
         catalogue_pass: int = 0,
+        world_size: int = 1,
+        rank: int = 0,
     ):
         if tracks_per_microbatch < 1 or accumulation_steps < 1:
             raise ValueError("Batch and accumulation sizes must be positive")
@@ -333,6 +335,12 @@ class OnlineTrackBatchSampler(Sampler[list[tuple[int, int, int, int]]]):
         self.accumulation_steps = int(accumulation_steps)
         self.seed = int(seed)
         self.catalogue_pass = int(catalogue_pass)
+        self.world_size = int(world_size)
+        self.rank = int(rank)
+        if self.world_size < 1 or not 0 <= self.rank < self.world_size:
+            raise ValueError("Invalid distributed sampler rank/world size")
+        if self.world_size > len(self.dataset):
+            raise ValueError("World size exceeds the training-track count")
         self.optimizer_step_offset = 0
 
     def set_epoch(self, catalogue_pass: int) -> None:
@@ -349,40 +357,35 @@ class OnlineTrackBatchSampler(Sampler[list[tuple[int, int, int, int]]]):
         self.optimizer_step_offset = int(global_step) - nominal_next_step
 
     def __len__(self) -> int:
-        batches = math.ceil(len(self.dataset) / self.tracks_per_microbatch)
+        largest_shard = math.ceil(len(self.dataset) / self.world_size)
+        batches = math.ceil(largest_shard / self.tracks_per_microbatch)
         return math.ceil(batches / self.accumulation_steps) * self.accumulation_steps
 
     def __iter__(self) -> Iterator[list[tuple[int, int, int, int]]]:
-        indices = np.arange(len(self.dataset), dtype=np.int64)
+        indices = np.arange(
+            self.rank, len(self.dataset), self.world_size, dtype=np.int64
+        )
         rng = np.random.default_rng(self.seed + self.catalogue_pass)
         rng.shuffle(indices)
-        missing = (-len(indices)) % self.tracks_per_microbatch
-        if missing:
-            indices = np.concatenate((indices, indices[:missing]))
-        first_batches: list[np.ndarray] = []
+        required = len(self) * self.tracks_per_microbatch
+        if required > len(indices):
+            indices = np.resize(indices, required)
         yielded = 0
         for offset in range(0, len(indices), self.tracks_per_microbatch):
             selected = indices[offset : offset + self.tracks_per_microbatch]
-            if len(first_batches) < self.accumulation_steps:
-                first_batches.append(selected.copy())
             optimizer_step = (
                 self.catalogue_pass * len(self) + yielded
             ) // self.accumulation_steps + self.optimizer_step_offset
             yield [
-                (int(index), optimizer_step, yielded, slot)
+                (
+                    int(index),
+                    optimizer_step,
+                    yielded,
+                    self.rank * self.tracks_per_microbatch + slot,
+                )
                 for slot, index in enumerate(selected)
             ]
             yielded += 1
-        for padding_index in range(len(self) - yielded):
-            batch_idx = yielded + padding_index
-            selected = first_batches[padding_index % len(first_batches)]
-            optimizer_step = (
-                self.catalogue_pass * len(self) + batch_idx
-            ) // self.accumulation_steps + self.optimizer_step_offset
-            yield [
-                (int(index), optimizer_step, batch_idx, slot)
-                for slot, index in enumerate(selected)
-            ]
 
 
 class RandomCropCollator:

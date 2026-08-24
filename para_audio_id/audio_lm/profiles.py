@@ -12,6 +12,9 @@ import torch
 
 SUPPORTED_DATABASE_SIZES = (25_000, 100_000)
 REFERENCE_DATABASE_SIZE = 25_000
+SUPPORTED_DEVICE_COUNTS = (1, 2)
+GLOBAL_TRACKS_PER_OPTIMIZER_STEP = 80
+TRACKS_PER_DEVICE_MICROBATCH = 40
 DECODER_PROFILES = {
     "small": {"num_layers": 12, "hidden_size": 768, "num_attention_heads": 12},
 }
@@ -121,6 +124,7 @@ def canonical_training_profile(
     schedule: str,
     selected_codebooks: int = 8,
     distillation_weight: float = DEFAULT_DISTILLATION_WEIGHT,
+    devices: int = 1,
 ) -> dict[str, Any]:
     if database_size not in SUPPORTED_DATABASE_SIZES:
         raise ValueError(
@@ -136,12 +140,28 @@ def canonical_training_profile(
         raise ValueError("tc18 requires all eight MuQ codebooks")
     if not math.isfinite(distillation_weight) or distillation_weight < 0:
         raise ValueError("distillation_weight must be finite and non-negative")
+    if devices not in SUPPORTED_DEVICE_COUNTS:
+        raise ValueError(
+            f"tc18 devices must be one of {SUPPORTED_DEVICE_COUNTS}, got {devices}"
+        )
+    accumulation = GLOBAL_TRACKS_PER_OPTIMIZER_STEP // (
+        TRACKS_PER_DEVICE_MICROBATCH * devices
+    )
     profile = {
-        "version": 9,
+        "version": 10,
         "variant": "tc18-two-second-eight-codebook-logit-distillation",
         "database_size": database_size,
         "training_tracks_manifest": cohort_manifest(database_size),
         "decoder": decoder_profile(decoder),
+        "parallelism": {
+            "protocol": "tc18_ddp_global_80_tracks_v1",
+            "world_size": devices,
+            "tracks_per_device_microbatch": TRACKS_PER_DEVICE_MICROBATCH,
+            "accumulate_grad_batches": accumulation,
+            "global_tracks_per_optimizer_step": (
+                TRACKS_PER_DEVICE_MICROBATCH * accumulation * devices
+            ),
+        },
         "schedule": schedule_profile(schedule, database_size),
         "distillation": {
             "protocol": LOSS_PROTOCOL,
@@ -229,6 +249,7 @@ def resolve_training_config(
     selected_codebooks: int | None = None,
     distillation_weight: float | None = None,
     database_size: int | None = None,
+    devices: int | None = None,
     checkpoint: str | Path | None = None,
 ) -> dict[str, Any]:
     if distillation_weight is not None and (
@@ -262,10 +283,28 @@ def resolve_training_config(
                 "Explicit database size does not match resume checkpoint"
             )
         resolved_database_size = checkpoint_database_size
+        saved_parallelism = resumed.get("parallelism") or {
+            "protocol": "tc18_ddp_global_80_tracks_v1",
+            "world_size": 1,
+            "tracks_per_device_microbatch": 40,
+            "accumulate_grad_batches": 2,
+            "global_tracks_per_optimizer_step": 80,
+        }
+        saved_devices = int(saved_parallelism["world_size"])
+        if devices is not None and int(devices) != saved_devices:
+            raise ValueError(
+                "Explicit device count does not match resume checkpoint"
+            )
+        resolved_devices = saved_devices
         resolved_decoder = resumed["decoder"]["name"] if decoder is None else decoder
         resolved_schedule = resumed["schedule"]["name"] if schedule is None else schedule
     else:
         resolved_database_size = configured_database_size
+        resolved_devices = int(
+            devices
+            if devices is not None
+            else cfg.setdefault("trainer", {}).get("devices", 1)
+        )
         resolved_decoder = decoder or "small"
         resolved_schedule = schedule or "noise-rir"
     if resumed is not None:
@@ -307,6 +346,7 @@ def resolve_training_config(
                     .get("maximum_weight", DEFAULT_DISTILLATION_WEIGHT)
                 )
             ),
+            devices=resolved_devices,
         )
 
     tokenizer = cfg.setdefault("tokenizer", {})
@@ -359,6 +399,16 @@ def resolve_training_config(
         key: value for key, value in profile["schedule"].items() if key != "max_steps"
     }
     train["distillation"] = deepcopy(profile["distillation"])
+    parallelism = profile.get("parallelism") or saved_parallelism
+    train["tracks_per_microbatch"] = int(
+        parallelism["tracks_per_device_microbatch"]
+    )
+    trainer = cfg.setdefault("trainer", {})
+    trainer["devices"] = int(parallelism["world_size"])
+    trainer["strategy"] = "auto"
+    trainer["accumulate_grad_batches"] = int(
+        parallelism["accumulate_grad_batches"]
+    )
     lr_profile = profile.get("learning_rate_schedule")
     if lr_profile is not None:
         train["warmup_steps"] = int(lr_profile["warmup_steps"])

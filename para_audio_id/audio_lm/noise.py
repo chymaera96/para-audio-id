@@ -547,15 +547,34 @@ class BackgroundNoiseAssets:
     def load_validation(
         self, key: object, *, samples: int | None = None
     ) -> np.ndarray:
-        return self._load(
+        audio, _, _ = self.load_validation_recipe(key, samples=samples)
+        return audio
+
+    def load_validation_recipe(
+        self, key: object, *, samples: int | None = None
+    ) -> tuple[np.ndarray, str, int]:
+        """Load deterministic held-out noise and expose its reusable recipe."""
+        return self._load_with_recipe(
             self.validation_files,
             stable_uint64("validation-noise", key),
             samples=samples,
+            root=self.validation_root,
         )
 
     def _load(
         self, files: list[Path], seed: int, *, samples: int | None = None
     ) -> np.ndarray:
+        audio, _, _ = self._load_with_recipe(files, seed, samples=samples)
+        return audio
+
+    def _load_with_recipe(
+        self,
+        files: list[Path],
+        seed: int,
+        *,
+        samples: int | None = None,
+        root: Path | None = None,
+    ) -> tuple[np.ndarray, str, int]:
         target_samples = self.samples if samples is None else int(samples)
         if target_samples < 1:
             raise ValueError("Requested background-noise length must be positive")
@@ -576,6 +595,7 @@ class BackgroundNoiseAssets:
                         duration=target_samples / self.sample_rate,
                         pad=False,
                     )
+                    recipe_offset = int(offset_samples)
                 else:
                     audio = load_audio(
                         path,
@@ -586,12 +606,22 @@ class BackgroundNoiseAssets:
                         audio = np.tile(
                             audio, math.ceil(target_samples / len(audio))
                         )[:target_samples]
+                    recipe_offset = 0
                 if (
                     len(audio) == target_samples
                     and np.isfinite(audio).all()
                     and float(np.sqrt(np.mean(np.square(audio)))) > 1e-8
                 ):
-                    return np.asarray(audio, dtype=np.float32)
+                    recipe_path = (
+                        path.relative_to(root).as_posix()
+                        if root is not None
+                        else path.as_posix()
+                    )
+                    return (
+                        np.asarray(audio, dtype=np.float32),
+                        recipe_path,
+                        recipe_offset,
+                    )
             except Exception:
                 continue
         raise RuntimeError("No readable non-silent background-noise files remain")

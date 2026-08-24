@@ -121,6 +121,12 @@ def test_noise_assets_loop_short_files_and_are_source_disjoint(tmp_path):
     assert np.array_equal(first, repeated)
     assert assets.training_fingerprint != assets.validation_fingerprint
     assert stable_uniform("same") == stable_uniform("same")
+    heldout, path, offset = assets.load_validation_recipe("heldout")
+    heldout_again, path_again, offset_again = assets.load_validation_recipe(
+        "heldout"
+    )
+    assert np.array_equal(heldout, heldout_again)
+    assert (path, offset) == (path_again, offset_again) == ("heldout.wav", 0)
 
 
 def test_noise_assets_reject_overlapping_source_names(tmp_path):

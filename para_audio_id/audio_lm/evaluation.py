@@ -526,7 +526,21 @@ def _evaluate_cached_positions(
     return metrics
 
 
-JOINT_BEAM_PROTOCOL = "paper_joint_beam_inference_v1"
+JOINT_BEAM_PROTOCOL = "paper_joint_beam_noise_rir_inference_v2"
+JOINT_QUERY_LENGTHS = (2.0, 5.0, 10.0)
+JOINT_SNRS_DB = (0.0, 5.0, 10.0, 20.0)
+
+
+def joint_degradation_suites() -> tuple[dict, ...]:
+    return tuple(
+        {
+            "suite_id": f"{'noise_rir' if rir else 'noise'}_{snr:g}db",
+            "rir": rir,
+            "snr_db": snr,
+        }
+        for rir in (False, True)
+        for snr in JOINT_SNRS_DB
+    )
 
 
 def joint_window_starts(
@@ -615,18 +629,51 @@ def _load_query_context(
     return np.asarray(decoded, dtype=np.float32)
 
 
+def _prepare_joint_suite_waveform(
+    context: np.ndarray,
+    noise: np.ndarray,
+    ir: np.ndarray,
+    *,
+    rir: bool,
+    snr_db: float,
+    past_samples: int,
+    output_samples: int,
+) -> np.ndarray:
+    expected = past_samples + output_samples
+    if context.shape != (expected,) or noise.shape != (expected,):
+        raise ValueError("Joint evaluation context and noise have invalid lengths")
+    signal = context if rir else context[-output_samples:]
+    signal_noise = noise if rir else noise[-output_samples:]
+    mixed, valid = mix_background_noise(
+        torch.from_numpy(signal).unsqueeze(0),
+        torch.from_numpy(signal_noise).unsqueeze(0),
+        torch.tensor([snr_db], dtype=torch.float32),
+    )
+    if not bool(valid[0]):
+        raise ValueError("Validation noise mixture is invalid")
+    waveform = mixed[0].numpy()
+    if rir:
+        waveform = convolve_full_wet(
+            waveform,
+            ir,
+            past_context_samples=past_samples,
+            output_samples=output_samples,
+        )
+    _valid_waveform(waveform, output_samples)
+    return waveform
+
+
 def _joint_manifest_configuration(
     *,
     checkpoint_fingerprint: str,
     checkpoint: dict,
-    rir_manifest: dict | None,
+    noise_manifest: dict,
+    rir_manifest: dict,
     cohort: str,
     expected_tracks: int | None,
     sample_tracks: int,
     sample_seed: int,
     recipe_seed: int,
-    query_lengths: tuple[float, ...],
-    conditions: tuple[str, ...],
     beam_width: int,
     sample_rate: int,
     window_seconds: float,
@@ -641,15 +688,20 @@ def _joint_manifest_configuration(
             "training_corpus_fingerprint"
         ),
         "room_ir_validation_fingerprint": (
-            rir_manifest["validation_fingerprint"] if rir_manifest else None
+            rir_manifest["validation_fingerprint"]
         ),
+        "background_noise_validation_fingerprint": noise_manifest[
+            "validation_fingerprint"
+        ],
         "cohort": cohort,
         "expected_tracks": expected_tracks,
         "sample_tracks": sample_tracks,
         "sample_seed": sample_seed,
         "recipe_seed": recipe_seed,
-        "query_lengths": list(query_lengths),
-        "conditions": list(conditions),
+        "query_lengths": list(JOINT_QUERY_LENGTHS),
+        "snrs_db": list(JOINT_SNRS_DB),
+        "suites": list(joint_degradation_suites()),
+        "degradation_order": "background_noise_then_full_wet_room_ir",
         "beam_width": beam_width,
         "sample_rate": sample_rate,
         "window_seconds": window_seconds,
@@ -664,7 +716,8 @@ def _load_or_create_joint_manifest(
     configuration: dict,
     checkpoint: dict,
     cfg: dict,
-    rir_assets: RoomImpulseResponseAssets | None,
+    noise_assets: BackgroundNoiseAssets,
+    rir_assets: RoomImpulseResponseAssets,
 ) -> dict:
     if path.exists():
         manifest = json.loads(path.read_text())
@@ -718,15 +771,23 @@ def _load_or_create_joint_manifest(
                 pad=False,
             )
             _valid_waveform(waveform, maximum_samples)
-            rir_path = None
-            if "rir" in configuration["conditions"]:
-                if rir_assets is None:
-                    raise RuntimeError("RIR evaluation requested without RIR assets")
-                _, rir_path = rir_assets.load_validation(
+            context_samples = round(
+                (maximum_seconds + configuration["past_context_seconds"])
+                * sample_rate
+            )
+            _, noise_path, noise_offset_samples = (
+                noise_assets.load_validation_recipe(
                     stable_uint64(
-                        configuration["recipe_seed"], track_id, "paper-room-ir"
-                    )
+                        configuration["recipe_seed"], track_id, "paper-noise"
+                    ),
+                    samples=context_samples,
                 )
+            )
+            _, rir_path = rir_assets.load_validation(
+                stable_uint64(
+                    configuration["recipe_seed"], track_id, "paper-room-ir"
+                )
+            )
             recipes.append(
                 {
                     "track_id": record.track_id,
@@ -735,6 +796,8 @@ def _load_or_create_joint_manifest(
                     "source_duration": float(record.duration),
                     "start_sample": start_sample,
                     "start_seconds": start_sample / sample_rate,
+                    "noise_path": noise_path,
+                    "noise_offset_samples": noise_offset_samples,
                     "rir_path": rir_path,
                 }
             )
@@ -777,7 +840,7 @@ def _load_joint_rows(path: Path, *, fingerprint: str) -> dict[tuple[str, str, st
             key = (
                 str(row["track_id"]),
                 f"{float(row['query_seconds']):g}",
-                str(row["condition"]),
+                str(row["suite_id"]),
             )
             if key in rows:
                 raise ValueError(f"Duplicate joint-evaluation result for {key}")
@@ -815,7 +878,9 @@ def _write_joint_csv(path: Path, rows: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
     columns = (
-        "condition",
+        "suite_id",
+        "rir",
+        "snr_db",
         "query_seconds",
         "selected_queries",
         "evaluated_queries",
@@ -847,8 +912,6 @@ def _evaluate_joint_beam(
     sample_tracks: int,
     sample_seed: int,
     recipe_seed: int,
-    query_lengths: tuple[float, ...],
-    conditions: tuple[str, ...],
     device: str,
     beam_width: int,
     rir_training_root: str | Path | None,
@@ -861,55 +924,56 @@ def _evaluate_joint_beam(
         raise ValueError("Paper-facing joint-beam evaluation uses the training cohort")
     if sample_tracks < 1:
         raise ValueError("sample_tracks must be positive")
-    if not query_lengths or any(length <= 0 for length in query_lengths):
-        raise ValueError("query_lengths must contain positive durations")
-    if len(set(query_lengths)) != len(query_lengths):
-        raise ValueError("query_lengths must not contain duplicates")
-    if not conditions or set(conditions) - {"clean", "rir"}:
-        raise ValueError("Joint-beam conditions must be clean and/or rir")
-    if len(set(conditions)) != len(conditions):
-        raise ValueError("conditions must not contain duplicates")
 
     tokenizer = _checkpoint_tokenizer(checkpoint, device)
     window_seconds = float(cfg["data"]["segment_duration"])
     if not math.isclose(window_seconds, 2.0):
         raise ValueError("Paper-facing joint-beam evaluation requires 2-second windows")
-    if any(length < window_seconds for length in query_lengths):
+    if any(length < window_seconds for length in JOINT_QUERY_LENGTHS):
         raise ValueError("Every query length must be at least two seconds")
+    noise_cfg = cfg["data"]["background_noise"]
     rir_cfg = cfg["data"].get("room_ir", {})
     past_seconds = float(rir_cfg.get("past_context_duration", 2.0))
-    rir_assets = None
-    rir_manifest = None
-    if "rir" in conditions:
-        training_root = rir_training_root or rir_cfg.get(
-            "training_root",
-            "/gpfs/scratch/acw723/audio-degradation-data/degradation_24k/room_ir/train",
-        )
-        validation_root = rir_validation_root or rir_cfg.get(
-            "validation_root",
-            "/gpfs/scratch/acw723/audio-degradation-data/degradation_24k/room_ir/test",
-        )
-        rir_assets = RoomImpulseResponseAssets(
-            training_root, validation_root, sample_rate=tokenizer.sample_rate
-        )
-        rir_manifest = rir_assets.manifest()
-        saved_manifest = checkpoint.get("room_ir_manifest")
-        if saved_manifest is not None and saved_manifest != rir_manifest:
-            raise ValueError("Validation room-IR assets do not match the checkpoint")
+    maximum_seconds = max(JOINT_QUERY_LENGTHS)
+    context_samples = round((past_seconds + maximum_seconds) * tokenizer.sample_rate)
+    noise_assets = BackgroundNoiseAssets(
+        noise_cfg["training_root"],
+        noise_cfg["validation_root"],
+        sample_rate=tokenizer.sample_rate,
+        samples=context_samples,
+    )
+    noise_manifest = noise_assets.manifest()
+    saved_noise_manifest = checkpoint.get("background_noise_manifest")
+    if saved_noise_manifest is not None and saved_noise_manifest != noise_manifest:
+        raise ValueError("Validation background-noise assets do not match the checkpoint")
+    training_root = rir_training_root or rir_cfg.get(
+        "training_root",
+        "/gpfs/scratch/acw723/audio-degradation-data/degradation_24k/room_ir/train",
+    )
+    validation_root = rir_validation_root or rir_cfg.get(
+        "validation_root",
+        "/gpfs/scratch/acw723/audio-degradation-data/degradation_24k/room_ir/test",
+    )
+    rir_assets = RoomImpulseResponseAssets(
+        training_root, validation_root, sample_rate=tokenizer.sample_rate
+    )
+    rir_manifest = rir_assets.manifest()
+    saved_rir_manifest = checkpoint.get("room_ir_manifest")
+    if saved_rir_manifest is not None and saved_rir_manifest != rir_manifest:
+        raise ValueError("Validation room-IR assets do not match the checkpoint")
 
     summary_path, csv_path, query_path, manifest_path = _joint_output_paths(output)
     checkpoint_fingerprint = _checkpoint_file_fingerprint(checkpoint_path)
     configuration = _joint_manifest_configuration(
         checkpoint_fingerprint=checkpoint_fingerprint,
         checkpoint=checkpoint,
+        noise_manifest=noise_manifest,
         rir_manifest=rir_manifest,
         cohort=cohort,
         expected_tracks=expected_tracks,
         sample_tracks=sample_tracks,
         sample_seed=sample_seed,
         recipe_seed=recipe_seed,
-        query_lengths=query_lengths,
-        conditions=conditions,
         beam_width=beam_width,
         sample_rate=tokenizer.sample_rate,
         window_seconds=window_seconds,
@@ -920,10 +984,12 @@ def _evaluate_joint_beam(
         configuration=configuration,
         checkpoint=checkpoint,
         cfg=cfg,
+        noise_assets=noise_assets,
         rir_assets=rir_assets,
     )
     completed = _load_joint_rows(query_path, fingerprint=manifest["fingerprint"])
-    total = len(manifest["queries"]) * len(query_lengths) * len(conditions)
+    suites = joint_degradation_suites()
+    total = len(manifest["queries"]) * len(JOINT_QUERY_LENGTHS) * len(suites)
     progress = tqdm(total=total, initial=len(completed), desc="joint-beam evaluation")
     query_path.parent.mkdir(parents=True, exist_ok=True)
     audio_root = Path(cfg["data"]["audio_root"])
@@ -932,96 +998,146 @@ def _evaluate_joint_beam(
     hop_samples = window_samples // 2
     past_samples = round(past_seconds * sample_rate)
     configured_batch = int(cfg["evaluation"]["generation_batch_size"])
+    maximum_query_samples = round(maximum_seconds * sample_rate)
+    maximum_starts = joint_window_starts(
+        maximum_query_samples, window_samples, hop_samples
+    )
+    query_batch_size = max(1, configured_batch // len(maximum_starts))
 
     with query_path.open("a", encoding="utf-8") as output_handle:
-        for query_seconds in query_lengths:
-            query_samples = round(query_seconds * sample_rate)
-            starts = joint_window_starts(query_samples, window_samples, hop_samples)
-            query_batch_size = max(1, configured_batch // len(starts))
-            for condition in conditions:
-                pending = [
-                    recipe
-                    for recipe in manifest["queries"]
-                    if (
-                        recipe["track_id"],
-                        f"{query_seconds:g}",
-                        condition,
-                    )
+        for suite in suites:
+            suite_id = str(suite["suite_id"])
+            pending = [
+                recipe
+                for recipe in manifest["queries"]
+                if any(
+                    (recipe["track_id"], f"{seconds:g}", suite_id)
                     not in completed
-                ]
-                for batch_start in range(0, len(pending), query_batch_size):
-                    batch_recipes = pending[batch_start : batch_start + query_batch_size]
-                    batch_started = time.perf_counter()
-                    prepared = []
-                    for recipe in batch_recipes:
-                        try:
-                            if condition == "clean":
-                                waveform = load_audio(
-                                    audio_root / recipe["source_path"],
-                                    sample_rate=sample_rate,
-                                    start=recipe["start_sample"] / sample_rate,
-                                    duration=query_seconds,
-                                    pad=False,
-                                )
-                                _valid_waveform(waveform, query_samples)
-                            else:
-                                context = _load_query_context(
-                                    audio_root / recipe["source_path"],
-                                    sample_rate=sample_rate,
-                                    start_sample=int(recipe["start_sample"]),
-                                    query_samples=query_samples,
-                                    past_samples=past_samples,
-                                )
-                                if rir_assets is None:
-                                    raise RuntimeError("RIR assets are unavailable")
-                                ir, rir_path = rir_assets.load_validation(
-                                    stable_uint64(
-                                        recipe_seed,
-                                        recipe["track_id"],
-                                        "paper-room-ir",
-                                    )
-                                )
-                                if rir_path != recipe["rir_path"]:
-                                    raise ValueError("Validation IR recipe changed")
-                                waveform = convolve_full_wet(
-                                    context,
-                                    ir,
-                                    past_context_samples=past_samples,
-                                    output_samples=query_samples,
-                                )
-                            windows = np.stack(
-                                [
-                                    waveform[start : start + window_samples]
-                                    for start in starts
-                                ]
+                    for seconds in JOINT_QUERY_LENGTHS
+                )
+            ]
+            for batch_start in range(0, len(pending), query_batch_size):
+                batch_recipes = pending[batch_start : batch_start + query_batch_size]
+                prepared = []
+                failed = []
+                for recipe in batch_recipes:
+                    preparation_started = time.perf_counter()
+                    try:
+                        context = _load_query_context(
+                            audio_root / recipe["source_path"],
+                            sample_rate=sample_rate,
+                            start_sample=int(recipe["start_sample"]),
+                            query_samples=maximum_query_samples,
+                            past_samples=past_samples,
+                        )
+                        noise, noise_path, noise_offset = (
+                            noise_assets.load_validation_recipe(
+                                stable_uint64(
+                                    recipe_seed,
+                                    recipe["track_id"],
+                                    "paper-noise",
+                                ),
+                                samples=context_samples,
                             )
-                            prepared.append((recipe, windows))
-                        except Exception as exc:
-                            row = {
-                                "protocol_fingerprint": manifest["fingerprint"],
-                                "status": "error",
-                                "track_id": recipe["track_id"],
-                                "code": recipe["code"],
-                                "query_seconds": query_seconds,
-                                "condition": condition,
-                                "start_sample": recipe["start_sample"],
-                                "rir_path": recipe["rir_path"] if condition == "rir" else None,
-                                "window_starts": starts,
-                                "latency_seconds": time.perf_counter() - batch_started,
-                                "error": f"{type(exc).__name__}: {exc}",
-                            }
-                            output_handle.write(json.dumps(row, sort_keys=True) + "\n")
-                            output_handle.flush()
-                            completed[(recipe["track_id"], f"{query_seconds:g}", condition)] = row
-                            progress.update()
-                    if not prepared:
+                        )
+                        if (
+                            noise_path != recipe["noise_path"]
+                            or noise_offset != recipe["noise_offset_samples"]
+                        ):
+                            raise ValueError("Validation noise recipe changed")
+                        ir = np.empty(0, dtype=np.float32)
+                        if bool(suite["rir"]):
+                            ir, rir_path = rir_assets.load_validation(
+                                stable_uint64(
+                                    recipe_seed,
+                                    recipe["track_id"],
+                                    "paper-room-ir",
+                                )
+                            )
+                            if rir_path != recipe["rir_path"]:
+                                raise ValueError("Validation IR recipe changed")
+                        waveform = _prepare_joint_suite_waveform(
+                            context,
+                            noise,
+                            ir,
+                            rir=bool(suite["rir"]),
+                            snr_db=float(suite["snr_db"]),
+                            past_samples=past_samples,
+                            output_samples=maximum_query_samples,
+                        )
+                        prepared.append(
+                            (
+                                recipe,
+                                waveform,
+                                time.perf_counter() - preparation_started,
+                            )
+                        )
+                    except Exception as exc:
+                        failed.append(
+                            (
+                                recipe,
+                                time.perf_counter() - preparation_started,
+                                exc,
+                            )
+                        )
+
+                for query_seconds in JOINT_QUERY_LENGTHS:
+                    query_samples = round(query_seconds * sample_rate)
+                    starts = joint_window_starts(
+                        query_samples, window_samples, hop_samples
+                    )
+                    for recipe, latency, exc in failed:
+                        key = (recipe["track_id"], f"{query_seconds:g}", suite_id)
+                        if key in completed:
+                            continue
+                        row = {
+                            "protocol_fingerprint": manifest["fingerprint"],
+                            "status": "error",
+                            "track_id": recipe["track_id"],
+                            "code": recipe["code"],
+                            "query_seconds": query_seconds,
+                            **suite,
+                            "start_sample": recipe["start_sample"],
+                            "noise_path": recipe["noise_path"],
+                            "noise_offset_samples": recipe["noise_offset_samples"],
+                            "rir_path": recipe["rir_path"] if suite["rir"] else None,
+                            "window_starts": starts,
+                            "latency_seconds": latency / len(JOINT_QUERY_LENGTHS),
+                            "error": f"{type(exc).__name__}: {exc}",
+                        }
+                        output_handle.write(json.dumps(row, sort_keys=True) + "\n")
+                        output_handle.flush()
+                        completed[key] = row
+                        progress.update()
+
+                    active = [
+                        item
+                        for item in prepared
+                        if (
+                            item[0]["track_id"],
+                            f"{query_seconds:g}",
+                            suite_id,
+                        )
+                        not in completed
+                    ]
+                    if not active:
                         continue
+                    inference_started = time.perf_counter()
+                    windows_by_recipe = [
+                        np.stack(
+                            [
+                                waveform[start : start + window_samples]
+                                for start in starts
+                            ]
+                        )
+                        for _, waveform, _ in active
+                    ]
                     flattened = torch.from_numpy(
-                        np.concatenate([windows for _, windows in prepared], axis=0)
+                        np.concatenate(windows_by_recipe, axis=0)
                     ).to(device)
                     audio_tokens = tokenizer.tokenize(flattened)
                     prompts = prompts_from_audio_tokens(audio_tokens, vocabulary).reshape(
-                        len(prepared), len(starts), -1
+                        len(active), len(starts), -1
                     )
                     autocast = (
                         torch.autocast(device_type="cuda", dtype=torch.bfloat16)
@@ -1034,8 +1150,12 @@ def _evaluate_joint_beam(
                         )
                     if str(device).startswith("cuda"):
                         torch.cuda.synchronize()
-                    latency = (time.perf_counter() - batch_started) / len(prepared)
-                    for (recipe, _), ranking in zip(prepared, rankings, strict=True):
+                    inference_latency = (
+                        time.perf_counter() - inference_started
+                    ) / len(active)
+                    for (recipe, _, preparation_latency), ranking in zip(
+                        active, rankings, strict=True
+                    ):
                         codes = [candidate.code for candidate in ranking]
                         correct_rank = (
                             codes.index(recipe["code"]) + 1
@@ -1048,13 +1168,17 @@ def _evaluate_joint_beam(
                             "track_id": recipe["track_id"],
                             "code": recipe["code"],
                             "query_seconds": query_seconds,
-                            "condition": condition,
+                            **suite,
                             "start_sample": recipe["start_sample"],
-                            "rir_path": recipe["rir_path"] if condition == "rir" else None,
+                            "noise_path": recipe["noise_path"],
+                            "noise_offset_samples": recipe["noise_offset_samples"],
+                            "rir_path": recipe["rir_path"] if suite["rir"] else None,
                             "window_starts": starts,
                             "window_count": len(starts),
                             "correct_rank": correct_rank,
-                            "latency_seconds": latency,
+                            "latency_seconds": preparation_latency
+                            / len(JOINT_QUERY_LENGTHS)
+                            + inference_latency,
                             "beam": [
                                 {
                                     "code": candidate.code,
@@ -1066,29 +1190,31 @@ def _evaluate_joint_beam(
                         }
                         output_handle.write(json.dumps(row, sort_keys=True) + "\n")
                         output_handle.flush()
-                        completed[(recipe["track_id"], f"{query_seconds:g}", condition)] = row
+                        key = (recipe["track_id"], f"{query_seconds:g}", suite_id)
+                        completed[key] = row
                         progress.update()
     progress.close()
 
     metric_rows = []
     metrics = {}
     all_rows = list(completed.values())
-    for condition in conditions:
-        metrics[condition] = {}
-        for query_seconds in query_lengths:
+    for suite in suites:
+        suite_id = str(suite["suite_id"])
+        metrics[suite_id] = {}
+        for query_seconds in JOINT_QUERY_LENGTHS:
             selected = [
                 row
                 for row in all_rows
-                if row["condition"] == condition
+                if row["suite_id"] == suite_id
                 and math.isclose(float(row["query_seconds"]), query_seconds)
             ]
             summary = _joint_metrics(
                 selected, selected_tracks=len(manifest["queries"])
             )
-            metrics[condition][f"{query_seconds:g}"] = summary
+            metrics[suite_id][f"{query_seconds:g}"] = summary
             metric_rows.append(
                 {
-                    "condition": condition,
+                    **suite,
                     "query_seconds": query_seconds,
                     **summary,
                 }
@@ -1121,8 +1247,6 @@ def evaluate(
     beam_width: int | None = 10,
     generation_only: bool = False,
     recipe_seed: int = 1337,
-    query_lengths: tuple[float, ...] = (2.0, 3.0, 5.0, 10.0),
-    conditions: tuple[str, ...] = ("clean", "rir"),
     rir_training_root: str | Path | None = None,
     rir_validation_root: str | Path | None = None,
 ) -> dict:
@@ -1148,8 +1272,6 @@ def evaluate(
             sample_tracks=1000 if sample_tracks is None else sample_tracks,
             sample_seed=sample_seed,
             recipe_seed=recipe_seed,
-            query_lengths=tuple(float(value) for value in query_lengths),
-            conditions=tuple(conditions),
             device=device,
             beam_width=10 if beam_width is None else beam_width,
             rir_training_root=rir_training_root,

@@ -200,33 +200,31 @@ which PyTorch cannot promise bitwise determinism instead of aborting a long run.
 ## Evaluation and inference
 
 The paper-facing evaluation samples a deterministic 1,000-track subset from the
-checkpoint's embedded training cohort. It evaluates nested 2/3/5/10-second clean and
-held-out-room-IR queries using two-second windows with 50% overlap. Identifier
+checkpoint's embedded training cohort. It evaluates nested 2/5/10-second queries
+under eight fixed suites: held-out background noise at 0/5/10/20 dB, with and
+without fully wet held-out room convolution. Noise is mixed before RIR, matching
+training. Queries use two-second windows with 50% overlap. Identifier
 log-probabilities are averaged across all windows at each shared beam prefix
 before pruning:
 
 ```bash
 python evaluate.py \
-  /gpfs/scratch/acw723/para-audio-id/audio-lm-checkpoints/tc11/last.ckpt \
-  evaluation-tc11-joint.json \
+  /gpfs/scratch/acw723/para-audio-id/audio-lm-checkpoints/tc18/last.ckpt \
+  evaluation-tc18-joint.json \
   --protocol joint-beam
 ```
 
 This derives catalogue size and decoder dimensions from the checkpoint and
-defaults to a seeded 1,000-track sample, recipe
-and sample seed `1337`, query lengths `2/3/5/10`, clean and RIR conditions,
-beam width 10, and CUDA. The corresponding flags remain available for smaller
-diagnostic evaluations.
-
-Use `--conditions clean` for tc9, tc10, or tc11 without touching RIR assets.
-`--conditions clean rir` adds held-out room convolution. Historical checkpoints
-can use `--rir-training-root` and `--rir-validation-root` overrides.
+defaults to a seeded 1,000-track sample, recipe and sample seed `1337`, fixed
+query lengths `2/5/10`, the eight fixed noise/RIR suites, beam width 10, and
+CUDA. Each track reuses one validation-noise recipe and one validation IR across
+all durations and SNRs.
 
 The command writes a JSON summary, paper-ready CSV, append-only query JSONL, and
 an immutable evaluation manifest. Matching reruns resume completed queries;
-checkpoint, tokenizer, IR-manifest, seed, or protocol mismatches fail. Metrics
+checkpoint, tokenizer, noise/IR-manifest, seed, or protocol mismatches fail. Metrics
 include beam Top-1/5/10, MRR, evaluated/failed counts, latency, and throughput
-for each duration and condition. Runtime failures count as retrieval misses in
+for each duration and suite. Runtime failures count as retrieval misses in
 the accuracy and MRR denominator rather than being silently excluded.
 
 The earlier fixed 100-track clean/noise/RIR monitor remains available through

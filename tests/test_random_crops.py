@@ -3,14 +3,19 @@ import numpy as np
 import pytest
 import random
 import soundfile as sf
+import torch
 
 from para_audio_id.catalogue import CatalogueRecord
-from para_audio_id.audio_lm.noise import BackgroundNoiseAssets
+from para_audio_id.audio_lm.noise import BackgroundNoiseAssets, mix_background_noise
 from para_audio_id.audio_lm.evaluation import (
+    JOINT_QUERY_LENGTHS,
+    JOINT_SNRS_DB,
     _joint_manifest_configuration,
     _joint_metrics,
     _load_joint_rows,
     _load_or_create_joint_manifest,
+    _prepare_joint_suite_waveform,
+    joint_degradation_suites,
 )
 from para_audio_id.audio_lm.rir import RoomImpulseResponseAssets, convolve_full_wet
 from para_audio_id.audio_lm.random_crops import (
@@ -417,6 +422,15 @@ def test_joint_manifest_is_deterministic_and_backfills_bad_candidates(tmp_path):
     rir_assets = RoomImpulseResponseAssets(
         rir_train.parents[1], rir_test.parents[1], sample_rate=sample_rate
     )
+    noise_train = tmp_path / "noise_train"
+    noise_test = tmp_path / "noise_test"
+    noise_train.mkdir()
+    noise_test.mkdir()
+    sf.write(noise_train / "train.wav", waveform[:100], sample_rate)
+    sf.write(noise_test / "test.wav", waveform[:200], sample_rate)
+    noise_assets = BackgroundNoiseAssets(
+        noise_train, noise_test, sample_rate=sample_rate, samples=12 * sample_rate
+    )
     checkpoint = {
         "training_track_ids": track_ids,
         "validation_probe": [],
@@ -427,14 +441,13 @@ def test_joint_manifest_is_deterministic_and_backfills_bad_candidates(tmp_path):
     configuration = _joint_manifest_configuration(
         checkpoint_fingerprint="checkpoint",
         checkpoint=checkpoint,
+        noise_manifest=noise_assets.manifest(),
         rir_manifest=rir_assets.manifest(),
         cohort="training",
         expected_tracks=4,
         sample_tracks=2,
         sample_seed=7,
         recipe_seed=9,
-        query_lengths=(2.0, 3.0, 5.0, 10.0),
-        conditions=("clean", "rir"),
         beam_width=10,
         sample_rate=sample_rate,
         window_seconds=2.0,
@@ -449,6 +462,7 @@ def test_joint_manifest_is_deterministic_and_backfills_bad_candidates(tmp_path):
         configuration=configuration,
         checkpoint=checkpoint,
         cfg=cfg,
+        noise_assets=noise_assets,
         rir_assets=rir_assets,
     )
     repeated = _load_or_create_joint_manifest(
@@ -456,12 +470,14 @@ def test_joint_manifest_is_deterministic_and_backfills_bad_candidates(tmp_path):
         configuration=configuration,
         checkpoint=checkpoint,
         cfg=cfg,
+        noise_assets=noise_assets,
         rir_assets=rir_assets,
     )
     assert first == repeated
     assert len(first["queries"]) == 2
     assert len({row["track_id"] for row in first["queries"]}) == 2
     assert first["excluded_candidates"][0]["track_id"] == missing_track
+    assert all(row["noise_path"] == "test.wav" for row in first["queries"])
     assert all(row["rir_path"] == "OpenAIR/test-room/test.wav" for row in first["queries"])
     changed = {**configuration, "recipe_seed": 10}
     with pytest.raises(ValueError, match="does not match"):
@@ -470,8 +486,51 @@ def test_joint_manifest_is_deterministic_and_backfills_bad_candidates(tmp_path):
             configuration=changed,
             checkpoint=checkpoint,
             cfg=cfg,
+            noise_assets=noise_assets,
             rir_assets=rir_assets,
         )
+
+
+def test_joint_protocol_has_exact_noise_rir_cross_product():
+    suites = joint_degradation_suites()
+    assert JOINT_QUERY_LENGTHS == (2.0, 5.0, 10.0)
+    assert JOINT_SNRS_DB == (0.0, 5.0, 10.0, 20.0)
+    assert len(suites) == 8
+    assert {(suite["rir"], suite["snr_db"]) for suite in suites} == {
+        (rir, snr) for rir in (False, True) for snr in JOINT_SNRS_DB
+    }
+    assert all("clean" not in suite["suite_id"] for suite in suites)
+
+
+def test_joint_suite_applies_exact_snr_then_full_wet_rir():
+    past_samples = 4
+    output_samples = 8
+    context = np.linspace(0.2, 0.8, 12, dtype=np.float32)
+    noise = np.linspace(-0.6, 0.4, 12, dtype=np.float32)
+    ir = np.array([1.0, 0.5, 0.25], dtype=np.float32)
+    snr_db = 5.0
+    mixed, valid = mix_background_noise(
+        torch.from_numpy(context).unsqueeze(0),
+        torch.from_numpy(noise).unsqueeze(0),
+        torch.tensor([snr_db]),
+    )
+    assert bool(valid[0])
+    expected = convolve_full_wet(
+        mixed[0].numpy(),
+        ir,
+        past_context_samples=past_samples,
+        output_samples=output_samples,
+    )
+    actual = _prepare_joint_suite_waveform(
+        context,
+        noise,
+        ir,
+        rir=True,
+        snr_db=snr_db,
+        past_samples=past_samples,
+        output_samples=output_samples,
+    )
+    assert np.allclose(actual, expected)
 
 
 def test_joint_metrics_and_jsonl_resume_validation(tmp_path):
@@ -481,7 +540,7 @@ def test_joint_metrics_and_jsonl_resume_validation(tmp_path):
             "status": "ok",
             "track_id": "a",
             "query_seconds": 2.0,
-            "condition": "clean",
+            "suite_id": "noise_0db",
             "correct_rank": 1,
             "latency_seconds": 1.0,
         },
@@ -490,7 +549,7 @@ def test_joint_metrics_and_jsonl_resume_validation(tmp_path):
             "status": "ok",
             "track_id": "b",
             "query_seconds": 2.0,
-            "condition": "clean",
+            "suite_id": "noise_0db",
             "correct_rank": 7,
             "latency_seconds": 1.0,
         },
@@ -499,7 +558,7 @@ def test_joint_metrics_and_jsonl_resume_validation(tmp_path):
             "status": "error",
             "track_id": "c",
             "query_seconds": 2.0,
-            "condition": "clean",
+            "suite_id": "noise_0db",
             "latency_seconds": 0.5,
         },
     ]

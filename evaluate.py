@@ -47,21 +47,10 @@ def main() -> None:
         "--recipe-seed",
         type=int,
         default=1337,
-        help="Seed for joint-query starts and held-out room IRs (default: 1337).",
-    )
-    parser.add_argument(
-        "--query-lengths",
-        type=float,
-        nargs="+",
-        default=(2.0, 3.0, 5.0, 10.0),
-        help="Paper-facing query lengths in seconds.",
-    )
-    parser.add_argument(
-        "--conditions",
-        choices=("clean", "rir"),
-        nargs="+",
-        default=("clean", "rir"),
-        help="Paper-facing waveform conditions.",
+        help=(
+            "Seed for joint-query starts, held-out noise, and room IRs "
+            "(default: 1337)."
+        ),
     )
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--beam-width", type=int, default=10)
@@ -98,8 +87,6 @@ def main() -> None:
         beam_width=None if args.greedy_only else args.beam_width,
         generation_only=args.greedy_only,
         recipe_seed=args.recipe_seed,
-        query_lengths=tuple(args.query_lengths),
-        conditions=tuple(args.conditions),
         rir_training_root=args.rir_training_root,
         rir_validation_root=args.rir_validation_root,
     )

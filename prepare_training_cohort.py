@@ -52,9 +52,15 @@ def main() -> None:
     )
     parser.add_argument("config", type=Path)
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--database-size", type=int, choices=(25_000, 100_000)
+    )
     args = parser.parse_args()
     result = prepare_training_cohort(
-        resolve_training_config(load_config(args.config)), args.output
+        resolve_training_config(
+            load_config(args.config), database_size=args.database_size
+        ),
+        args.output,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
 

@@ -13,6 +13,12 @@ def main() -> None:
     parser.add_argument("--wandb-online", action="store_true")
     parser.add_argument("--run-id")
     parser.add_argument("--devices", type=int, default=None)
+    parser.add_argument(
+        "--database-size",
+        type=int,
+        choices=(25_000, 100_000),
+        help="training catalogue size (default: config; resume: checkpoint)",
+    )
     parser.add_argument("--decoder", choices=("small",))
     parser.add_argument("--schedule", choices=("noise-rir",))
     parser.add_argument(
@@ -36,6 +42,7 @@ def main() -> None:
         run_id=args.run_id,
         wandb_online=args.wandb_online,
         devices=args.devices,
+        database_size=args.database_size,
     )
     checkpoint = args.ckpt_path
     if args.resume and checkpoint is None:
@@ -51,6 +58,7 @@ def main() -> None:
         schedule=args.schedule,
         selected_codebooks=args.codebooks,
         distillation_weight=args.distillation_weight,
+        database_size=args.database_size,
         checkpoint=checkpoint,
     )
     train(cfg, checkpoint=checkpoint)

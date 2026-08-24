@@ -81,6 +81,23 @@ def test_primary_config_is_audio_lm_and_matches_logical_batch():
     assert not any(key.startswith("id_loss_") for key in cfg["train"])
 
 
+def test_100k_override_selects_existing_size_specific_manifest():
+    cfg = resolve_training_config(
+        yaml.safe_load(
+            (Path(__file__).parents[1] / "configs" / "fma_large.yaml").read_text()
+        ),
+        database_size=100_000,
+    )
+    assert cfg["data"]["database_size"] == 100_000
+    assert cfg["data"]["max_training_tracks"] == 100_000
+    assert cfg["data"]["training_tracks_manifest"] == (
+        "data/training_tracks_100k.json"
+    )
+    assert cfg["train"]["max_steps"] == 900_000
+    assert cfg["train"]["evaluation_interval"] == 2_500
+    assert cfg["train"]["checkpoint_interval"] == 2_500
+
+
 def test_tc18_startup_query_invariants_are_enforced():
     cfg = resolve_training_config(
         yaml.safe_load(

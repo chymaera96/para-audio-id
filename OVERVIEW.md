@@ -420,9 +420,10 @@ the unchanged 512-position context.
 
 ## `tc18`: two-second eight-codebook ablation
 
-`tc18` retains tc17's two-second queries, 25K cohort, GPT-2-small-style decoder,
+`tc18` retains tc17's two-second queries, GPT-2-small-style decoder,
 noise/RIR and learning-rate schedules, temperature-2 identifier-logit
-distillation, `40×2` physical batch, accumulation two, and 225K endpoint. All
+distillation, `40×2` physical batch, and accumulation two. Its original 25K
+profile retains the 225K endpoint. All
 eight MuQ codebooks yield 400 audio targets and a 408-token causal document.
 Identifier weight scales from 24 to 32, giving
 `(400 audio + 160 digit + 2 boundary) / 562` and preserving the 2.5:1 aggregate
@@ -434,10 +435,17 @@ context. tc18 uses the immutable protocol
 `tc18_two_second_eight_codebook_logit_distillation_v1` and starts from random
 weights.
 
+The optional 100K profile uses `data/training_tracks_100k.json` and preserves
+the 25K run's average exposure per identity. It therefore scales the endpoint
+to 900K and multiplies the corruption, distillation, and post-warm-up LR phase
+boundaries by four. Warm-up remains 500 steps, while checkpoints and monitoring
+remain every 2,500 steps. The architecture, query representation, loss,
+augmentation distributions, and W&B names do not change.
+
 ## Unified training profiles
 
-The active `stable` branch is single-purpose for tc18: small decoder, 25K
-cohort, noise-RIR schedule, all eight codebooks, and two-second queries.
+The active `stable` branch is single-purpose for tc18: small decoder, a 25K or
+100K cohort, noise-RIR schedule, all eight codebooks, and two-second queries.
 Checkpoints store the resolved distillation profile and reject tc17 and all
 earlier runs.
 W&B retains existing causal names and adds only epoch-level distillation loss.

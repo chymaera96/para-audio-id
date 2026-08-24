@@ -32,7 +32,7 @@ def base_config() -> dict:
     }
 
 
-def test_tc18_profile_is_fixed_and_resolves_defaults():
+def test_tc18_25k_profile_resolves_defaults_unchanged():
     profile = canonical_training_profile(
         database_size=25_000,
         decoder="small",
@@ -70,12 +70,58 @@ def test_tc18_profile_is_fixed_and_resolves_defaults():
     }
     assert resolved["train"]["max_steps"] == 225_000
     assert resolved["train"]["warmup_steps"] == 500
+    assert resolved["train"]["learning_rate_schedule"] == {
+        "policy": "tc18_warmup_hold_linear_cosine_v1",
+        "warmup_steps": 500,
+        "hold_until_step": 60_000,
+        "linear_decay_until_step": 140_000,
+        "final_learning_rate_ratio": 0.05,
+    }
+
+
+def test_tc18_100k_profile_scales_exposure_dependent_boundaries():
+    profile = canonical_training_profile(
+        database_size=100_000,
+        decoder="small",
+        schedule="noise-rir",
+        selected_codebooks=8,
+    )
+    assert cohort_manifest(100_000) == "data/training_tracks_100k.json"
+    assert profile["schedule"] == {
+        "name": "noise-rir",
+        "protocol": "tc18_two_second_eight_codebook_logit_distillation_v1",
+        "loss_protocol": "tc18_two_second_eight_codebook_logit_distillation_v1",
+        "max_steps": 900_000,
+        "snr_bin_probabilities": [0.40, 0.30, 0.20, 0.10],
+        "exact_zero_fraction_in_first_bin": 0.25,
+        "curriculum": "tc12_noise_rir_curriculum_v1",
+        "clean_until_step": 40_000,
+        "degradation_ramp_until_step": 120_000,
+        "combined_ramp_until_step": 240_000,
+    }
+    assert profile["distillation"]["weight_schedule"] == {
+        "zero_until_step": 60_000,
+        "ramp_until_step": 120_000,
+    }
+    assert profile["learning_rate_schedule"] == {
+        "policy": "tc18_warmup_hold_linear_cosine_v1",
+        "warmup_steps": 500,
+        "hold_until_step": 240_000,
+        "linear_decay_until_step": 560_000,
+        "final_learning_rate_ratio": 0.05,
+    }
+    resolved = resolve_training_config(base_config(), database_size=100_000)
+    assert resolved["data"]["training_tracks_manifest"] == (
+        "data/training_tracks_100k.json"
+    )
+    assert resolved["data"]["max_training_tracks"] == 100_000
+    assert resolved["train"]["max_steps"] == 900_000
 
 
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [
-        ({"database_size": 10_000}, "database_size=25000"),
+        ({"database_size": 10_000}, "database_size in"),
         ({"decoder": "medium"}, "small decoder"),
         ({"schedule": "noise"}, "noise-rir schedule"),
         ({"selected_codebooks": 6}, "all eight MuQ codebooks"),
@@ -120,6 +166,10 @@ def test_tc18_resume_inherits_weight_and_rejects_overrides(tmp_path):
     with pytest.raises(ValueError, match="distillation weight"):
         resolve_training_config(
             base_config(), distillation_weight=0.1, checkpoint=path
+        )
+    with pytest.raises(ValueError, match="database size"):
+        resolve_training_config(
+            base_config(), database_size=100_000, checkpoint=path
         )
 
     for version, variant in (
@@ -172,6 +222,15 @@ def test_tc18_noise_rir_boundaries_remain_unchanged():
     ).rir_severity_quantile == pytest.approx(1.0)
 
 
+def test_tc18_100k_noise_rir_boundaries_are_scaled_fourfold():
+    profile = schedule_profile("noise-rir", 100_000)
+    reference = schedule_profile("noise-rir", 25_000)
+    for step in (0, 5_000, 10_000, 20_000, 30_000, 45_000, 60_000, 225_000):
+        expected = resolved_augmentation_schedule(step, reference)
+        actual = resolved_augmentation_schedule(step * 4, profile)
+        assert actual == expected
+
+
 @pytest.mark.parametrize(
     ("step", "expected"),
     [(15_000, 0.0), (22_500, 0.05), (30_000, 0.1), (225_000, 0.1)],
@@ -179,6 +238,25 @@ def test_tc18_noise_rir_boundaries_remain_unchanged():
 def test_tc18_distillation_weight_schedule(step, expected):
     assert distillation_weight(step, maximum_weight=0.1) == pytest.approx(expected)
     assert distillation_weight(step, maximum_weight=0.0) == 0.0
+
+
+@pytest.mark.parametrize(
+    ("step", "expected"),
+    [(60_000, 0.0), (90_000, 0.05), (120_000, 0.1), (900_000, 0.1)],
+)
+def test_tc18_100k_distillation_weight_schedule(step, expected):
+    profile = canonical_training_profile(
+        database_size=100_000,
+        decoder="small",
+        schedule="noise-rir",
+    )
+    boundaries = profile["distillation"]["weight_schedule"]
+    assert distillation_weight(
+        step,
+        maximum_weight=0.1,
+        zero_until_step=boundaries["zero_until_step"],
+        ramp_until_step=boundaries["ramp_until_step"],
+    ) == pytest.approx(expected)
 
 
 def test_tc18_learning_rate_schedule_extends_to_225k():
@@ -202,6 +280,31 @@ def test_tc18_learning_rate_schedule_extends_to_225k():
         140_000: 0.5,
         182_500: 0.275,
         225_000: 0.05,
+    }
+    for step, multiplier in expected.items():
+        assert learning_rate_multiplier(step, train) == pytest.approx(multiplier)
+
+
+def test_tc18_100k_learning_rate_schedule_extends_to_900k():
+    profile = canonical_training_profile(
+        database_size=100_000,
+        decoder="small",
+        schedule="noise-rir",
+    )
+    train = {
+        "max_steps": 900_000,
+        "warmup_steps": 500,
+        "learning_rate_schedule": profile["learning_rate_schedule"],
+    }
+    expected = {
+        0: 0.0,
+        250: 0.5,
+        500: 1.0,
+        240_000: 1.0,
+        400_000: 0.75,
+        560_000: 0.5,
+        730_000: 0.275,
+        900_000: 0.05,
     }
     for step, multiplier in expected.items():
         assert learning_rate_multiplier(step, train) == pytest.approx(multiplier)

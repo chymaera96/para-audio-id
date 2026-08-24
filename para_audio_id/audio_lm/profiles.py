@@ -10,7 +10,8 @@ from typing import Any
 import torch
 
 
-SUPPORTED_DATABASE_SIZES = (25_000,)
+SUPPORTED_DATABASE_SIZES = (25_000, 100_000)
+REFERENCE_DATABASE_SIZE = 25_000
 DECODER_PROFILES = {
     "small": {"num_layers": 12, "hidden_size": 768, "num_attention_heads": 12},
 }
@@ -77,30 +78,31 @@ def validate_cohort_manifest(path: str | Path, records, expected_count: int) -> 
 
 
 def _scaled(value: int, database_size: int) -> int:
-    return value * database_size // 10_000
+    if database_size not in SUPPORTED_DATABASE_SIZES:
+        raise ValueError(
+            f"database_size must be one of {SUPPORTED_DATABASE_SIZES}, "
+            f"got {database_size}"
+        )
+    return value * database_size // REFERENCE_DATABASE_SIZE
 
 
 def schedule_profile(name: str, database_size: int) -> dict[str, Any]:
     if name not in SCHEDULE_NAMES:
         raise ValueError(f"schedule must be one of {SCHEDULE_NAMES}, got {name!r}")
-    if database_size != 25_000:
-        raise ValueError(
-            "tc18 requires the 25K training cohort"
-        )
     common = {
         "name": name,
         "protocol": NEW_TRAINING_PROTOCOL,
         "loss_protocol": LOSS_PROTOCOL,
-        "max_steps": 225_000,
+        "max_steps": _scaled(225_000, database_size),
         "snr_bin_probabilities": [0.40, 0.30, 0.20, 0.10],
         "exact_zero_fraction_in_first_bin": 0.25,
     }
     return {
         **common,
         "curriculum": TC12_CURRICULUM,
-        "clean_until_step": _scaled(4_000, database_size),
-        "degradation_ramp_until_step": _scaled(12_000, database_size),
-        "combined_ramp_until_step": _scaled(24_000, database_size),
+        "clean_until_step": _scaled(10_000, database_size),
+        "degradation_ramp_until_step": _scaled(30_000, database_size),
+        "combined_ramp_until_step": _scaled(60_000, database_size),
     }
 
 
@@ -120,9 +122,9 @@ def canonical_training_profile(
     selected_codebooks: int = 8,
     distillation_weight: float = DEFAULT_DISTILLATION_WEIGHT,
 ) -> dict[str, Any]:
-    if database_size != 25_000:
+    if database_size not in SUPPORTED_DATABASE_SIZES:
         raise ValueError(
-            "tc18 requires database_size=25000"
+            f"tc18 requires database_size in {SUPPORTED_DATABASE_SIZES}"
         )
     if decoder != "small":
         raise ValueError("tc18 requires the small decoder")
@@ -146,8 +148,8 @@ def canonical_training_profile(
             "temperature": 2.0,
             "maximum_weight": float(distillation_weight),
             "weight_schedule": {
-                "zero_until_step": 15_000,
-                "ramp_until_step": 30_000,
+                "zero_until_step": _scaled(15_000, database_size),
+                "ramp_until_step": _scaled(30_000, database_size),
             },
             "target_positions": "five_next_identifier_digits",
             "vocabulary_scope": "digit_tokens_only",
@@ -157,8 +159,8 @@ def canonical_training_profile(
     profile["learning_rate_schedule"] = {
         "policy": TC18_LR_POLICY,
         "warmup_steps": 500,
-        "hold_until_step": 60_000,
-        "linear_decay_until_step": 140_000,
+        "hold_until_step": _scaled(60_000, database_size),
+        "linear_decay_until_step": _scaled(140_000, database_size),
         "final_learning_rate_ratio": 0.05,
     }
     return profile
@@ -226,6 +228,7 @@ def resolve_training_config(
     schedule: str | None = None,
     selected_codebooks: int | None = None,
     distillation_weight: float | None = None,
+    database_size: int | None = None,
     checkpoint: str | Path | None = None,
 ) -> dict[str, Any]:
     if distillation_weight is not None and (
@@ -234,7 +237,11 @@ def resolve_training_config(
         raise ValueError("distillation_weight must be finite and non-negative")
     cfg = deepcopy(config)
     data = cfg.setdefault("data", {})
-    database_size = int(data.get("database_size", data.get("max_training_tracks", 0)))
+    configured_database_size = int(
+        data.get("database_size", data.get("max_training_tracks", 0))
+    )
+    if database_size is not None:
+        configured_database_size = int(database_size)
     checkpoint_payload = (
         torch.load(checkpoint, map_location="cpu", weights_only=False)
         if checkpoint is not None
@@ -246,10 +253,19 @@ def resolve_training_config(
         else None
     )
     if resumed is not None:
-        database_size = int(resumed["database_size"])
+        checkpoint_database_size = int(resumed["database_size"])
+        if (
+            database_size is not None
+            and int(database_size) != checkpoint_database_size
+        ):
+            raise ValueError(
+                "Explicit database size does not match resume checkpoint"
+            )
+        resolved_database_size = checkpoint_database_size
         resolved_decoder = resumed["decoder"]["name"] if decoder is None else decoder
         resolved_schedule = resumed["schedule"]["name"] if schedule is None else schedule
     else:
+        resolved_database_size = configured_database_size
         resolved_decoder = decoder or "small"
         resolved_schedule = schedule or "noise-rir"
     if resumed is not None:
@@ -278,7 +294,7 @@ def resolve_training_config(
             else configured_codebooks
         )
         profile = canonical_training_profile(
-            database_size=database_size,
+            database_size=resolved_database_size,
             decoder=resolved_decoder,
             schedule=resolved_schedule,
             selected_codebooks=profile_codebooks,
@@ -322,8 +338,8 @@ def resolve_training_config(
         )
     tokenizer["selected_codebooks"] = query_profile["selected_codebooks"]
 
-    data["database_size"] = database_size
-    data["max_training_tracks"] = database_size
+    data["database_size"] = resolved_database_size
+    data["max_training_tracks"] = resolved_database_size
     data["training_tracks_manifest"] = profile["training_tracks_manifest"]
     if resolved_schedule == "noise-rir":
         rir = data.get("room_ir")

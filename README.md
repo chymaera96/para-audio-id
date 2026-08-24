@@ -65,12 +65,16 @@ The repository still contains the older cache-preparation commands, but current 
 does not use canonical, shifted, or half-offset token stores for training or
 evaluation. They remain useful only when reproducing tc2–tc6 from Git history.
 
-tc18 uses the existing 25K identity manifest. Prepare it if it is not already
-available:
+tc18 supports either the existing 25K identity manifest or a fingerprinted
+100K manifest. Prepare the selected cohort if it is not already available:
 
 ```bash
 python prepare_training_cohort.py configs/fma_large.yaml
 # Writes or validates data/training_tracks_25k.json.
+
+python prepare_training_cohort.py configs/fma_large.yaml \
+  --database-size 100000
+# Writes data/training_tracks_100k.json.
 ```
 
 ## Training
@@ -80,7 +84,7 @@ hidden size 768, 12 heads, tied embeddings, and no dropout. The vocabulary has
 8,192 codebook-separated audio tokens, `[BOS]`, `[ID]`, ten dedicated digit tokens,
 and `[EOS]`.
 
-Training samples online two-second crops from the fixed 25K cohort. Each
+Training samples online two-second crops from the selected 25K or 100K cohort. Each
 identity contributes a clean anchor and one secondary view: a distinct clean
 crop, an exact same-crop background-noise view, an exact same-crop room-reverb
 view, or the combined noise-then-reverb view. One frozen lightweight MuQ call
@@ -108,7 +112,7 @@ Eight codebooks produce 400 audio tokens and a 408-token complete causal
 document. The existing 512-position table is retained: the inference prompt is
 402 tokens before the five generated digits, so no context expansion is needed.
 
-The secondary-view curriculum remains identical to tc15–tc17:
+For 25K, the secondary-view curriculum remains identical to tc15–tc17:
 
 | Raw steps | Clean | Noise | RIR | Noise + RIR | RIR severity |
 | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -149,6 +153,13 @@ only the epoch-level distillation loss, alongside aggregate RIR-only and
 noise+RIR beam Top-1. Complete beam
 Top-1/5/10 and MRR results are appended to `probe_metrics.jsonl`.
 
+The 100K profile preserves the same average exposure per identity by scaling
+all exposure-dependent boundaries by four. It runs for 900K steps: corruption
+boundaries become 40K/120K/240K, distillation boundaries become 60K/120K,
+and the LR hold/linear-decay boundaries become 240K/560K. The 500-step warm-up,
+2,500-step checkpoint interval, and 2,500-step monitoring interval remain
+operational constants.
+
 ```bash
 python train.py configs/fma_large.yaml \
   --decoder small \
@@ -160,9 +171,25 @@ python train.py configs/fma_large.yaml \
   --wandb-online
 ```
 
-This branch accepts only `--decoder small`, `--schedule noise-rir`, and
-`--codebooks 8`. The resolved tc18 profile and distillation maximum are embedded
-in every checkpoint. Use `--distillation-weight 0.0` for the matched ablation.
+For the 100K run, add `--database-size 100000` and use a distinct run ID:
+
+```bash
+python train.py configs/fma_large.yaml \
+  --database-size 100000 \
+  --decoder small \
+  --schedule noise-rir \
+  --codebooks 8 \
+  --distillation-weight 0.1 \
+  --run-id tc18-100k \
+  --devices 1 \
+  --wandb-online
+```
+
+This branch accepts only `--decoder small`, `--schedule noise-rir`,
+`--codebooks 8`, and database sizes 25K or 100K. The resolved tc18 profile,
+database size, manifest, scaled boundaries, and distillation maximum are
+embedded in every checkpoint. Use `--distillation-weight 0.0` for the matched
+ablation.
 
 The only new W&B key is `train/distillation_loss_epoch`; it remains available
 when the configured optimization weight is zero.

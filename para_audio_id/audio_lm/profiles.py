@@ -17,6 +17,11 @@ GLOBAL_TRACKS_PER_OPTIMIZER_STEP = 80
 TRACKS_PER_DEVICE_MICROBATCH = 40
 DECODER_PROFILES = {
     "small": {"num_layers": 12, "hidden_size": 768, "num_attention_heads": 12},
+    "medium": {
+        "num_layers": 24,
+        "hidden_size": 1024,
+        "num_attention_heads": 16,
+    },
 }
 SCHEDULE_NAMES = ("noise-rir",)
 SUPPORTED_SELECTED_CODEBOOKS = (8,)
@@ -130,8 +135,10 @@ def canonical_training_profile(
         raise ValueError(
             f"tc18 requires database_size in {SUPPORTED_DATABASE_SIZES}"
         )
-    if decoder != "small":
-        raise ValueError("tc18 requires the small decoder")
+    if decoder not in DECODER_PROFILES:
+        raise ValueError(
+            f"tc18 decoder must be one of {tuple(DECODER_PROFILES)}, got {decoder!r}"
+        )
     if schedule != "noise-rir":
         raise ValueError(
             "tc18 requires the noise-rir schedule"

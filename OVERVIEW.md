@@ -451,10 +451,12 @@ on resume.
 
 ## Unified training profiles
 
-The active `stable` branch is single-purpose for tc18: small decoder, a 25K or
-100K cohort, noise-RIR schedule, all eight codebooks, and two-second queries.
-Checkpoints store the resolved distillation profile and reject tc17 and all
-earlier runs.
+The active `stable` branch runs tc18 with a small or medium causal decoder, a
+25K or 100K cohort, noise-RIR schedule, all eight codebooks, and two-second
+queries. The medium option reuses the capacity-series 24-layer, width-1024,
+16-head profile without changing exposure, loss, or augmentation schedules.
+Checkpoints store the resolved decoder and distillation profiles and reject
+tc17 and all earlier runs.
 W&B retains existing causal names and adds only epoch-level distillation loss.
 
 ## Interpretation

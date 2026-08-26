@@ -80,7 +80,9 @@ python prepare_training_cohort.py configs/fma_large.yaml \
 ## Training
 
 The default causal LM is a randomly initialized 12-layer GPT-2-style decoder with
-hidden size 768, 12 heads, tied embeddings, and no dropout. The vocabulary has
+hidden size 768 and 12 heads. `--decoder medium` selects the capacity-series
+profile with 24 layers, hidden size 1024, and 16 heads. Both use tied embeddings
+and no dropout. The vocabulary has
 8,192 codebook-separated audio tokens, `[BOS]`, `[ID]`, ten dedicated digit tokens,
 and `[EOS]`.
 
@@ -192,11 +194,15 @@ python train.py configs/fma_large.yaml \
   --wandb-online
 ```
 
+Use `--decoder medium` for the matched larger-decoder run. Decoder dimensions
+are embedded in checkpoints; an omitted decoder on resume inherits the saved
+profile, while an explicit small/medium mismatch is rejected.
+
 For the two-GPU version, change only `--devices 1` to `--devices 2`. The SLURM
 allocation must expose two GPUs to one launcher task; do not launch two separate
 copies of `train.py`.
 
-This branch accepts only `--decoder small`, `--schedule noise-rir`,
+This branch accepts `--decoder small` or `--decoder medium`, `--schedule noise-rir`,
 `--codebooks 8`, database sizes 25K or 100K, and one or two devices. The resolved tc18 profile,
 database size, manifest, scaled boundaries, and distillation maximum are
 embedded in every checkpoint. Use `--distillation-weight 0.0` for the matched

@@ -146,11 +146,33 @@ def test_tc18_two_gpu_profile_preserves_global_batch():
     assert resolved["train"]["max_steps"] == 900_000
 
 
+def test_tc18_medium_decoder_matches_capacity_profile():
+    profile = canonical_training_profile(
+        database_size=100_000,
+        decoder="medium",
+        schedule="noise-rir",
+        devices=2,
+    )
+    assert profile["decoder"] == {
+        "name": "medium",
+        "num_layers": 24,
+        "hidden_size": 1024,
+        "num_attention_heads": 16,
+    }
+    resolved = resolve_training_config(
+        base_config(), database_size=100_000, decoder="medium", devices=2
+    )
+    assert resolved["model"]["num_layers"] == 24
+    assert resolved["model"]["hidden_size"] == 1024
+    assert resolved["model"]["num_attention_heads"] == 16
+    assert resolved["trainer"]["accumulate_grad_batches"] == 1
+
+
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [
         ({"database_size": 10_000}, "database_size in"),
-        ({"decoder": "medium"}, "small decoder"),
+        ({"decoder": "tiny"}, "decoder must be one of"),
         ({"schedule": "noise"}, "noise-rir schedule"),
         ({"selected_codebooks": 6}, "all eight MuQ codebooks"),
         ({"distillation_weight": -0.1}, "non-negative"),
@@ -202,6 +224,8 @@ def test_tc18_resume_inherits_weight_and_rejects_overrides(tmp_path):
         )
     with pytest.raises(ValueError, match="device count"):
         resolve_training_config(base_config(), devices=2, checkpoint=path)
+    with pytest.raises(ValueError, match="training profile"):
+        resolve_training_config(base_config(), decoder="medium", checkpoint=path)
 
     for version, variant in (
         (5, "tc14-logit-distillation"),

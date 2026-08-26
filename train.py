@@ -19,7 +19,7 @@ def main() -> None:
         choices=(25_000, 100_000),
         help="training catalogue size (default: config; resume: checkpoint)",
     )
-    parser.add_argument("--decoder", choices=("small",))
+    parser.add_argument("--decoder", choices=("small", "medium"))
     parser.add_argument("--schedule", choices=("noise-rir",))
     parser.add_argument(
         "--codebooks",

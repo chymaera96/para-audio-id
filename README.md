@@ -204,6 +204,19 @@ The medium decoder must be launched with `--devices 2`. The SLURM allocation
 must expose two GPUs to one launcher task; do not launch two separate copies of
 `train.py`.
 
+To measure a safe medium per-GPU microbatch on a one-GPU OnDemand node, run:
+
+```bash
+python probe_medium_memory.py configs/fma_large.yaml
+```
+
+The disposable probe keeps lightweight MuQ and a DDP-wrapped medium decoder on
+the GPU, runs two BF16 forward/backward/AdamW updates, and tests ascending track
+counts. It creates no checkpoints or W&B run. The final recommendation converts
+the largest successful per-GPU batch into the accumulation needed to preserve
+the normal global 80-track optimizer batch. Prefer the next smaller tested
+layout if the reported peak leaves little memory headroom.
+
 This branch accepts `--decoder small` or `--decoder medium`, `--schedule noise-rir`,
 `--codebooks 8`, database sizes 25K or 100K, and one or two devices. The resolved tc18 profile,
 database size, manifest, scaled boundaries, decoder-specific microbatch, and

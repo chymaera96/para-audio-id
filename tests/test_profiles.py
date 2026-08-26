@@ -159,13 +159,57 @@ def test_tc18_medium_decoder_matches_capacity_profile():
         "hidden_size": 1024,
         "num_attention_heads": 16,
     }
+    assert profile["parallelism"] == {
+        "protocol": "tc18_ddp_global_80_tracks_v1",
+        "world_size": 2,
+        "tracks_per_device_microbatch": 10,
+        "accumulate_grad_batches": 4,
+        "global_tracks_per_optimizer_step": 80,
+    }
     resolved = resolve_training_config(
         base_config(), database_size=100_000, decoder="medium", devices=2
     )
     assert resolved["model"]["num_layers"] == 24
     assert resolved["model"]["hidden_size"] == 1024
     assert resolved["model"]["num_attention_heads"] == 16
-    assert resolved["trainer"]["accumulate_grad_batches"] == 1
+    assert resolved["train"]["tracks_per_microbatch"] == 10
+    assert resolved["trainer"]["accumulate_grad_batches"] == 4
+
+
+def test_tc18_medium_decoder_requires_two_devices():
+    with pytest.raises(ValueError, match="medium decoder requires exactly 2 devices"):
+        canonical_training_profile(
+            database_size=25_000,
+            decoder="medium",
+            schedule="noise-rir",
+            devices=1,
+        )
+
+
+def test_tc18_medium_resume_inherits_memory_safe_parallelism(tmp_path):
+    profile = canonical_training_profile(
+        database_size=25_000,
+        decoder="medium",
+        schedule="noise-rir",
+        devices=2,
+    )
+    path = tmp_path / "tc18-medium.ckpt"
+    torch.save(
+        {
+            "resolved_training_profile": profile,
+            "tokenizer_spec": {"selected_codebooks": 8},
+            "query_spec": {"id_digit_weight": 32.0},
+        },
+        path,
+    )
+    resolved = resolve_training_config(base_config(), checkpoint=path)
+    assert resolved["model"]["num_layers"] == 24
+    assert resolved["trainer"]["devices"] == 2
+    assert resolved["train"]["tracks_per_microbatch"] == 10
+    assert resolved["trainer"]["accumulate_grad_batches"] == 4
+
+    with pytest.raises(ValueError, match="device count"):
+        resolve_training_config(base_config(), checkpoint=path, devices=1)
 
 
 @pytest.mark.parametrize(

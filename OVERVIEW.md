@@ -442,12 +442,13 @@ boundaries by four. Warm-up remains 500 steps, while checkpoints and monitoring
 remain every 2,500 steps. The architecture, query representation, loss,
 augmentation distributions, and W&B names do not change.
 
-tc18 supports a matched two-GPU execution layout. One GPU uses 40 tracks per
-microbatch with accumulation two; two GPUs use 40 tracks per rank with
-accumulation one. Rank-disjoint sampling keeps the global optimizer batch fixed
-at 80 identities and 160 documents, so this is an execution optimization rather
-than a different experiment. The resolved layout is checkpointed and must match
-on resume.
+tc18's small decoder uses 40 tracks per rank: accumulation two on one GPU or
+accumulation one on two GPUs. The medium decoder always uses two GPUs, 10 tracks
+per rank, and accumulation four to reduce its per-GPU activation memory.
+Rank-disjoint sampling keeps every layout's global optimizer batch fixed at 80
+identities and 160 documents, so this is an execution optimization rather than
+a different experiment. The resolved layout is checkpointed and must match on
+resume.
 
 ## Unified training profiles
 

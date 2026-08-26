@@ -83,10 +83,7 @@ TC18_SELECTED_CODEBOOKS = 8
 TC18_ID_DIGIT_WEIGHT = 32.0
 TC18_DIGIT_TARGETS = 5
 TC18_BOUNDARY_TARGETS = 2
-TC18_TRACKS_PER_MICROBATCH = 40
 TC18_SEGMENTS_PER_TRACK = 2
-TC18_DOCUMENTS_PER_MICROBATCH = 80
-TC18_ACCUMULATE_GRAD_BATCHES = 2
 TRAIN_METRICS = {
     "clean_audio_loss",
     "digit_loss",
@@ -284,9 +281,11 @@ def validate_tc18_batch_configuration(cfg: dict, query_spec: dict) -> dict:
         "global_tracks_per_optimizer_step": 80,
     }
     world_size = int(parallelism["world_size"])
-    if tracks != TC18_TRACKS_PER_MICROBATCH:
+    expected_tracks = int(parallelism["tracks_per_device_microbatch"])
+    if tracks != expected_tracks:
         raise ValueError(
-            f"tc18 requires {TC18_TRACKS_PER_MICROBATCH} tracks per microbatch, "
+            f"tc18 requires {expected_tracks} tracks per microbatch for the "
+            "resolved decoder/device layout, "
             f"got {tracks}"
         )
     if segments != TC18_SEGMENTS_PER_TRACK:
@@ -304,9 +303,10 @@ def validate_tc18_batch_configuration(cfg: dict, query_spec: dict) -> dict:
     audio_targets = documents * int(query_spec["audio_targets"])
     causal_tokens = documents * int(query_spec["document_tokens"])
     waveform_seconds = documents * float(query_spec["segment_duration_seconds"])
-    if documents != TC18_DOCUMENTS_PER_MICROBATCH:
+    expected_documents = expected_tracks * TC18_SEGMENTS_PER_TRACK
+    if documents != expected_documents:
         raise ValueError(
-            f"tc18 requires {TC18_DOCUMENTS_PER_MICROBATCH} documents per "
+            f"tc18 requires {expected_documents} documents per "
             f"microbatch, got {documents}"
         )
     return {

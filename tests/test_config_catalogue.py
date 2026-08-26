@@ -132,6 +132,42 @@ def test_two_gpu_batch_preserves_tc18_optimizer_exposure():
     assert batch["waveform_seconds_per_optimizer_step"] == 320.0
 
 
+def test_medium_two_gpu_batch_reduces_per_device_memory_and_preserves_exposure():
+    cfg = resolve_training_config(
+        yaml.safe_load(
+            (Path(__file__).parents[1] / "configs" / "fma_large.yaml").read_text()
+        ),
+        database_size=100_000,
+        decoder="medium",
+        devices=2,
+    )
+    tokenizer_spec = TokenizerSpec(
+        architecture="muq_mel_rvq",
+        model_name="OpenMuQ/MuQ-large-msd-iter",
+        revision="test",
+        package_version="test",
+        sample_rate=24_000,
+        frame_rate=25.0,
+        waveform_normalization="none_before_muq_internal_preprocessing",
+        num_available_codebooks=8,
+        selected_codebooks=8,
+        codebook_size=1024,
+        serialization="time_major_codebook_interleaved",
+        preprocessing_version=1,
+    )
+    query = validate_tc18_query_configuration(
+        cfg, tokenizer_spec, AudioLMVocabulary(num_codebooks=8)
+    )
+    batch = validate_tc18_batch_configuration(cfg, query)
+    assert batch["tracks_per_microbatch"] == 10
+    assert batch["documents_per_microbatch"] == 20
+    assert batch["gradient_accumulation_steps"] == 4
+    assert batch["tracks_per_optimizer_step"] == 80
+    assert batch["documents_per_optimizer_step"] == 160
+    assert batch["audio_targets_per_optimizer_step"] == 64_000
+    assert batch["waveform_seconds_per_optimizer_step"] == 320.0
+
+
 def test_tc18_startup_query_invariants_are_enforced():
     cfg = resolve_training_config(
         yaml.safe_load(

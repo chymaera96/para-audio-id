@@ -14,7 +14,10 @@ SUPPORTED_DATABASE_SIZES = (25_000, 100_000)
 REFERENCE_DATABASE_SIZE = 25_000
 SUPPORTED_DEVICE_COUNTS = (1, 2)
 GLOBAL_TRACKS_PER_OPTIMIZER_STEP = 80
-TRACKS_PER_DEVICE_MICROBATCH = 40
+TRACKS_PER_DEVICE_MICROBATCH = {
+    "small": 40,
+    "medium": 10,
+}
 DECODER_PROFILES = {
     "small": {"num_layers": 12, "hidden_size": 768, "num_attention_heads": 12},
     "medium": {
@@ -151,8 +154,16 @@ def canonical_training_profile(
         raise ValueError(
             f"tc18 devices must be one of {SUPPORTED_DEVICE_COUNTS}, got {devices}"
         )
+    if decoder == "medium" and devices != 2:
+        raise ValueError("tc18 medium decoder requires exactly 2 devices")
+    tracks_per_device = TRACKS_PER_DEVICE_MICROBATCH[decoder]
+    distributed_microbatch = tracks_per_device * devices
+    if GLOBAL_TRACKS_PER_OPTIMIZER_STEP % distributed_microbatch:
+        raise ValueError(
+            "tc18 parallelism must divide the global 80-track optimizer batch"
+        )
     accumulation = GLOBAL_TRACKS_PER_OPTIMIZER_STEP // (
-        TRACKS_PER_DEVICE_MICROBATCH * devices
+        tracks_per_device * devices
     )
     profile = {
         "version": 10,
@@ -163,10 +174,10 @@ def canonical_training_profile(
         "parallelism": {
             "protocol": "tc18_ddp_global_80_tracks_v1",
             "world_size": devices,
-            "tracks_per_device_microbatch": TRACKS_PER_DEVICE_MICROBATCH,
+            "tracks_per_device_microbatch": tracks_per_device,
             "accumulate_grad_batches": accumulation,
             "global_tracks_per_optimizer_step": (
-                TRACKS_PER_DEVICE_MICROBATCH * accumulation * devices
+                tracks_per_device * accumulation * devices
             ),
         },
         "schedule": schedule_profile(schedule, database_size),
@@ -305,6 +316,16 @@ def resolve_training_config(
         resolved_devices = saved_devices
         resolved_decoder = resumed["decoder"]["name"] if decoder is None else decoder
         resolved_schedule = resumed["schedule"]["name"] if schedule is None else schedule
+        if resumed["decoder"]["name"] == "medium" and (
+            saved_devices != 2
+            or int(saved_parallelism["tracks_per_device_microbatch"]) != 10
+            or int(saved_parallelism["accumulate_grad_batches"]) != 4
+        ):
+            raise ValueError(
+                "Resume checkpoint uses the obsolete medium batch layout; "
+                "tc18 medium requires 2 devices, 10 tracks per device, and "
+                "4 accumulation steps"
+            )
     else:
         resolved_database_size = configured_database_size
         resolved_devices = int(

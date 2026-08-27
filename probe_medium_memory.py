@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import math
 import os
 from pathlib import Path
 import time
@@ -21,9 +22,13 @@ from para_audio_id.audio_lm.tokenizer import MuQRVQTokenizer
 from para_audio_id.config import load_config
 
 
-DEFAULT_CANDIDATES = (1, 2, 4, 5, 8, 10)
-GLOBAL_TRACKS_PER_STEP = 80
+DEFAULT_CANDIDATES = (10, 12, 16, 20, 24, 28, 32, 36, 40)
 DOCUMENTS_PER_TRACK = 2
+WORLD_SIZE = 2
+WARMUP_UPDATES = 2
+TIMED_UPDATES = 3
+MINIMUM_HEADROOM_PERCENT = 10.0
+TARGET_TRACK_SELECTIONS = 72_000_000
 
 
 def _is_oom(error: BaseException) -> bool:
@@ -38,6 +43,54 @@ def _model_config(config: dict) -> dict:
     result["model"].update(decoder_profile("medium"))
     result["model"].pop("name", None)
     return result
+
+
+def validate_candidates(values: list[int]) -> list[int]:
+    candidates = list(dict.fromkeys(values))
+    if candidates != values:
+        raise ValueError("--tracks must not contain duplicates")
+    if candidates != sorted(candidates) or any(value <= 0 for value in candidates):
+        raise ValueError("--tracks must contain ascending positive integers")
+    return candidates
+
+
+def recommend_candidate(
+    results: list[dict], *, minimum_headroom_percent: float
+) -> dict:
+    eligible = [
+        row
+        for row in results
+        if row.get("success")
+        and float(row["peak_headroom_percent"]) >= minimum_headroom_percent
+    ]
+    if not eligible:
+        raise RuntimeError(
+            "No successful candidate retained the required "
+            f"{minimum_headroom_percent:g}% peak memory headroom"
+        )
+    best = max(
+        eligible,
+        key=lambda row: (
+            float(row["documents_per_second"]),
+            int(row["tracks_per_gpu"]),
+        ),
+    )
+    tracks = int(best["tracks_per_gpu"])
+    global_tracks = WORLD_SIZE * tracks
+    return {
+        "selected_tracks_per_gpu": tracks,
+        "documents_per_gpu": tracks * DOCUMENTS_PER_TRACK,
+        "world_size": WORLD_SIZE,
+        "accumulate_grad_batches": 1,
+        "global_tracks_per_optimizer_step": global_tracks,
+        "global_documents_per_optimizer_step": (
+            global_tracks * DOCUMENTS_PER_TRACK
+        ),
+        "target_track_selections": TARGET_TRACK_SELECTIONS,
+        "resolved_max_steps": math.ceil(TARGET_TRACK_SELECTIONS / global_tracks),
+        "minimum_peak_headroom_percent": minimum_headroom_percent,
+        "selection_rule": "highest measured documents_per_second among safe candidates",
+    }
 
 
 def _documents(audio_tokens: torch.Tensor, vocabulary) -> dict:
@@ -57,6 +110,54 @@ def _documents(audio_tokens: torch.Tensor, vocabulary) -> dict:
     return collate_causal_documents(examples, vocabulary, max_positions=512)
 
 
+def _optimizer_update(
+    *,
+    model,
+    optimizer,
+    tokenizer: MuQRVQTokenizer,
+    waveforms: torch.Tensor,
+    device: torch.device,
+) -> None:
+    audio_tokens = tokenizer.tokenize(waveforms)
+    documents = int(waveforms.shape[0])
+    if audio_tokens.shape != (documents, 400):
+        raise RuntimeError(
+            f"MuQ returned {tuple(audio_tokens.shape)}, expected ({documents}, 400)"
+        )
+    prepared = _documents(audio_tokens, tokenizer.vocabulary)
+    input_ids = prepared["input_ids"].to(device)
+    attention_mask = prepared["attention_mask"].to(device)
+    audio_mask = prepared["audio_target_mask"].to(device)
+    id_mask = prepared["id_target_mask"].to(device)
+    boundary_mask = prepared["boundary_target_mask"].to(device)
+    degraded = torch.arange(documents, device=device).remainder(2).bool()
+
+    optimizer.zero_grad(set_to_none=True)
+    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        logits = model(input_ids, attention_mask)
+        base_loss, _ = degraded_causal_base_losses(
+            logits,
+            input_ids,
+            audio_mask,
+            id_mask,
+            boundary_mask,
+            degraded,
+            id_digit_weight=32.0,
+        )
+        distillation = identifier_logit_distillation_loss(
+            logits,
+            id_mask,
+            degraded,
+            prepared["track_id"],
+            list(tokenizer.vocabulary.digit_token_ids),
+            temperature=2.0,
+        )
+        loss = base_loss + 0.1 * distillation
+    loss.backward()
+    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+    optimizer.step()
+
+
 def _probe_candidate(
     *,
     tracks: int,
@@ -69,10 +170,6 @@ def _probe_candidate(
     model = None
     optimizer = None
     waveforms = None
-    prepared = None
-    logits = None
-    loss = None
-    started = time.perf_counter()
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats(device)
     try:
@@ -96,49 +193,30 @@ def _probe_candidate(
             device=device,
             dtype=torch.float32,
         ).mul_(0.05)
-        audio_tokens = tokenizer.tokenize(waveforms)
-        if audio_tokens.shape != (documents, 400):
-            raise RuntimeError(
-                f"MuQ returned {tuple(audio_tokens.shape)}, expected ({documents}, 400)"
+        for _ in range(WARMUP_UPDATES):
+            _optimizer_update(
+                model=model,
+                optimizer=optimizer,
+                tokenizer=tokenizer,
+                waveforms=waveforms,
+                device=device,
             )
-        prepared = _documents(audio_tokens, tokenizer.vocabulary)
-        input_ids = prepared["input_ids"].to(device)
-        attention_mask = prepared["attention_mask"].to(device)
-        audio_mask = prepared["audio_target_mask"].to(device)
-        id_mask = prepared["id_target_mask"].to(device)
-        boundary_mask = prepared["boundary_target_mask"].to(device)
-        degraded = torch.arange(documents, device=device).remainder(2).bool()
-        track_ids = prepared["track_id"]
-
-        # Two updates are required: AdamW allocates its state on the first step.
-        for _ in range(2):
-            optimizer.zero_grad(set_to_none=True)
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                logits = model(input_ids, attention_mask)
-                base_loss, _ = degraded_causal_base_losses(
-                    logits,
-                    input_ids,
-                    audio_mask,
-                    id_mask,
-                    boundary_mask,
-                    degraded,
-                    id_digit_weight=32.0,
-                )
-                distillation = identifier_logit_distillation_loss(
-                    logits,
-                    id_mask,
-                    degraded,
-                    track_ids,
-                    list(tokenizer.vocabulary.digit_token_ids),
-                    temperature=2.0,
-                )
-                loss = base_loss + 0.1 * distillation
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
-
         torch.cuda.synchronize(device)
+        timed_started = time.perf_counter()
+        for _ in range(TIMED_UPDATES):
+            _optimizer_update(
+                model=model,
+                optimizer=optimizer,
+                tokenizer=tokenizer,
+                waveforms=waveforms,
+                device=device,
+            )
+        torch.cuda.synchronize(device)
+        elapsed = time.perf_counter() - timed_started
         free_bytes, total_bytes = torch.cuda.mem_get_info(device)
+        peak_reserved = torch.cuda.max_memory_reserved(device)
+        peak_headroom = max(0.0, 100.0 * (total_bytes - peak_reserved) / total_bytes)
+        mean_step_seconds = elapsed / TIMED_UPDATES
         return {
             "tracks_per_gpu": tracks,
             "documents_per_gpu": documents,
@@ -147,11 +225,16 @@ def _probe_candidate(
                 torch.cuda.max_memory_allocated(device) / 2**30, 3
             ),
             "peak_reserved_gib": round(
-                torch.cuda.max_memory_reserved(device) / 2**30, 3
+                peak_reserved / 2**30, 3
             ),
+            "peak_headroom_percent": round(peak_headroom, 2),
             "free_after_step_gib": round(free_bytes / 2**30, 3),
+            "free_after_step_percent": round(100.0 * free_bytes / total_bytes, 2),
             "total_memory_gib": round(total_bytes / 2**30, 3),
-            "seconds": round(time.perf_counter() - started, 3),
+            "warmup_updates": WARMUP_UPDATES,
+            "timed_updates": TIMED_UPDATES,
+            "mean_step_seconds": round(mean_step_seconds, 4),
+            "documents_per_second": round(documents / mean_step_seconds, 3),
         }
     except (RuntimeError, torch.OutOfMemoryError) as error:
         if not _is_oom(error):
@@ -161,10 +244,9 @@ def _probe_candidate(
             "documents_per_gpu": documents,
             "success": False,
             "error": "CUDA out of memory",
-            "seconds": round(time.perf_counter() - started, 3),
         }
     finally:
-        del loss, logits, prepared, waveforms, optimizer, model, base_model
+        del waveforms, optimizer, model, base_model
         gc.collect()
         torch.cuda.empty_cache()
 
@@ -182,13 +264,7 @@ def main() -> None:
         help="ascending per-GPU track counts to test",
     )
     args = parser.parse_args()
-    candidates = list(dict.fromkeys(args.tracks))
-    if candidates != sorted(candidates) or any(
-        value <= 0 or (GLOBAL_TRACKS_PER_STEP // 2) % value for value in candidates
-    ):
-        raise ValueError(
-            "--tracks must be unique ascending positive divisors of 40"
-        )
+    candidates = validate_candidates(args.tracks)
     if not torch.cuda.is_available():
         raise RuntimeError("The medium memory probe requires a CUDA GPU")
     if torch.cuda.device_count() != 1:
@@ -225,20 +301,9 @@ def main() -> None:
     finally:
         torch.distributed.destroy_process_group()
 
-    successful = [row for row in results if row["success"]]
-    if not successful:
-        raise RuntimeError("No tested medium microbatch fit on this GPU")
-    best = successful[-1]
-    tracks = int(best["tracks_per_gpu"])
-    recommendation = {
-        "largest_successful_tracks_per_gpu": tracks,
-        "documents_per_gpu": tracks * DOCUMENTS_PER_TRACK,
-        "two_gpu_accumulate_grad_batches": (
-            GLOBAL_TRACKS_PER_STEP // (2 * tracks)
-        ),
-        "global_tracks_per_optimizer_step": GLOBAL_TRACKS_PER_STEP,
-        "note": "Choose the next smaller tested layout if peak memory has little headroom.",
-    }
+    recommendation = recommend_candidate(
+        results, minimum_headroom_percent=MINIMUM_HEADROOM_PERCENT
+    )
     print(json.dumps({"recommendation": recommendation}, indent=2), flush=True)
 
 

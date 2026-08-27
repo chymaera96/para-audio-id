@@ -438,8 +438,8 @@ weights.
 The optional 100K profile uses `data/training_tracks_100k.json` and preserves
 the 25K run's average exposure per identity. It therefore scales the endpoint
 to 900K and multiplies the corruption, distillation, and post-warm-up LR phase
-boundaries by four. Warm-up remains 500 steps, while checkpoints and monitoring
-remain every 2,500 steps. The architecture, query representation, loss,
+boundaries by four. On `scale`, warm-up remains 500 steps, monitoring runs every
+5,000 steps, and checkpoints run every 10,000 steps. The architecture, query representation, loss,
 augmentation distributions, and W&B names do not change.
 
 tc18's small decoder uses 40 tracks per rank: accumulation two on one GPU or

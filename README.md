@@ -152,11 +152,11 @@ RIR uses full-wet causal convolution with two seconds of preceding audio;
 the prefix is discarded after convolution so reverberant tails from preceding
 music enter the query. Room IR train/test assets are source- and content-disjoint.
 
-tc18 runs for 225K optimizer steps. Checkpoints and monitoring both run every
-2,500 steps. For direct comparison with tc6, the same seeded 100-track cohort is
+tc18 runs for 225K optimizer steps. On the `scale` branch, checkpoints run every
+10,000 steps and monitoring runs every 5,000 steps. The same seeded 100-track cohort is
 evaluated using one balanced canonical, integer-shifted, and held-out
 half-offset crop per track. All three groups are evaluated clean and at
-0/5/10/20/30 dB at step zero, every 2,500 steps, and at completion. Evaluation
+0/5/10/20/30 dB at step zero, every 5,000 steps, and at completion. Evaluation
 crops are two seconds long and are decoded and tokenized online; training still has
 no runtime token-store dependency. W&B preserves the causal metrics and adds
 only the epoch-level distillation loss, alongside aggregate RIR-only and
@@ -166,9 +166,8 @@ Top-1/5/10 and MRR results are appended to `probe_metrics.jsonl`.
 The 100K profile preserves the same average exposure per identity by scaling
 all exposure-dependent boundaries by four. It runs for 900K steps: corruption
 boundaries become 40K/120K/240K, distillation boundaries become 60K/120K,
-and the LR hold/linear-decay boundaries become 240K/560K. The 500-step warm-up,
-2,500-step checkpoint interval, and 2,500-step monitoring interval remain
-operational constants.
+and the LR hold/linear-decay boundaries become 240K/560K. Warm-up remains 500
+steps; the `scale` checkpoint and monitoring intervals are 10K and 5K.
 
 ```bash
 python train.py configs/fma_large.yaml \
@@ -211,11 +210,11 @@ python probe_medium_memory.py configs/fma_large.yaml
 ```
 
 The disposable probe keeps lightweight MuQ and a DDP-wrapped medium decoder on
-the GPU, runs two BF16 forward/backward/AdamW updates, and tests ascending track
-counts. It creates no checkpoints or W&B run. The final recommendation converts
-the largest successful per-GPU batch into the accumulation needed to preserve
-the normal global 80-track optimizer batch. Prefer the next smaller tested
-layout if the reported peak leaves little memory headroom.
+the GPU, allocates AdamW state during two warm-up updates, then times three BF16
+updates for each of `10,12,16,20,24,28,32,36,40` tracks per GPU. It reports
+steady-state throughput and recommends the fastest candidate retaining at least
+10% peak memory headroom. It creates no checkpoints or W&B run. After the probe,
+the selected physical batch will be fixed in the `scale` training profile.
 
 This branch accepts `--decoder small` or `--decoder medium`, `--schedule noise-rir`,
 `--codebooks 8`, database sizes 25K or 100K, and one or two devices. The resolved tc18 profile,
@@ -241,7 +240,7 @@ python train.py configs/fma_large.yaml \
 On resume, profile values are recovered from the checkpoint. Any non-matching
 checkpoint or incompatible explicit override fails before model construction.
 
-Checkpoints are written every 2,500 optimizer steps under:
+Checkpoints are written every 10,000 optimizer steps under:
 
 ```text
 /gpfs/scratch/acw723/para-audio-id/audio-lm-checkpoints/<run-id>/

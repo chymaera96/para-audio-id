@@ -44,8 +44,8 @@ def test_primary_config_is_audio_lm_and_matches_logical_batch():
     assert cfg["data"]["max_training_tracks"] == 25_000
     assert cfg["train"]["max_steps"] == 225_000
     assert cfg["train"]["warmup_steps"] == 500
-    assert cfg["train"]["evaluation_interval"] == 2_500
-    assert cfg["train"]["checkpoint_interval"] == 2_500
+    assert cfg["train"]["evaluation_interval"] == 5_000
+    assert cfg["train"]["checkpoint_interval"] == 10_000
     assert cfg["resolved_training_profile"]["decoder"]["name"] == "small"
     assert (
         cfg["resolved_training_profile"]["variant"]
@@ -94,8 +94,8 @@ def test_100k_override_selects_existing_size_specific_manifest():
         "data/training_tracks_100k.json"
     )
     assert cfg["train"]["max_steps"] == 900_000
-    assert cfg["train"]["evaluation_interval"] == 2_500
-    assert cfg["train"]["checkpoint_interval"] == 2_500
+    assert cfg["train"]["evaluation_interval"] == 5_000
+    assert cfg["train"]["checkpoint_interval"] == 10_000
 
 
 def test_two_gpu_batch_preserves_tc18_optimizer_exposure():

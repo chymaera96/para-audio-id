@@ -12,5 +12,5 @@ __pycache__/
 # notebooks and figures
 *.ipynb_checkpoints
 *ipynb
-*png
-*pdf
+*.png
+*.pdf

@@ -7,3 +7,10 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+
+
+# notebooks and figures
+*.ipynb_checkpoints
+*ipynb
+*png
+*pdf

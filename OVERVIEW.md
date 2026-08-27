@@ -450,6 +450,24 @@ identities and 160 documents, so this is an execution optimization rather than
 a different experiment. The resolved layout is checkpointed and must match on
 resume.
 
+## `scale`: 100K medium throughput profile
+
+The `scale` branch fixes the 100K GPT-2-medium experiment to the batch selected
+by the high-memory-GPU probe: 16 identities and 32 documents per GPU, exactly
+four GPUs, and accumulation one. This gives 64 identities and 128 documents per
+optimizer update. The fastest safe measured candidate processed 71.06
+documents/s with 16.72% peak memory headroom; 20 identities per GPU OOMed.
+
+To preserve the intended 72 million identity selections, the smaller global
+batch produces a 1,125,000-step run. Exposure-equivalent corruption boundaries
+are 50K/150K/300K, distillation boundaries are 75K/150K, and the post-warm-up
+LR hold/linear boundaries are 300K/700K.
+Warm-up remains 500 steps, monitoring runs every 5K, and checkpoints every 10K.
+The query, eight-codebook representation, loss, augmentations, and W&B names
+remain unchanged from tc18. Only an exact
+`scale_100k_medium_4gpu_eight_codebook_v1`
+checkpoint may resume training; historical tc18 checkpoints remain evaluable.
+
 ## Unified training profiles
 
 The active `stable` branch runs tc18 with a small or medium causal decoder, a

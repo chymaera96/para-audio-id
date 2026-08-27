@@ -79,18 +79,14 @@ python prepare_training_cohort.py configs/fma_large.yaml \
 
 ## Training
 
-The default causal LM is a randomly initialized 12-layer GPT-2-style decoder with
-hidden size 768 and 12 heads. `--decoder medium` selects the capacity-series
-profile with 24 layers, hidden size 1024, and 16 heads. Both use tied embeddings
-and no dropout. The vocabulary has
-8,192 codebook-separated audio tokens, `[BOS]`, `[ID]`, ten dedicated digit tokens,
-and `[EOS]`.
+The `scale` branch is a fixed 100K-track GPT-2-medium throughput experiment. The
+decoder has 24 layers, hidden size 1024, 16 heads, tied embeddings, and zero
+dropout. Two-second crops use all eight MuQ codebooks, producing 400 audio
+tokens, 408-token causal documents, and an 8,205-entry vocabulary.
 
-Training samples online two-second crops from the selected 25K or 100K cohort. Each
-identity contributes a clean anchor and one secondary view: a distinct clean
-crop, an exact same-crop background-noise view, an exact same-crop room-reverb
-view, or the combined noise-then-reverb view. One frozen lightweight MuQ call
-tokenizes all 80 final waveforms in each physical microbatch.
+Each identity contributes a clean anchor and either a distinct clean crop or an
+exact same-crop noise, room-reverb, or noise-then-reverb view. The causal and
+temperature-2 identifier-logit distillation objectives are unchanged from tc18:
 
 ```text
 loss =
@@ -102,106 +98,45 @@ loss =
     + lambda_KD * identifier-logit distillation
 ```
 
-For every degraded secondary, tc18 uses its clean anchor as a stop-gradient
+For every degraded secondary, the clean anchor is a stop-gradient
 teacher at the five causal positions that predict the next identifier digit.
 The KL divergence is computed only over the ten digit-token logits with
 temperature 2. This uses the existing single decoder pass and adds no model
 parameters or inference-time modules. The causal coefficients are approximately
 0.709 audio, 0.284 digits, and 0.007 boundaries with identifier
-weight 32. Checkpoints record `tc18_two_second_eight_codebook_logit_distillation_v1`.
+weight 32. The 512-position table remains sufficient. The training protocol is
+`scale_100k_medium_4gpu_eight_codebook_v1`; its base loss protocol remains tc18.
 
-Eight codebooks produce 400 audio tokens and a 408-token complete causal
-document. The existing 512-position table is retained: the inference prompt is
-402 tokens before the five generated digits, so no context expansion is needed.
+The memory probe selected 16 tracks (32 documents) per GPU. Production training
+therefore requires exactly four GPUs and accumulation one, for a global update
+of 64 identities and 128 documents. The run preserves 72 million identity
+selections, so it lasts 1,125,000 optimizer updates.
 
-For 25K, the secondary-view curriculum remains identical to tc15–tc17:
+All exposure-dependent boundaries are scaled by `ceil(reference_step × 80 / 64)`:
 
-| Raw steps | Clean | Noise | RIR | Noise + RIR | RIR severity |
-| ---: | ---: | ---: | ---: | ---: | ---: |
-| 0–10K | 1.00 | 0 | 0 | 0 | disabled |
-| 10–30K | 1.00 → 0.40 | 0 → 0.30 | 0 → 0.30 | 0 | mild → moderate |
-| 30–60K | 0.40 → 0.10 | 0.30 → 0.35 | 0.30 | 0 → 0.25 | expand to full range |
-| 60–225K | 0.10 | 0.35 | 0.30 | 0.25 | full range |
+- corruption boundaries: 50K, 150K, and 300K;
+- distillation boundaries: 75K and 150K;
+- LR hold and linear-decay boundaries: 300K and 700K.
 
-The distillation weight is zero through 15K, ramps to its configured maximum
-over 15K–30K, and then remains fixed. Its maximum defaults to 0.1 and can be
-set to zero for the matched no-distillation ablation.
-RIR severity is ranked by post-peak 99%-energy decay duration. The eligible
-training pool expands from its mildest third, through two thirds at 30K, to all
-IRs at 60K. Convolution remains full-wet at every severity.
-
-Noisy examples use fixed SNR-bin probabilities `0.40/0.30/0.20/0.10` for
-`0–5/5–10/10–20/20–30 dB`; 10% of noisy views are exactly 0 dB. The LR uses
-the same schedule: linear warm-up over 500 steps to `3e-4`, hold through 60K,
-linear decay to `1.5e-4` at 140K, then cosine decay to `1.5e-5` at 225K.
-
-The single-GPU logical batch is 80 tracks × 2 segments: a physical microbatch of
-40 tracks × two segments with two gradient-accumulation steps. Each
-microbatch contains 32,000 audio targets and 160 seconds of waveform; each
-optimizer update contains 64,000 audio targets and 320 seconds of waveform.
-
-With the small decoder, `--devices 2` uses DDP with 40 tracks per GPU and no
-gradient accumulation. The medium decoder requires two GPUs and uses 10 tracks
-per GPU with four gradient-accumulation steps. Both layouts form exactly the same
-global 80-track/160-document optimizer batch. The medium layout quarters the
-original per-GPU physical batch to control memory. Losses are averaged across ranks, so
-the scientific batch, number of optimizer steps, curriculum, and LR schedule
-are unchanged. Checkpoints embed the complete device layout; resume must use it.
+Warm-up remains 500 optimizer steps. Monitoring runs every 5K steps and
+checkpoints are saved every 10K steps. RIR remains full-wet with two seconds of
+preceding context, and all W&B metric names are unchanged.
 
 RIR uses full-wet causal convolution with two seconds of preceding audio;
 the prefix is discarded after convolution so reverberant tails from preceding
 music enter the query. Room IR train/test assets are source- and content-disjoint.
 
-tc18 runs for 225K optimizer steps. On the `scale` branch, checkpoints run every
-10,000 steps and monitoring runs every 5,000 steps. The same seeded 100-track cohort is
-evaluated using one balanced canonical, integer-shifted, and held-out
-half-offset crop per track. All three groups are evaluated clean and at
-0/5/10/20/30 dB at step zero, every 5,000 steps, and at completion. Evaluation
-crops are two seconds long and are decoded and tokenized online; training still has
-no runtime token-store dependency. W&B preserves the causal metrics and adds
-only the epoch-level distillation loss, alongside aggregate RIR-only and
-noise+RIR beam Top-1. Complete beam
-Top-1/5/10 and MRR results are appended to `probe_metrics.jsonl`.
-
-The 100K profile preserves the same average exposure per identity by scaling
-all exposure-dependent boundaries by four. It runs for 900K steps: corruption
-boundaries become 40K/120K/240K, distillation boundaries become 60K/120K,
-and the LR hold/linear-decay boundaries become 240K/560K. Warm-up remains 500
-steps; the `scale` checkpoint and monitoring intervals are 10K and 5K.
-
-```bash
-python train.py configs/fma_large.yaml \
-  --decoder small \
-  --schedule noise-rir \
-  --codebooks 8 \
-  --distillation-weight 0.1 \
-  --run-id tc18 \
-  --devices 1 \
-  --wandb-online
-```
-
-For the 100K run, add `--database-size 100000` and use a distinct run ID:
-
 ```bash
 python train.py configs/fma_large.yaml \
   --database-size 100000 \
-  --decoder small \
+  --decoder medium \
   --schedule noise-rir \
   --codebooks 8 \
   --distillation-weight 0.1 \
-  --run-id tc18-100k \
-  --devices 1 \
+  --run-id scale-100k-medium \
+  --devices 4 \
   --wandb-online
 ```
-
-Use `--decoder medium` for the matched larger-decoder run. Decoder dimensions
-are embedded in checkpoints; an omitted decoder on resume inherits the saved
-profile, while an explicit small/medium mismatch is rejected.
-
-For a small-decoder two-GPU run, change only `--devices 1` to `--devices 2`.
-The medium decoder must be launched with `--devices 2`. The SLURM allocation
-must expose two GPUs to one launcher task; do not launch two separate copies of
-`train.py`.
 
 To measure a safe medium per-GPU microbatch on a one-GPU OnDemand node, run:
 
@@ -209,19 +144,10 @@ To measure a safe medium per-GPU microbatch on a one-GPU OnDemand node, run:
 python probe_medium_memory.py configs/fma_large.yaml
 ```
 
-The disposable probe keeps lightweight MuQ and a DDP-wrapped medium decoder on
-the GPU, allocates AdamW state during two warm-up updates, then times three BF16
-updates for each of `10,12,16,20,24,28,32,36,40` tracks per GPU. It reports
-steady-state throughput and recommends the fastest candidate retaining at least
-10% peak memory headroom. It creates no checkpoints or W&B run. After the probe,
-the selected physical batch will be fixed in the `scale` training profile.
-
-This branch accepts `--decoder small` or `--decoder medium`, `--schedule noise-rir`,
-`--codebooks 8`, database sizes 25K or 100K, and one or two devices. The resolved tc18 profile,
-database size, manifest, scaled boundaries, decoder-specific microbatch, and
-distillation maximum are
-embedded in every checkpoint. Use `--distillation-weight 0.0` for the matched
-ablation.
+The probe measured 71.06 documents/s and 16.72% peak headroom at the selected
+16-track layout; 20 tracks per GPU ran out of memory. The probe creates no
+checkpoints or W&B run. Production batch controls are deliberately not exposed
+through the CLI. Use `--distillation-weight 0.0` for the matched ablation.
 
 The only new W&B key is `train/distillation_loss_epoch`; it remains available
 when the configured optimization weight is zero.
@@ -231,8 +157,8 @@ state:
 
 ```bash
 python train.py configs/fma_large.yaml \
-  --devices 1 \
-  --run-id tc18 \
+  --devices 4 \
+  --run-id scale-100k-medium \
   --wandb-online \
   --resume
 ```
@@ -249,8 +175,8 @@ Checkpoints are written every 10,000 optimizer steps under:
 Checkpoints embed the vocabulary, exact cohort, resolved profile, random-crop and replacement
 policies, fixed monitor manifest, noise/tokenizer fingerprints, sampler state,
 RNG state, query specification, and code mapping. Resume is accepted only for
-compatible tc18 checkpoints. Backward compatibility with earlier experiments
-is intentionally not provided on this trial branch.
+compatible scale checkpoints. Historical tc18 checkpoints remain loadable for
+evaluation but cannot resume this training profile.
 
 PyTorch deterministic algorithms and seeded Python, NumPy, Torch, samplers, and
 workers are enabled. `deterministic_warn_only: true` reports CUDA operations for

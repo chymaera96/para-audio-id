@@ -179,7 +179,7 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
             "gradient_clip_norm": 1.0,
             "schedule": {
                 "name": "noise-rir",
-                "protocol": "tc18_two_second_eight_codebook_logit_distillation_v1",
+                "protocol": "scale_100k_medium_4gpu_eight_codebook_v1",
                 "loss_protocol": "tc18_two_second_eight_codebook_logit_distillation_v1",
                 "curriculum": "tc12_noise_rir_curriculum_v1",
                 "clean_until_step": 10_000,
@@ -193,7 +193,7 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
         },
         "resolved_training_profile": {
             "version": 9,
-            "variant": "tc18-two-second-eight-codebook-logit-distillation",
+            "variant": "scale-100k-medium-4gpu-eight-codebook-throughput",
             "database_size": 40,
             "training_tracks_manifest": str(manifest),
             "decoder": {
@@ -204,7 +204,7 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
             },
             "schedule": {
                 "name": "noise-rir",
-                "protocol": "tc18_two_second_eight_codebook_logit_distillation_v1",
+                "protocol": "scale_100k_medium_4gpu_eight_codebook_v1",
                 "loss_protocol": "tc18_two_second_eight_codebook_logit_distillation_v1",
                 "max_steps": 2,
                 "curriculum": "tc12_noise_rir_curriculum_v1",
@@ -254,7 +254,7 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
     assert checkpoint["global_step"] == 2
     assert (
         checkpoint["training_protocol"]
-        == "tc18_two_second_eight_codebook_logit_distillation_v1"
+        == "scale_100k_medium_4gpu_eight_codebook_v1"
     )
     assert (
         checkpoint["loss_protocol"]

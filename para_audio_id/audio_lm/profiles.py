@@ -10,14 +10,17 @@ from typing import Any
 import torch
 
 
-SUPPORTED_DATABASE_SIZES = (25_000, 100_000)
-REFERENCE_DATABASE_SIZE = 25_000
-SUPPORTED_DEVICE_COUNTS = (1, 2)
-GLOBAL_TRACKS_PER_OPTIMIZER_STEP = 80
-TRACKS_PER_DEVICE_MICROBATCH = {
-    "small": 40,
-    "medium": 10,
-}
+SUPPORTED_DATABASE_SIZES = (100_000,)
+REFERENCE_GLOBAL_TRACKS_PER_OPTIMIZER_STEP = 80
+SCALE_WORLD_SIZE = 4
+SCALE_TRACKS_PER_DEVICE_MICROBATCH = 16
+SCALE_ACCUMULATE_GRAD_BATCHES = 1
+SCALE_GLOBAL_TRACKS_PER_OPTIMIZER_STEP = (
+    SCALE_WORLD_SIZE * SCALE_TRACKS_PER_DEVICE_MICROBATCH * SCALE_ACCUMULATE_GRAD_BATCHES
+)
+SCALE_TARGET_TRACK_SELECTIONS = 72_000_000
+SCALE_MONITOR_INTERVAL = 5_000
+SCALE_CHECKPOINT_INTERVAL = 10_000
 DECODER_PROFILES = {
     "small": {"num_layers": 12, "hidden_size": 768, "num_attention_heads": 12},
     "medium": {
@@ -30,8 +33,10 @@ SCHEDULE_NAMES = ("noise-rir",)
 SUPPORTED_SELECTED_CODEBOOKS = (8,)
 TC18_ID_DIGIT_WEIGHT = 32.0
 DEFAULT_DISTILLATION_WEIGHT = 0.10
-NEW_TRAINING_PROTOCOL = "tc18_two_second_eight_codebook_logit_distillation_v1"
-LOSS_PROTOCOL = NEW_TRAINING_PROTOCOL
+NEW_TRAINING_PROTOCOL = "scale_100k_medium_4gpu_eight_codebook_v1"
+LOSS_PROTOCOL = "tc18_two_second_eight_codebook_logit_distillation_v1"
+SCALE_VARIANT = "scale-100k-medium-4gpu-eight-codebook-throughput"
+TC18_VARIANT = "tc18-two-second-eight-codebook-logit-distillation"
 TC12_CURRICULUM = "tc12_noise_rir_curriculum_v1"
 TC18_LR_POLICY = "tc18_warmup_hold_linear_cosine_v1"
 
@@ -88,40 +93,39 @@ def validate_cohort_manifest(path: str | Path, records, expected_count: int) -> 
     return track_ids
 
 
-def _scaled(value: int, database_size: int) -> int:
-    if database_size not in SUPPORTED_DATABASE_SIZES:
-        raise ValueError(
-            f"database_size must be one of {SUPPORTED_DATABASE_SIZES}, "
-            f"got {database_size}"
-        )
-    return value * database_size // REFERENCE_DATABASE_SIZE
+def _exposure_scaled(reference_step: int) -> int:
+    return math.ceil(
+        reference_step
+        * REFERENCE_GLOBAL_TRACKS_PER_OPTIMIZER_STEP
+        / SCALE_GLOBAL_TRACKS_PER_OPTIMIZER_STEP
+    )
 
 
 def schedule_profile(name: str, database_size: int) -> dict[str, Any]:
     if name not in SCHEDULE_NAMES:
         raise ValueError(f"schedule must be one of {SCHEDULE_NAMES}, got {name!r}")
+    if database_size != 100_000:
+        raise ValueError("scale schedule requires database_size=100000")
     common = {
         "name": name,
         "protocol": NEW_TRAINING_PROTOCOL,
         "loss_protocol": LOSS_PROTOCOL,
-        "max_steps": _scaled(225_000, database_size),
+        "max_steps": _exposure_scaled(900_000),
         "snr_bin_probabilities": [0.40, 0.30, 0.20, 0.10],
         "exact_zero_fraction_in_first_bin": 0.25,
     }
     return {
         **common,
         "curriculum": TC12_CURRICULUM,
-        "clean_until_step": _scaled(10_000, database_size),
-        "degradation_ramp_until_step": _scaled(30_000, database_size),
-        "combined_ramp_until_step": _scaled(60_000, database_size),
+        "clean_until_step": _exposure_scaled(40_000),
+        "degradation_ramp_until_step": _exposure_scaled(120_000),
+        "combined_ramp_until_step": _exposure_scaled(240_000),
     }
 
 
 def decoder_profile(name: str) -> dict[str, Any]:
     if name not in DECODER_PROFILES:
-        raise ValueError(
-            f"decoder must be one of {tuple(DECODER_PROFILES)}, got {name!r}"
-        )
+        raise ValueError(f"decoder must be one of {tuple(DECODER_PROFILES)}, got {name!r}")
     return {"name": name, **DECODER_PROFILES[name]}
 
 
@@ -132,53 +136,46 @@ def canonical_training_profile(
     schedule: str,
     selected_codebooks: int = 8,
     distillation_weight: float = DEFAULT_DISTILLATION_WEIGHT,
-    devices: int = 1,
+    devices: int = SCALE_WORLD_SIZE,
 ) -> dict[str, Any]:
-    if database_size not in SUPPORTED_DATABASE_SIZES:
-        raise ValueError(
-            f"tc18 requires database_size in {SUPPORTED_DATABASE_SIZES}"
-        )
-    if decoder not in DECODER_PROFILES:
-        raise ValueError(
-            f"tc18 decoder must be one of {tuple(DECODER_PROFILES)}, got {decoder!r}"
-        )
+    if database_size != 100_000:
+        raise ValueError("scale requires database_size=100000")
+    if decoder != "medium":
+        raise ValueError("scale requires the medium decoder")
     if schedule != "noise-rir":
-        raise ValueError(
-            "tc18 requires the noise-rir schedule"
-        )
+        raise ValueError("scale requires the noise-rir schedule")
     if selected_codebooks != 8:
-        raise ValueError("tc18 requires all eight MuQ codebooks")
+        raise ValueError("scale requires all eight MuQ codebooks")
     if not math.isfinite(distillation_weight) or distillation_weight < 0:
         raise ValueError("distillation_weight must be finite and non-negative")
-    if devices not in SUPPORTED_DEVICE_COUNTS:
-        raise ValueError(
-            f"tc18 devices must be one of {SUPPORTED_DEVICE_COUNTS}, got {devices}"
-        )
-    if decoder == "medium" and devices != 2:
-        raise ValueError("tc18 medium decoder requires exactly 2 devices")
-    tracks_per_device = TRACKS_PER_DEVICE_MICROBATCH[decoder]
-    distributed_microbatch = tracks_per_device * devices
-    if GLOBAL_TRACKS_PER_OPTIMIZER_STEP % distributed_microbatch:
-        raise ValueError(
-            "tc18 parallelism must divide the global 80-track optimizer batch"
-        )
-    accumulation = GLOBAL_TRACKS_PER_OPTIMIZER_STEP // (
-        tracks_per_device * devices
-    )
+    if devices != SCALE_WORLD_SIZE:
+        raise ValueError("scale requires exactly 4 devices")
     profile = {
-        "version": 10,
-        "variant": "tc18-two-second-eight-codebook-logit-distillation",
+        "version": 11,
+        "variant": SCALE_VARIANT,
         "database_size": database_size,
         "training_tracks_manifest": cohort_manifest(database_size),
         "decoder": decoder_profile(decoder),
         "parallelism": {
-            "protocol": "tc18_ddp_global_80_tracks_v1",
-            "world_size": devices,
-            "tracks_per_device_microbatch": tracks_per_device,
-            "accumulate_grad_batches": accumulation,
-            "global_tracks_per_optimizer_step": (
-                tracks_per_device * accumulation * devices
+            "protocol": "scale_probe_fixed_16_per_gpu_4rank_v1",
+            "world_size": SCALE_WORLD_SIZE,
+            "tracks_per_device_microbatch": SCALE_TRACKS_PER_DEVICE_MICROBATCH,
+            "documents_per_device_microbatch": 32,
+            "accumulate_grad_batches": SCALE_ACCUMULATE_GRAD_BATCHES,
+            "global_tracks_per_optimizer_step": (SCALE_GLOBAL_TRACKS_PER_OPTIMIZER_STEP),
+            "global_documents_per_optimizer_step": 128,
+        },
+        "exposure_budget": {
+            "target_track_selections": SCALE_TARGET_TRACK_SELECTIONS,
+            "reference_global_tracks_per_optimizer_step": (
+                REFERENCE_GLOBAL_TRACKS_PER_OPTIMIZER_STEP
             ),
+            "resolved_global_tracks_per_optimizer_step": (SCALE_GLOBAL_TRACKS_PER_OPTIMIZER_STEP),
+            "scaling": "ceil(reference_step * 80 / 64)",
+        },
+        "operational_intervals": {
+            "monitor_steps": SCALE_MONITOR_INTERVAL,
+            "checkpoint_steps": SCALE_CHECKPOINT_INTERVAL,
         },
         "schedule": schedule_profile(schedule, database_size),
         "distillation": {
@@ -186,8 +183,8 @@ def canonical_training_profile(
             "temperature": 2.0,
             "maximum_weight": float(distillation_weight),
             "weight_schedule": {
-                "zero_until_step": _scaled(15_000, database_size),
-                "ramp_until_step": _scaled(30_000, database_size),
+                "zero_until_step": _exposure_scaled(60_000),
+                "ramp_until_step": _exposure_scaled(120_000),
             },
             "target_positions": "five_next_identifier_digits",
             "vocabulary_scope": "digit_tokens_only",
@@ -197,8 +194,8 @@ def canonical_training_profile(
     profile["learning_rate_schedule"] = {
         "policy": TC18_LR_POLICY,
         "warmup_steps": 500,
-        "hold_until_step": _scaled(60_000, database_size),
-        "linear_decay_until_step": _scaled(140_000, database_size),
+        "hold_until_step": _exposure_scaled(240_000),
+        "linear_decay_until_step": _exposure_scaled(560_000),
         "final_learning_rate_ratio": 0.05,
     }
     return profile
@@ -206,15 +203,8 @@ def canonical_training_profile(
 
 def historical_checkpoint_profile(checkpoint: dict) -> dict[str, Any]:
     stored = checkpoint.get("resolved_training_profile")
-    if (
-        stored is None
-        or stored.get("variant")
-        != "tc18-two-second-eight-codebook-logit-distillation"
-    ):
-        raise ValueError(
-            "Only tc18 two-second eight-codebook checkpoints can be "
-            "resumed on this branch"
-        )
+    if stored is None or stored.get("variant") not in {SCALE_VARIANT, TC18_VARIANT}:
+        raise ValueError("Only scale or tc18 two-second eight-codebook checkpoints are supported")
     return stored
 
 
@@ -224,9 +214,9 @@ def checkpoint_training_profile(path: str | Path) -> dict[str, Any]:
 
 
 def _checkpoint_query_profile(checkpoint: dict[str, Any]) -> dict[str, Any] | None:
-    tokenizer = checkpoint.get("tokenizer_spec") or checkpoint.get(
-        "hyper_parameters", {}
-    ).get("tokenizer", {})
+    tokenizer = checkpoint.get("tokenizer_spec") or checkpoint.get("hyper_parameters", {}).get(
+        "tokenizer", {}
+    )
     selected = tokenizer.get("selected_codebooks")
     if selected is None:
         return None
@@ -236,9 +226,7 @@ def _checkpoint_query_profile(checkpoint: dict[str, Any]) -> dict[str, Any] | No
     weight = float(
         query.get(
             "id_digit_weight",
-            train.get(
-                "id_digit_weight", TC18_ID_DIGIT_WEIGHT
-            ),
+            train.get("id_digit_weight", TC18_ID_DIGIT_WEIGHT),
         )
     )
     return {
@@ -276,9 +264,7 @@ def resolve_training_config(
         raise ValueError("distillation_weight must be finite and non-negative")
     cfg = deepcopy(config)
     data = cfg.setdefault("data", {})
-    configured_database_size = int(
-        data.get("database_size", data.get("max_training_tracks", 0))
-    )
+    configured_database_size = int(data.get("database_size", data.get("max_training_tracks", 0)))
     if database_size is not None:
         configured_database_size = int(database_size)
     checkpoint_payload = (
@@ -292,73 +278,54 @@ def resolve_training_config(
         else None
     )
     if resumed is not None:
-        checkpoint_database_size = int(resumed["database_size"])
-        if (
-            database_size is not None
-            and int(database_size) != checkpoint_database_size
-        ):
+        if resumed.get("variant") != SCALE_VARIANT:
             raise ValueError(
-                "Explicit database size does not match resume checkpoint"
+                "Only checkpoints from the fixed scale profile can resume training; "
+                "historical tc18 checkpoints remain evaluation-only"
             )
+        checkpoint_database_size = int(resumed["database_size"])
+        if database_size is not None and int(database_size) != checkpoint_database_size:
+            raise ValueError("Explicit database size does not match resume checkpoint")
         resolved_database_size = checkpoint_database_size
-        saved_parallelism = resumed.get("parallelism") or {
-            "protocol": "tc18_ddp_global_80_tracks_v1",
-            "world_size": 1,
-            "tracks_per_device_microbatch": 40,
-            "accumulate_grad_batches": 2,
-            "global_tracks_per_optimizer_step": 80,
-        }
+        saved_parallelism = resumed["parallelism"]
         saved_devices = int(saved_parallelism["world_size"])
         if devices is not None and int(devices) != saved_devices:
-            raise ValueError(
-                "Explicit device count does not match resume checkpoint"
-            )
+            raise ValueError("Explicit device count does not match resume checkpoint")
         resolved_devices = saved_devices
         resolved_decoder = resumed["decoder"]["name"] if decoder is None else decoder
         resolved_schedule = resumed["schedule"]["name"] if schedule is None else schedule
-        if resumed["decoder"]["name"] == "medium" and (
-            saved_devices != 2
-            or int(saved_parallelism["tracks_per_device_microbatch"]) != 10
-            or int(saved_parallelism["accumulate_grad_batches"]) != 4
+        if (
+            saved_devices != SCALE_WORLD_SIZE
+            or int(saved_parallelism["tracks_per_device_microbatch"])
+            != SCALE_TRACKS_PER_DEVICE_MICROBATCH
+            or int(saved_parallelism["accumulate_grad_batches"]) != SCALE_ACCUMULATE_GRAD_BATCHES
         ):
             raise ValueError(
-                "Resume checkpoint uses the obsolete medium batch layout; "
-                "tc18 medium requires 2 devices, 10 tracks per device, and "
-                "4 accumulation steps"
+                "Resume checkpoint does not use the fixed scale layout: "
+                "4 devices, 16 tracks per device, accumulation 1"
             )
     else:
         resolved_database_size = configured_database_size
         resolved_devices = int(
             devices
             if devices is not None
-            else cfg.setdefault("trainer", {}).get("devices", 1)
+            else cfg.setdefault("trainer", {}).get("devices", SCALE_WORLD_SIZE)
         )
-        resolved_decoder = decoder or "small"
+        resolved_decoder = decoder or "medium"
         resolved_schedule = schedule or "noise-rir"
     if resumed is not None:
         if resolved_decoder != resumed["decoder"]["name"] or (
             resolved_schedule != resumed["schedule"]["name"]
         ):
             raise ValueError("Explicit training profile does not match resume checkpoint")
-        saved_distillation_weight = float(
-            resumed["distillation"]["maximum_weight"]
-        )
-        if (
-            distillation_weight is not None
-            and distillation_weight != saved_distillation_weight
-        ):
-            raise ValueError(
-                "Explicit distillation weight does not match resume checkpoint"
-            )
+        saved_distillation_weight = float(resumed["distillation"]["maximum_weight"])
+        if distillation_weight is not None and distillation_weight != saved_distillation_weight:
+            raise ValueError("Explicit distillation weight does not match resume checkpoint")
         profile = deepcopy(resumed)
     else:
-        configured_codebooks = int(
-            cfg.setdefault("tokenizer", {}).get("selected_codebooks", 8)
-        )
+        configured_codebooks = int(cfg.setdefault("tokenizer", {}).get("selected_codebooks", 8))
         profile_codebooks = (
-            selected_codebooks
-            if selected_codebooks is not None
-            else configured_codebooks
+            selected_codebooks if selected_codebooks is not None else configured_codebooks
         )
         profile = canonical_training_profile(
             database_size=resolved_database_size,
@@ -379,30 +346,19 @@ def resolve_training_config(
 
     tokenizer = cfg.setdefault("tokenizer", {})
     checkpoint_query = (
-        _checkpoint_query_profile(checkpoint_payload)
-        if checkpoint_payload is not None
-        else None
+        _checkpoint_query_profile(checkpoint_payload) if checkpoint_payload is not None else None
     )
     if checkpoint_query is not None:
         checkpoint_codebooks = int(checkpoint_query["selected_codebooks"])
-        if (
-            selected_codebooks is not None
-            and selected_codebooks != checkpoint_codebooks
-        ):
-            raise ValueError(
-                "Explicit codebook selection does not match resume checkpoint"
-            )
+        if selected_codebooks is not None and selected_codebooks != checkpoint_codebooks:
+            raise ValueError("Explicit codebook selection does not match resume checkpoint")
         query_profile = resolve_query_profile(checkpoint_codebooks)
         if checkpoint_query != query_profile:
-            raise ValueError(
-                "Resume checkpoint has an incompatible codebook/loss profile"
-            )
+            raise ValueError("Resume checkpoint has an incompatible codebook/loss profile")
     else:
         configured_codebooks = int(tokenizer.get("selected_codebooks", 8))
         query_profile = resolve_query_profile(
-            selected_codebooks
-            if selected_codebooks is not None
-            else configured_codebooks
+            selected_codebooks if selected_codebooks is not None else configured_codebooks
         )
     tokenizer["selected_codebooks"] = query_profile["selected_codebooks"]
 
@@ -427,24 +383,22 @@ def resolve_training_config(
         key: value for key, value in profile["schedule"].items() if key != "max_steps"
     }
     train["distillation"] = deepcopy(profile["distillation"])
+    intervals = profile.get("operational_intervals")
+    if intervals is not None:
+        train["evaluation_interval"] = int(intervals["monitor_steps"])
+        train["checkpoint_interval"] = int(intervals["checkpoint_steps"])
     parallelism = profile.get("parallelism") or saved_parallelism
-    train["tracks_per_microbatch"] = int(
-        parallelism["tracks_per_device_microbatch"]
-    )
+    train["tracks_per_microbatch"] = int(parallelism["tracks_per_device_microbatch"])
     trainer = cfg.setdefault("trainer", {})
     trainer["devices"] = int(parallelism["world_size"])
     trainer["strategy"] = "auto"
-    trainer["accumulate_grad_batches"] = int(
-        parallelism["accumulate_grad_batches"]
-    )
+    trainer["accumulate_grad_batches"] = int(parallelism["accumulate_grad_batches"])
     lr_profile = profile.get("learning_rate_schedule")
     if lr_profile is not None:
         train["warmup_steps"] = int(lr_profile["warmup_steps"])
         train["learning_rate_schedule"] = deepcopy(lr_profile)
     elif checkpoint_payload is not None:
-        historical_train = checkpoint_payload.get("hyper_parameters", {}).get(
-            "train", {}
-        )
+        historical_train = checkpoint_payload.get("hyper_parameters", {}).get("train", {})
         train["warmup_steps"] = int(
             historical_train.get("warmup_steps", train.get("warmup_steps", 200))
         )

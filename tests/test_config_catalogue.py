@@ -30,9 +30,9 @@ def test_primary_config_is_audio_lm_and_matches_logical_batch():
     physical_documents = (
         cfg["train"]["tracks_per_microbatch"] * cfg["train"]["segments_per_track"]
     )
-    assert physical_documents == 80
-    assert physical_documents * cfg["trainer"]["accumulate_grad_batches"] == 160
-    assert cfg["train"]["tracks_per_microbatch"] == 40
+    assert physical_documents == 32
+    assert physical_documents * cfg["trainer"]["accumulate_grad_batches"] == 32
+    assert cfg["train"]["tracks_per_microbatch"] == 16
     assert cfg["train"]["deterministic"]
     assert cfg["data"]["segment_duration"] == 2.0
     assert cfg["tokenizer"]["sample_rate"] * cfg["data"]["segment_duration"] == 48_000
@@ -41,15 +41,15 @@ def test_primary_config_is_audio_lm_and_matches_logical_batch():
         "selected_codebooks": 8,
         "id_digit_weight": 32.0,
     }
-    assert cfg["data"]["max_training_tracks"] == 25_000
-    assert cfg["train"]["max_steps"] == 225_000
+    assert cfg["data"]["max_training_tracks"] == 100_000
+    assert cfg["train"]["max_steps"] == 1_125_000
     assert cfg["train"]["warmup_steps"] == 500
     assert cfg["train"]["evaluation_interval"] == 5_000
     assert cfg["train"]["checkpoint_interval"] == 10_000
-    assert cfg["resolved_training_profile"]["decoder"]["name"] == "small"
+    assert cfg["resolved_training_profile"]["decoder"]["name"] == "medium"
     assert (
         cfg["resolved_training_profile"]["variant"]
-        == "tc18-two-second-eight-codebook-logit-distillation"
+        == "scale-100k-medium-4gpu-eight-codebook-throughput"
     )
     assert (
         cfg["train"]["distillation"]["protocol"]
@@ -61,9 +61,9 @@ def test_primary_config_is_audio_lm_and_matches_logical_batch():
         cfg["train"]["schedule"]["loss_protocol"]
         == "tc18_two_second_eight_codebook_logit_distillation_v1"
     )
-    assert cfg["train"]["schedule"]["clean_until_step"] == 10_000
-    assert cfg["train"]["schedule"]["degradation_ramp_until_step"] == 30_000
-    assert cfg["train"]["schedule"]["combined_ramp_until_step"] == 60_000
+    assert cfg["train"]["schedule"]["clean_until_step"] == 50_000
+    assert cfg["train"]["schedule"]["degradation_ramp_until_step"] == 150_000
+    assert cfg["train"]["schedule"]["combined_ramp_until_step"] == 300_000
     assert cfg["evaluation"]["monitor_tracks"] == 100
     assert cfg["evaluation"]["noise_snr_db"] == [0, 5, 10, 20, 30]
     assert cfg["data"]["background_noise"]["training_root"].endswith(
@@ -93,18 +93,18 @@ def test_100k_override_selects_existing_size_specific_manifest():
     assert cfg["data"]["training_tracks_manifest"] == (
         "data/training_tracks_100k.json"
     )
-    assert cfg["train"]["max_steps"] == 900_000
+    assert cfg["train"]["max_steps"] == 1_125_000
     assert cfg["train"]["evaluation_interval"] == 5_000
     assert cfg["train"]["checkpoint_interval"] == 10_000
 
 
-def test_two_gpu_batch_preserves_tc18_optimizer_exposure():
+def test_four_gpu_batch_uses_probe_selected_scale_layout():
     cfg = resolve_training_config(
         yaml.safe_load(
             (Path(__file__).parents[1] / "configs" / "fma_large.yaml").read_text()
         ),
         database_size=100_000,
-        devices=2,
+        devices=4,
     )
     tokenizer_spec = TokenizerSpec(
         architecture="muq_mel_rvq",
@@ -124,22 +124,22 @@ def test_two_gpu_batch_preserves_tc18_optimizer_exposure():
         cfg, tokenizer_spec, AudioLMVocabulary(num_codebooks=8)
     )
     batch = validate_tc18_batch_configuration(cfg, query)
-    assert batch["tracks_per_microbatch"] == 40
+    assert batch["tracks_per_microbatch"] == 16
     assert batch["gradient_accumulation_steps"] == 1
-    assert batch["tracks_per_optimizer_step"] == 80
-    assert batch["documents_per_optimizer_step"] == 160
-    assert batch["audio_targets_per_optimizer_step"] == 64_000
-    assert batch["waveform_seconds_per_optimizer_step"] == 320.0
+    assert batch["tracks_per_optimizer_step"] == 64
+    assert batch["documents_per_optimizer_step"] == 128
+    assert batch["audio_targets_per_optimizer_step"] == 51_200
+    assert batch["waveform_seconds_per_optimizer_step"] == 256.0
 
 
-def test_medium_two_gpu_batch_reduces_per_device_memory_and_preserves_exposure():
+def test_medium_four_gpu_batch_is_fixed_not_cli_tunable():
     cfg = resolve_training_config(
         yaml.safe_load(
             (Path(__file__).parents[1] / "configs" / "fma_large.yaml").read_text()
         ),
         database_size=100_000,
         decoder="medium",
-        devices=2,
+        devices=4,
     )
     tokenizer_spec = TokenizerSpec(
         architecture="muq_mel_rvq",
@@ -159,13 +159,13 @@ def test_medium_two_gpu_batch_reduces_per_device_memory_and_preserves_exposure()
         cfg, tokenizer_spec, AudioLMVocabulary(num_codebooks=8)
     )
     batch = validate_tc18_batch_configuration(cfg, query)
-    assert batch["tracks_per_microbatch"] == 10
-    assert batch["documents_per_microbatch"] == 20
-    assert batch["gradient_accumulation_steps"] == 4
-    assert batch["tracks_per_optimizer_step"] == 80
-    assert batch["documents_per_optimizer_step"] == 160
-    assert batch["audio_targets_per_optimizer_step"] == 64_000
-    assert batch["waveform_seconds_per_optimizer_step"] == 320.0
+    assert batch["tracks_per_microbatch"] == 16
+    assert batch["documents_per_microbatch"] == 32
+    assert batch["gradient_accumulation_steps"] == 1
+    assert batch["tracks_per_optimizer_step"] == 64
+    assert batch["documents_per_optimizer_step"] == 128
+    assert batch["audio_targets_per_optimizer_step"] == 51_200
+    assert batch["waveform_seconds_per_optimizer_step"] == 256.0
 
 
 def test_tc18_startup_query_invariants_are_enforced():
@@ -205,18 +205,18 @@ def test_tc18_startup_query_invariants_are_enforced():
     assert len(prompt) == 402
     assert len(prompt) + 6 == 408
     assert len(prompt) + 6 <= cfg["model"]["max_position_embeddings"]
-    assert batch_spec["documents_per_microbatch"] == 80
-    assert batch_spec["audio_targets_per_microbatch"] == 32_000
-    assert batch_spec["causal_tokens_per_microbatch"] == 32_640
-    assert batch_spec["waveform_seconds_per_microbatch"] == 160.0
-    assert batch_spec["tracks_per_optimizer_step"] == 80
-    assert batch_spec["documents_per_optimizer_step"] == 160
-    assert batch_spec["audio_targets_per_optimizer_step"] == 64_000
-    assert batch_spec["waveform_seconds_per_optimizer_step"] == 320.0
+    assert batch_spec["documents_per_microbatch"] == 32
+    assert batch_spec["audio_targets_per_microbatch"] == 12_800
+    assert batch_spec["causal_tokens_per_microbatch"] == 13_056
+    assert batch_spec["waveform_seconds_per_microbatch"] == 64.0
+    assert batch_spec["tracks_per_optimizer_step"] == 64
+    assert batch_spec["documents_per_optimizer_step"] == 128
+    assert batch_spec["audio_targets_per_optimizer_step"] == 51_200
+    assert batch_spec["waveform_seconds_per_optimizer_step"] == 256.0
 
     wrong_batch = deepcopy(cfg)
     wrong_batch["train"]["tracks_per_microbatch"] = 10
-    with pytest.raises(ValueError, match="40 tracks per microbatch"):
+    with pytest.raises(ValueError, match="16 tracks per microbatch"):
         validate_tc18_batch_configuration(wrong_batch, query_spec)
 
     wrong_duration = deepcopy(cfg)

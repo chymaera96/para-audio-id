@@ -18,7 +18,7 @@ model:
 data:
   audio_root: /gpfs/scratch/acw723/fma_data/fma_large
   catalogue: data/fma_large_100k.jsonl
-  database_size: 25000
+  database_size: 100000
   segment_duration: 2.0
   crop_retries: 4
   replacement_retries: 32
@@ -37,7 +37,7 @@ train:
   log_dir: logs/fma-large-audio-lm
   checkpoint_dir: /gpfs/scratch/acw723/para-audio-id/audio-lm-checkpoints
   run_id:
-  tracks_per_microbatch: 40
+  tracks_per_microbatch: 16
   segments_per_track: 2
   learning_rate: 3.0e-4
   betas: [0.9, 0.95]
@@ -72,8 +72,8 @@ dataloader:
 
 trainer:
   accelerator: gpu
-  devices: 1
+  devices: 4
   strategy: auto
   precision: bf16-mixed
-  accumulate_grad_batches: 2
+  accumulate_grad_batches: 1
   log_every_n_steps: 25

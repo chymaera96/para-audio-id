@@ -42,12 +42,12 @@ def test_probe_recommends_fastest_candidate_with_ten_percent_headroom():
     assert recommendation == {
         "selected_tracks_per_gpu": 24,
         "documents_per_gpu": 48,
-        "world_size": 2,
+        "world_size": 4,
         "accumulate_grad_batches": 1,
-        "global_tracks_per_optimizer_step": 48,
-        "global_documents_per_optimizer_step": 96,
+        "global_tracks_per_optimizer_step": 96,
+        "global_documents_per_optimizer_step": 192,
         "target_track_selections": 72_000_000,
-        "resolved_max_steps": 1_500_000,
+        "resolved_max_steps": 750_000,
         "minimum_peak_headroom_percent": 10.0,
         "selection_rule": (
             "highest measured documents_per_second among safe candidates"

@@ -16,16 +16,16 @@ def main() -> None:
     parser.add_argument(
         "--database-size",
         type=int,
-        choices=(25_000, 100_000),
-        help="training catalogue size (default: config; resume: checkpoint)",
+        choices=(100_000,),
+        help="scale profile requires the 100K training catalogue",
     )
-    parser.add_argument("--decoder", choices=("small", "medium"))
+    parser.add_argument("--decoder", choices=("medium",))
     parser.add_argument("--schedule", choices=("noise-rir",))
     parser.add_argument(
         "--codebooks",
         type=int,
         choices=(8,),
-        help="tc18 requires all eight MuQ Mel-RVQ codebooks",
+        help="scale requires all eight MuQ Mel-RVQ codebooks",
     )
     parser.add_argument(
         "--distillation-weight",

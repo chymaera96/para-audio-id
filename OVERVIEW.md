@@ -336,6 +336,9 @@ it uses 40 identities per rank with no accumulation; four and eight GPUs use 20
 and 10 identities per rank respectively. The distributed sampler gives each
 rank a disjoint identity shard, so every layout preserves the exposure and
 optimizer-step counts of the earlier `10 tracks × accumulation 8` setup.
+For the tiny decoder only, a single-GPU run instead packs all 80 identities and
+160 documents into one physical microbatch with no accumulation, while keeping
+the same effective batch and exposure count.
 
 The experiment grid combines 10K/25K/50K/100K catalogues with tiny/small/medium
 decoders. Every run receives 560 average identity exposures, resolving to
@@ -347,6 +350,13 @@ The immutable protocol is
 `online_random_crop_clean_capacity_eight_codebook_v2`. Earlier two-codebook
 capacity checkpoints cannot resume it, but remain evaluable from their embedded
 tokenizer, vocabulary, and model specifications.
+
+`ablation.py` evaluates this series on one immutable set of 1,000 clean,
+two-second queries sampled from the common 10K cohort. It requires the actual
+10K/25K/50K/100K manifests to be nested, uses online eight-codebook MuQ
+tokenization, and reports width-10 unconstrained beam MRR and Top-1/5/10 with
+EOS scoring. This keeps the query identities and crops fixed across every
+database size and tiny/small/medium decoder.
 
 ## Interpretation
 

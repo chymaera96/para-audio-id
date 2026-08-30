@@ -228,6 +228,21 @@ def test_capacity_parallelism_rejects_device_count_that_cannot_divide_batch():
         capacity_parallelism(3)
 
 
+def test_single_gpu_tiny_capacity_uses_one_160_document_microbatch():
+    assert capacity_parallelism(1, decoder="tiny") == {
+        "world_size": 1,
+        "tracks_per_device_microbatch": 80,
+        "accumulate_grad_batches": 1,
+        "global_tracks_per_optimizer_step": 80,
+    }
+    assert capacity_parallelism(2, decoder="tiny") == {
+        "world_size": 2,
+        "tracks_per_device_microbatch": 40,
+        "accumulate_grad_batches": 1,
+        "global_tracks_per_optimizer_step": 80,
+    }
+
+
 def test_capacity_decoder_profiles_and_defaults():
     base = {
         "data": {"database_size": 10_000},
@@ -244,6 +259,8 @@ def test_capacity_decoder_profiles_and_defaults():
     assert tiny["model"]["num_layers"] == 6
     assert tiny["model"]["hidden_size"] == 512
     assert tiny["model"]["num_attention_heads"] == 8
+    assert tiny["train"]["tracks_per_microbatch"] == 80
+    assert tiny["trainer"]["accumulate_grad_batches"] == 1
     medium = resolve_capacity_config(base, decoder="medium")
     assert medium["model"]["num_layers"] == 24
 

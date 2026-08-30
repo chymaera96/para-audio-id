@@ -305,6 +305,12 @@ change the resolved training length. The common layouts are:
 | 4 | 20 | 1 | 80 |
 | 8 | 10 | 1 | 80 |
 
+As a single-GPU throughput experiment, the `tiny` decoder uses 80 identities
+(160 documents) in one physical microbatch with accumulation one. If this
+exceeds the available GPU memory, restore the standard 40-identity,
+two-accumulation layout before launching a usable run. Small and medium retain
+the table above.
+
 For example, a two-GPU 100K-medium run is:
 
 ```bash
@@ -329,6 +335,19 @@ Eight-codebook checkpoints use
 `online_random_crop_clean_capacity_eight_codebook_v2`. Earlier two-codebook
 capacity checkpoints remain standalone-evaluation inputs but cannot resume the
 new training profile.
+
+Evaluate any completed capacity run on the shared clean 1K-query cohort with:
+
+```bash
+python ablation.py --database-size 25000 --decoder small
+```
+
+The evaluator first validates that the 10K, 25K, 50K, and 100K manifests are
+strictly nested. It then creates (or immutably reuses)
+`capacity-ablation-results/clean-2s-common-1k.manifest.json`, tokenizes its
+two-second queries online with all eight MuQ codebooks, and reports
+unconstrained width-10 beam MRR and Top-1/5/10. Decode failures remain in the
+fixed 1,000-query denominator.
 Resume with:
 
 ```bash

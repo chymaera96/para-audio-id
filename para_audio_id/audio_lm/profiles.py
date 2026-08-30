@@ -163,7 +163,7 @@ def canonical_capacity_profile(
                 "Explicit capacity parallelism is required for a non-standard "
                 "global batch"
             )
-        derived = capacity_parallelism(world_size)
+        derived = capacity_parallelism(world_size, decoder=decoder)
         tracks_per_device_microbatch = int(
             derived["tracks_per_device_microbatch"]
         )
@@ -208,15 +208,23 @@ def canonical_capacity_profile(
     }
 
 
-def capacity_parallelism(world_size: int) -> dict[str, int]:
+def capacity_parallelism(
+    world_size: int, *, decoder: str | None = None
+) -> dict[str, int]:
     if world_size < 1 or CAPACITY_GLOBAL_TRACKS_PER_STEP % world_size:
         raise ValueError(
             "Capacity devices must be a positive divisor of the 80-track "
             "global optimizer batch"
         )
-    tracks_per_device = min(
-        CAPACITY_MAX_TRACKS_PER_DEVICE,
-        CAPACITY_GLOBAL_TRACKS_PER_STEP // world_size,
+    if decoder is not None:
+        decoder_profile(decoder)
+    tracks_per_device = (
+        CAPACITY_GLOBAL_TRACKS_PER_STEP
+        if decoder == "tiny" and world_size == 1
+        else min(
+            CAPACITY_MAX_TRACKS_PER_DEVICE,
+            CAPACITY_GLOBAL_TRACKS_PER_STEP // world_size,
+        )
     )
     denominator = tracks_per_device * world_size
     if CAPACITY_GLOBAL_TRACKS_PER_STEP % denominator:
@@ -370,7 +378,9 @@ def resolve_capacity_config(
     else:
         resolved_decoder = decoder or "small"
         configured_devices = int(devices if devices is not None else trainer.get("devices", 1))
-        parallelism = capacity_parallelism(configured_devices)
+        parallelism = capacity_parallelism(
+            configured_devices, decoder=resolved_decoder
+        )
     tracks_per_step = int(parallelism["global_tracks_per_optimizer_step"])
     profile = canonical_capacity_profile(
         database_size=configured_size,

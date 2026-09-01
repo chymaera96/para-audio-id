@@ -18,8 +18,8 @@ def main() -> None:
     parser.add_argument(
         "--codebooks",
         type=int,
-        choices=(8,),
-        help="tc18 requires all eight MuQ Mel-RVQ codebooks",
+        choices=(2, 4, 6, 8),
+        help="MuQ Mel-RVQ codebooks to use (default: 8)",
     )
     parser.add_argument(
         "--distillation-weight",

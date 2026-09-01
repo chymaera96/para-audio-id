@@ -7,7 +7,8 @@ fixed 100,000-track catalogue into its parameters. Each training document is:
 [BOS] audio-token-1 ... audio-token-N [ID] digit-1 ... digit-5 [EOS]
 ```
 
-Audio tokens use all eight Mel-RVQ codebooks from the frozen
+Audio tokens use a configurable prefix of 2, 4, 6, or all 8 Mel-RVQ codebooks
+from the frozen
 `OpenMuQ/MuQ-large-msd-iter` checkpoint. The causal LM jointly predicts the audio
 sequence and the track's arbitrary five-digit code. Identification performs model
 generation only: it does not search fingerprints, embeddings, an ANN index, token
@@ -160,9 +161,12 @@ python train.py configs/fma_large.yaml \
   --wandb-online
 ```
 
-This branch accepts only `--decoder small`, `--schedule noise-rir`, and
-`--codebooks 8`. The resolved tc18 profile and distillation maximum are embedded
-in every checkpoint. Use `--distillation-weight 0.0` for the matched ablation.
+This branch accepts `--codebooks {2,4,6,8}`, defaulting to 8 when the argument is
+omitted. Identifier weight is derived automatically as `4 × codebooks`, giving
+weights 8/16/24/32 and complete document lengths 108/208/308/408 respectively.
+The resolved codebook and distillation profiles are embedded in every checkpoint,
+and resume requires an exact match. Use `--distillation-weight 0.0` for the
+matched no-distillation runs.
 
 The only new W&B key is `train/distillation_loss_epoch`; it remains available
 when the configured optimization weight is zero.
@@ -215,9 +219,9 @@ python evaluate.py \
 ```
 
 The joint-beam evaluator also accepts the matched two-second tc16 (four
-codebooks) and tc17 (six codebooks) checkpoints. Their model, vocabulary, and
-MuQ tokenizer are reconstructed from checkpoint metadata, while training
-resume on this branch remains tc18-only. This permits a common 4/6/8-codebook
+codebooks), tc17 (six codebooks), tc18 (eight codebooks), and new main-branch
+variable-codebook checkpoints. Their model, vocabulary, and MuQ tokenizer are
+reconstructed from checkpoint metadata, permitting a common 2/4/6/8-codebook
 evaluation under the same deterministic query and degradation protocol.
 
 This derives catalogue size and decoder dimensions from the checkpoint and

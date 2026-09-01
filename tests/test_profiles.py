@@ -79,7 +79,6 @@ def test_tc18_profile_is_fixed_and_resolves_defaults():
         ({"database_size": 10_000}, "database_size=25000"),
         ({"decoder": "medium"}, "small decoder"),
         ({"schedule": "noise"}, "noise-rir schedule"),
-        ({"selected_codebooks": 6}, "all eight MuQ codebooks"),
         ({"distillation_weight": -0.1}, "non-negative"),
     ],
 )
@@ -139,13 +138,36 @@ def test_tc18_resume_inherits_weight_and_rejects_overrides(tmp_path):
             },
             old,
         )
-        with pytest.raises(ValueError, match="Only tc18"):
+        with pytest.raises(ValueError, match="Only matching main"):
             resolve_training_config(base_config(), checkpoint=old)
+
+
+@pytest.mark.parametrize(
+    ("codebooks", "id_weight", "variant"),
+    [
+        (2, 8.0, "main-two-second-two-codebook-logit-distillation"),
+        (4, 16.0, "main-two-second-four-codebook-logit-distillation"),
+        (6, 24.0, "main-two-second-six-codebook-logit-distillation"),
+        (8, 32.0, "tc18-two-second-eight-codebook-logit-distillation"),
+    ],
+)
+def test_training_codebook_count_resolves_weight_and_profile(
+    codebooks, id_weight, variant
+):
+    resolved = resolve_training_config(base_config(), selected_codebooks=codebooks)
+    assert resolved["tokenizer"]["selected_codebooks"] == codebooks
+    assert resolved["train"]["id_digit_weight"] == id_weight
+    assert resolved["resolved_query_profile"] == {
+        "selected_codebooks": codebooks,
+        "id_digit_weight": id_weight,
+    }
+    assert resolved["resolved_training_profile"]["variant"] == variant
 
 
 @pytest.mark.parametrize(
     ("version", "variant", "codebooks", "id_weight"),
     [
+        (10, "main-two-second-two-codebook-logit-distillation", 2, 8.0),
         (7, "tc16-two-second-four-codebook-logit-distillation", 4, 16.0),
         (8, "ablate-two-second-six-codebook-logit-distillation", 6, 24.0),
         (9, "tc18-two-second-eight-codebook-logit-distillation", 8, 32.0),
@@ -191,7 +213,7 @@ def test_joint_evaluation_rejects_five_second_codebook_checkpoint():
         },
         "training_track_ids": [str(index) for index in range(25_000)],
     }
-    with pytest.raises(ValueError, match="two-second tc16, tc17, and tc18"):
+    with pytest.raises(ValueError, match="two-second 2/4/6/8"):
         evaluation_checkpoint_profile(checkpoint)
 
 

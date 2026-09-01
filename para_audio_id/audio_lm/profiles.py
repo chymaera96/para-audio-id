@@ -15,7 +15,8 @@ DECODER_PROFILES = {
     "small": {"num_layers": 12, "hidden_size": 768, "num_attention_heads": 12},
 }
 SCHEDULE_NAMES = ("noise-rir",)
-SUPPORTED_SELECTED_CODEBOOKS = (8,)
+SUPPORTED_SELECTED_CODEBOOKS = (2, 4, 6, 8)
+DEFAULT_SELECTED_CODEBOOKS = 8
 TC18_ID_DIGIT_WEIGHT = 32.0
 DEFAULT_DISTILLATION_WEIGHT = 0.10
 NEW_TRAINING_PROTOCOL = "tc18_two_second_eight_codebook_logit_distillation_v1"
@@ -23,6 +24,18 @@ LOSS_PROTOCOL = NEW_TRAINING_PROTOCOL
 TC12_CURRICULUM = "tc12_noise_rir_curriculum_v1"
 TC18_LR_POLICY = "tc18_warmup_hold_linear_cosine_v1"
 EVALUATION_VARIANTS = {
+    "main-two-second-two-codebook-logit-distillation": {
+        "selected_codebooks": 2,
+        "id_digit_weight": 8.0,
+    },
+    "main-two-second-four-codebook-logit-distillation": {
+        "selected_codebooks": 4,
+        "id_digit_weight": 16.0,
+    },
+    "main-two-second-six-codebook-logit-distillation": {
+        "selected_codebooks": 6,
+        "id_digit_weight": 24.0,
+    },
     "tc16-two-second-four-codebook-logit-distillation": {
         "selected_codebooks": 4,
         "id_digit_weight": 16.0,
@@ -36,6 +49,28 @@ EVALUATION_VARIANTS = {
         "id_digit_weight": 32.0,
     },
 }
+
+
+def _codebook_training_identity(selected_codebooks: int) -> dict[str, Any]:
+    if selected_codebooks not in SUPPORTED_SELECTED_CODEBOOKS:
+        raise ValueError(
+            "selected codebooks must be one of "
+            f"{SUPPORTED_SELECTED_CODEBOOKS}, got {selected_codebooks}"
+        )
+    if selected_codebooks == 8:
+        return {
+            "version": 9,
+            "variant": "tc18-two-second-eight-codebook-logit-distillation",
+            "protocol": NEW_TRAINING_PROTOCOL,
+        }
+    codebook_label = {2: "two", 4: "four", 6: "six"}[selected_codebooks]
+    return {
+        "version": 10,
+        "variant": (
+            f"main-two-second-{codebook_label}-codebook-logit-distillation"
+        ),
+        "protocol": "main_variable_codebook_logit_distillation_v1",
+    }
 
 
 def cohort_manifest(database_size: int) -> str:
@@ -94,7 +129,9 @@ def _scaled(value: int, database_size: int) -> int:
     return value * database_size // 10_000
 
 
-def schedule_profile(name: str, database_size: int) -> dict[str, Any]:
+def schedule_profile(
+    name: str, database_size: int, *, protocol: str = NEW_TRAINING_PROTOCOL
+) -> dict[str, Any]:
     if name not in SCHEDULE_NAMES:
         raise ValueError(f"schedule must be one of {SCHEDULE_NAMES}, got {name!r}")
     if database_size != 25_000:
@@ -103,8 +140,8 @@ def schedule_profile(name: str, database_size: int) -> dict[str, Any]:
         )
     common = {
         "name": name,
-        "protocol": NEW_TRAINING_PROTOCOL,
-        "loss_protocol": LOSS_PROTOCOL,
+        "protocol": protocol,
+        "loss_protocol": protocol,
         "max_steps": 225_000,
         "snr_bin_probabilities": [0.40, 0.30, 0.20, 0.10],
         "exact_zero_fraction_in_first_bin": 0.25,
@@ -144,19 +181,20 @@ def canonical_training_profile(
         raise ValueError(
             "tc18 requires the noise-rir schedule"
         )
-    if selected_codebooks != 8:
-        raise ValueError("tc18 requires all eight MuQ codebooks")
+    identity = _codebook_training_identity(selected_codebooks)
     if not math.isfinite(distillation_weight) or distillation_weight < 0:
         raise ValueError("distillation_weight must be finite and non-negative")
     profile = {
-        "version": 9,
-        "variant": "tc18-two-second-eight-codebook-logit-distillation",
+        "version": identity["version"],
+        "variant": identity["variant"],
         "database_size": database_size,
         "training_tracks_manifest": cohort_manifest(database_size),
         "decoder": decoder_profile(decoder),
-        "schedule": schedule_profile(schedule, database_size),
+        "schedule": schedule_profile(
+            schedule, database_size, protocol=identity["protocol"]
+        ),
         "distillation": {
-            "protocol": LOSS_PROTOCOL,
+            "protocol": identity["protocol"],
             "temperature": 2.0,
             "maximum_weight": float(distillation_weight),
             "weight_schedule": {
@@ -180,14 +218,14 @@ def canonical_training_profile(
 
 def historical_checkpoint_profile(checkpoint: dict) -> dict[str, Any]:
     stored = checkpoint.get("resolved_training_profile")
-    if (
-        stored is None
-        or stored.get("variant")
-        != "tc18-two-second-eight-codebook-logit-distillation"
-    ):
+    supported_variants = {
+        _codebook_training_identity(codebooks)["variant"]
+        for codebooks in SUPPORTED_SELECTED_CODEBOOKS
+    }
+    if stored is None or stored.get("variant") not in supported_variants:
         raise ValueError(
-            "Only tc18 two-second eight-codebook checkpoints can be "
-            "resumed on this branch"
+            "Only matching main two-second variable-codebook checkpoints can "
+            "be resumed on this branch"
         )
     return stored
 
@@ -207,8 +245,8 @@ def evaluation_checkpoint_profile(checkpoint: dict) -> dict[str, Any]:
     expected = EVALUATION_VARIANTS.get(variant)
     if expected is None:
         raise ValueError(
-            "Joint-beam evaluation supports only the two-second tc16, tc17, "
-            "and tc18 codebook variants"
+            "Joint-beam evaluation supports only the two-second 2/4/6/8 "
+            "codebook variants"
         )
     if int(stored.get("database_size", -1)) != 25_000:
         raise ValueError("Codebook-ablation evaluation requires the 25K cohort")
@@ -264,7 +302,7 @@ def _checkpoint_query_profile(checkpoint: dict[str, Any]) -> dict[str, Any] | No
         query.get(
             "id_digit_weight",
             train.get(
-                "id_digit_weight", TC18_ID_DIGIT_WEIGHT
+                "id_digit_weight", 4.0 * selected
             ),
         )
     )
@@ -282,7 +320,7 @@ def resolve_query_profile(selected_codebooks: int) -> dict[str, Any]:
         )
     return {
         "selected_codebooks": selected_codebooks,
-        "id_digit_weight": TC18_ID_DIGIT_WEIGHT,
+        "id_digit_weight": float(4 * selected_codebooks),
     }
 
 

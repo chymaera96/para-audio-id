@@ -50,8 +50,6 @@ from .noise import (
     stable_uint64,
 )
 from .profiles import (
-    LOSS_PROTOCOL,
-    NEW_TRAINING_PROTOCOL,
     historical_checkpoint_profile,
     resolve_query_profile,
     resolve_training_config,
@@ -73,13 +71,10 @@ from .token_store import TokenStoreIndex
 from .tokenization import load_training_track_ids
 from .vocabulary import AudioLMVocabulary
 
-TRAINING_PROTOCOL = NEW_TRAINING_PROTOCOL
 MONITOR_PROTOCOL = "compact_beam_monitor_v2"
 TC18_SEGMENT_DURATION = 2.0
 TC18_SAMPLE_RATE = 24_000
 TC18_FRAME_RATE = 25.0
-TC18_SELECTED_CODEBOOKS = 8
-TC18_ID_DIGIT_WEIGHT = 32.0
 TC18_DIGIT_TARGETS = 5
 TC18_BOUNDARY_TARGETS = 2
 TC18_TRACKS_PER_MICROBATCH = 40
@@ -193,14 +188,12 @@ def validate_tc18_query_configuration(
             f"{tokenizer_spec.frame_rate:g}"
         )
     selected_codebooks = int(tokenizer_spec.selected_codebooks)
-    if selected_codebooks != TC18_SELECTED_CODEBOOKS:
+    query_profile = resolve_query_profile(selected_codebooks)
+    expected_id_digit_weight = float(query_profile["id_digit_weight"])
+    if not math.isclose(id_digit_weight, expected_id_digit_weight):
         raise ValueError(
-            f"tc18 requires selected_codebooks={TC18_SELECTED_CODEBOOKS}, "
-            f"got {selected_codebooks}"
-        )
-    if not math.isclose(id_digit_weight, TC18_ID_DIGIT_WEIGHT):
-        raise ValueError(
-            f"tc18 requires id_digit_weight={TC18_ID_DIGIT_WEIGHT:g}, "
+            f"{selected_codebooks} codebooks require "
+            f"id_digit_weight={expected_id_digit_weight:g}, "
             f"got {id_digit_weight:g}"
         )
     if max_positions != 512:
@@ -517,7 +510,7 @@ class LegacyAudioLMDataModule(pl.LightningDataModule):
             ):
                 raise ValueError(f"View-token store {root} uses different track codes")
         corpus_payload = {
-            "training_protocol": TRAINING_PROTOCOL,
+            "training_protocol": self.cfg["train"]["schedule"]["protocol"],
             "view_mode": view_mode,
             "track_ids": self.training_track_ids,
             "canonical_starts": data_cfg["canonical_starts"],
@@ -754,8 +747,8 @@ class AudioLMDataModule(pl.LightningDataModule):
             )
         self.evaluation_dataset = RandomEvaluationDataset(self.monitor_recipes)
         corpus_payload = {
-            "training_protocol": TRAINING_PROTOCOL,
-            "loss_protocol": LOSS_PROTOCOL,
+            "training_protocol": self.cfg["train"]["schedule"]["protocol"],
+            "loss_protocol": self.cfg["train"]["schedule"]["loss_protocol"],
             "crop_policy": CROP_POLICY,
             "replacement_policy": REPLACEMENT_POLICY,
             "track_ids": track_ids,
@@ -910,9 +903,13 @@ class AudioLMModule(pl.LightningModule):
         self.query_spec = query_spec
         self.batch_spec = batch_spec
         self.model = AudioCausalLM(cfg, vocabulary)
+        self.training_protocol = str(cfg["train"]["schedule"]["protocol"])
+        self.loss_protocol = str(cfg["train"]["schedule"]["loss_protocol"])
         distillation_cfg = cfg["train"]["distillation"]
-        if distillation_cfg.get("protocol") != LOSS_PROTOCOL:
-            raise ValueError(f"Distillation protocol must be {LOSS_PROTOCOL}")
+        if distillation_cfg.get("protocol") != self.loss_protocol:
+            raise ValueError(
+                f"Distillation protocol must be {self.loss_protocol}"
+            )
         self.online_tokenizer = None
         self._last_probe_step = -1
         self.documents_consumed = 0
@@ -1444,7 +1441,7 @@ class AudioLMModule(pl.LightningModule):
     def on_fit_start(self) -> None:
         if int(self.trainer.world_size) != 1:
             raise ValueError(
-                f"{TRAINING_PROTOCOL} currently requires one GPU"
+                f"{self.training_protocol} currently requires one GPU"
             )
         self.started_at = time.perf_counter()
         self.session_tokens_start = self.tokens_consumed
@@ -2256,8 +2253,8 @@ class AudioLMModule(pl.LightningModule):
                 "validation_probe": self.validation_probe,
                 "training_track_ids": self.training_track_ids,
                 "training_corpus_fingerprint": self.training_corpus_fingerprint,
-                "training_protocol": TRAINING_PROTOCOL,
-                "loss_protocol": LOSS_PROTOCOL,
+                "training_protocol": self.training_protocol,
+                "loss_protocol": self.loss_protocol,
                 "distillation_protocol": self.cfg["train"]["distillation"][
                     "protocol"
                 ],
@@ -2314,11 +2311,13 @@ class AudioLMModule(pl.LightningModule):
             != self.cfg["resolved_query_profile"]
         ):
             raise ValueError("Resume checkpoint uses a different RVQ query profile")
-        if checkpoint.get("loss_protocol") != LOSS_PROTOCOL:
+        if checkpoint.get("training_protocol") != self.training_protocol:
+            raise ValueError("Resume checkpoint uses a different training protocol")
+        if checkpoint.get("loss_protocol") != self.loss_protocol:
             raise ValueError(
                 "Resume checkpoint uses a different loss protocol"
             )
-        if checkpoint.get("distillation_protocol") != LOSS_PROTOCOL:
+        if checkpoint.get("distillation_protocol") != self.loss_protocol:
             raise ValueError("Resume checkpoint uses a different distillation protocol")
         if checkpoint.get("distillation_profile") != self.cfg["train"][
             "distillation"
@@ -2440,10 +2439,11 @@ def train(cfg: dict, *, checkpoint: str | Path | None = None) -> None:
         )
     if cfg.get("architecture") != ARCHITECTURE:
         raise ValueError(f"Configuration architecture must be {ARCHITECTURE}")
-    if cfg["train"]["schedule"].get("protocol") != TRAINING_PROTOCOL:
-        raise ValueError(f"Training protocol must be {TRAINING_PROTOCOL}")
-    if cfg["train"]["schedule"].get("loss_protocol") != LOSS_PROTOCOL:
-        raise ValueError(f"Loss protocol must be {LOSS_PROTOCOL}")
+    expected_protocol = cfg["resolved_training_profile"]["schedule"]["protocol"]
+    if cfg["train"]["schedule"].get("protocol") != expected_protocol:
+        raise ValueError(f"Training protocol must be {expected_protocol}")
+    if cfg["train"]["schedule"].get("loss_protocol") != expected_protocol:
+        raise ValueError(f"Loss protocol must be {expected_protocol}")
     if cfg["train"].get("distillation") != cfg[
         "resolved_training_profile"
     ].get(

@@ -436,11 +436,13 @@ weights.
 
 ## Unified training profiles
 
-The active `stable` branch is single-purpose for tc18: small decoder, 25K
-cohort, noise-RIR schedule, all eight codebooks, and two-second queries.
-Checkpoints store the resolved distillation profile and reject tc17 and all
-earlier runs.
-W&B retains existing causal names and adds only epoch-level distillation loss.
+The active `main` branch defaults to the tc18 eight-codebook profile but permits
+controlled two-second runs with 2, 4, 6, or 8 codebooks. Identifier weight is
+derived as `4 × codebooks`, so the corresponding values are 8, 16, 24, and 32;
+the complete causal documents contain 108, 208, 308, and 408 tokens. Checkpoints
+store the resolved codebook, loss, and distillation profiles and resume only
+with an exact match. Existing tc16/tc17/tc18 checkpoints remain supported for
+standalone evaluation. W&B names are unchanged.
 
 ## Interpretation
 

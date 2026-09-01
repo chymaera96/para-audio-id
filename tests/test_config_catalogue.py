@@ -147,14 +147,39 @@ def test_tc18_startup_query_invariants_are_enforced():
         )
 
 
-def test_ablation_rejects_other_codebook_query_profile():
-    with pytest.raises(ValueError, match="all eight MuQ codebooks"):
-        resolve_training_config(
-            yaml.safe_load(
-                (Path(__file__).parents[1] / "configs" / "fma_large.yaml").read_text()
-            ),
-            selected_codebooks=6,
-        )
+@pytest.mark.parametrize(
+    ("codebooks", "id_weight", "audio_targets", "document_tokens"),
+    [(2, 8.0, 100, 108), (4, 16.0, 200, 208), (6, 24.0, 300, 308)],
+)
+def test_variable_codebook_query_profiles(
+    codebooks, id_weight, audio_targets, document_tokens
+):
+    cfg = resolve_training_config(
+        yaml.safe_load(
+            (Path(__file__).parents[1] / "configs" / "fma_large.yaml").read_text()
+        ),
+        selected_codebooks=codebooks,
+    )
+    tokenizer_spec = TokenizerSpec(
+        architecture="muq_mel_rvq",
+        model_name="OpenMuQ/MuQ-large-msd-iter",
+        revision="test",
+        package_version="test",
+        sample_rate=24_000,
+        frame_rate=25.0,
+        waveform_normalization="none_before_muq_internal_preprocessing",
+        num_available_codebooks=8,
+        selected_codebooks=codebooks,
+        codebook_size=1024,
+        serialization="time_major_codebook_interleaved",
+        preprocessing_version=1,
+    )
+    query = validate_tc18_query_configuration(
+        cfg, tokenizer_spec, AudioLMVocabulary(num_codebooks=codebooks)
+    )
+    assert query["audio_targets"] == audio_targets
+    assert query["document_tokens"] == document_tokens
+    assert query["id_digit_weight"] == id_weight
 
 
 def test_random_code_mapping_is_complete_unique_and_seeded():

@@ -8,6 +8,7 @@ from para_audio_id.audio_lm.noise import resolved_augmentation_schedule
 from para_audio_id.audio_lm.profiles import (
     NEW_TRAINING_PROTOCOL,
     canonical_training_profile,
+    evaluation_checkpoint_profile,
     cohort_manifest,
     historical_checkpoint_profile,
     resolve_training_config,
@@ -140,6 +141,58 @@ def test_tc18_resume_inherits_weight_and_rejects_overrides(tmp_path):
         )
         with pytest.raises(ValueError, match="Only tc18"):
             resolve_training_config(base_config(), checkpoint=old)
+
+
+@pytest.mark.parametrize(
+    ("version", "variant", "codebooks", "id_weight"),
+    [
+        (7, "tc16-two-second-four-codebook-logit-distillation", 4, 16.0),
+        (8, "ablate-two-second-six-codebook-logit-distillation", 6, 24.0),
+        (9, "tc18-two-second-eight-codebook-logit-distillation", 8, 32.0),
+    ],
+)
+def test_joint_evaluation_accepts_two_second_codebook_variants(
+    version, variant, codebooks, id_weight
+):
+    profile = {
+        "version": version,
+        "variant": variant,
+        "database_size": 25_000,
+    }
+    checkpoint = {
+        "resolved_training_profile": profile,
+        "tokenizer_spec": {"selected_codebooks": codebooks},
+        "query_spec": {
+            "segment_duration_seconds": 2.0,
+            "selected_codebooks": codebooks,
+            "id_digit_weight": id_weight,
+        },
+        "hyper_parameters": {"data": {"segment_duration": 2.0}},
+        "training_track_ids": [str(index) for index in range(25_000)],
+    }
+    assert evaluation_checkpoint_profile(checkpoint) == profile
+    checkpoint["tokenizer_spec"]["selected_codebooks"] = 8 if codebooks != 8 else 4
+    with pytest.raises(ValueError, match="codebook count"):
+        evaluation_checkpoint_profile(checkpoint)
+
+
+def test_joint_evaluation_rejects_five_second_codebook_checkpoint():
+    checkpoint = {
+        "resolved_training_profile": {
+            "version": 6,
+            "variant": "tc15-four-codebook-logit-distillation",
+            "database_size": 25_000,
+        },
+        "tokenizer_spec": {"selected_codebooks": 4},
+        "query_spec": {
+            "segment_duration_seconds": 5.0,
+            "selected_codebooks": 4,
+            "id_digit_weight": 40.0,
+        },
+        "training_track_ids": [str(index) for index in range(25_000)],
+    }
+    with pytest.raises(ValueError, match="two-second tc16, tc17, and tc18"):
+        evaluation_checkpoint_profile(checkpoint)
 
 
 def test_tc18_noise_rir_boundaries_remain_unchanged():

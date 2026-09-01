@@ -214,6 +214,12 @@ python evaluate.py \
   --protocol joint-beam
 ```
 
+The joint-beam evaluator also accepts the matched two-second tc16 (four
+codebooks) and tc17 (six codebooks) checkpoints. Their model, vocabulary, and
+MuQ tokenizer are reconstructed from checkpoint metadata, while training
+resume on this branch remains tc18-only. This permits a common 4/6/8-codebook
+evaluation under the same deterministic query and degradation protocol.
+
 This derives catalogue size and decoder dimensions from the checkpoint and
 defaults to a seeded 1,000-track sample, recipe and sample seed `1337`, fixed
 query lengths `2/5/10`, the eight fixed noise/RIR suites, beam width 10, and

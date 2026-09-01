@@ -22,6 +22,20 @@ NEW_TRAINING_PROTOCOL = "tc18_two_second_eight_codebook_logit_distillation_v1"
 LOSS_PROTOCOL = NEW_TRAINING_PROTOCOL
 TC12_CURRICULUM = "tc12_noise_rir_curriculum_v1"
 TC18_LR_POLICY = "tc18_warmup_hold_linear_cosine_v1"
+EVALUATION_VARIANTS = {
+    "tc16-two-second-four-codebook-logit-distillation": {
+        "selected_codebooks": 4,
+        "id_digit_weight": 16.0,
+    },
+    "ablate-two-second-six-codebook-logit-distillation": {
+        "selected_codebooks": 6,
+        "id_digit_weight": 24.0,
+    },
+    "tc18-two-second-eight-codebook-logit-distillation": {
+        "selected_codebooks": 8,
+        "id_digit_weight": 32.0,
+    },
+}
 
 
 def cohort_manifest(database_size: int) -> str:
@@ -175,6 +189,59 @@ def historical_checkpoint_profile(checkpoint: dict) -> dict[str, Any]:
             "Only tc18 two-second eight-codebook checkpoints can be "
             "resumed on this branch"
         )
+    return stored
+
+
+def evaluation_checkpoint_profile(checkpoint: dict) -> dict[str, Any]:
+    """Validate a two-second codebook-ablation checkpoint for inference only.
+
+    Training resume intentionally remains tc18-only through
+    :func:`historical_checkpoint_profile`. Evaluation reconstructs the model,
+    vocabulary, and tokenizer from checkpoint metadata and can therefore
+    compare the matched tc16/tc17/tc18 codebook variants safely.
+    """
+    stored = checkpoint.get("resolved_training_profile")
+    if not isinstance(stored, dict):
+        raise ValueError("Evaluation checkpoint is missing its resolved profile")
+    variant = stored.get("variant")
+    expected = EVALUATION_VARIANTS.get(variant)
+    if expected is None:
+        raise ValueError(
+            "Joint-beam evaluation supports only the two-second tc16, tc17, "
+            "and tc18 codebook variants"
+        )
+    if int(stored.get("database_size", -1)) != 25_000:
+        raise ValueError("Codebook-ablation evaluation requires the 25K cohort")
+
+    tokenizer = checkpoint.get("tokenizer_spec", {})
+    query = checkpoint.get("query_spec", {})
+    hyper_parameters = checkpoint.get("hyper_parameters", {})
+    configured_duration = hyper_parameters.get("data", {}).get(
+        "segment_duration", query.get("segment_duration_seconds")
+    )
+    selected_codebooks = int(tokenizer.get("selected_codebooks", -1))
+    if selected_codebooks != expected["selected_codebooks"]:
+        raise ValueError(
+            "Checkpoint tokenizer codebook count does not match its experiment variant"
+        )
+    if query and int(query.get("selected_codebooks", -1)) != selected_codebooks:
+        raise ValueError("Checkpoint query and tokenizer codebook counts do not match")
+    if configured_duration is None or not math.isclose(
+        float(configured_duration), 2.0
+    ):
+        raise ValueError("Codebook-ablation evaluation requires two-second windows")
+    id_digit_weight = float(
+        query.get(
+            "id_digit_weight",
+            hyper_parameters.get("train", {}).get("id_digit_weight", float("nan")),
+        )
+    )
+    if not math.isclose(id_digit_weight, expected["id_digit_weight"]):
+        raise ValueError(
+            "Checkpoint identifier weight does not match its codebook-count profile"
+        )
+    if len(checkpoint.get("training_track_ids", [])) != 25_000:
+        raise ValueError("Codebook-ablation checkpoint must contain 25K training IDs")
     return stored
 
 

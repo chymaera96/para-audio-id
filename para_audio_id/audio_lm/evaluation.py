@@ -29,7 +29,7 @@ from .generation import (
 )
 from .losses import causal_audio_id_losses
 from .noise import BackgroundNoiseAssets, mix_background_noise, stable_uint64
-from .profiles import historical_checkpoint_profile
+from .profiles import evaluation_checkpoint_profile
 from .random_crops import RandomEvaluationCollator, RandomEvaluationDataset
 from .rir import RoomImpulseResponseAssets, convolve_full_wet
 from .tokenizer import MuQRVQTokenizer
@@ -917,7 +917,7 @@ def _evaluate_joint_beam(
     rir_training_root: str | Path | None,
     rir_validation_root: str | Path | None,
 ) -> dict:
-    profile = historical_checkpoint_profile(checkpoint)
+    profile = evaluation_checkpoint_profile(checkpoint)
     if beam_width != 10:
         raise ValueError("Paper-facing joint-beam evaluation requires beam_width=10")
     if cohort != "training":

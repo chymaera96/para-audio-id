@@ -25,6 +25,7 @@ def with_overrides(
     run_id: str | None,
     wandb_online: bool,
     devices: int | None = None,
+    database_size: int | None = None,
     decoder: str | None = None,
     schedule: str | None = None,
     selected_codebooks: int | None = None,
@@ -44,6 +45,9 @@ def with_overrides(
             raise ValueError(f"devices must be positive, got {devices}")
         cfg.setdefault("trainer", {})["devices"] = devices
         cfg["trainer"]["strategy"] = "auto"
+    if database_size is not None:
+        cfg.setdefault("data", {})["database_size"] = database_size
+        cfg["data"]["max_training_tracks"] = database_size
     from .audio_lm.profiles import resolve_training_config
 
     return resolve_training_config(

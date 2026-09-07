@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Plot saved capacity-training curves with a logarithmic step axis."""
+"""Plot saved capacity-training curves against updates and exposure."""
 
 from __future__ import annotations
 
@@ -19,7 +19,6 @@ DEFAULT_RUNS = (
 )
 COLORS = ("#ff4d57", "#8bc34a", "#159184", "#44b7cf")
 RECORDINGS_PER_UPDATE = 80
-ONSET_MARGIN = 0.1
 
 
 def metric_json_key(name: str) -> str:
@@ -90,7 +89,7 @@ def transition_onset(
 ) -> int | None:
     """Return the first index below threshold for it and the next K values."""
     if persistence < 0:
-        raise ValueError("onset persistence must be non-negative")
+        raise ValueError("crossing persistence must be non-negative")
     required = persistence + 1
     for index in range(len(values) - required + 1):
         if all(value < threshold for value in values[index : index + required]):
@@ -101,7 +100,7 @@ def transition_onset(
 def parse_args() -> argparse.Namespace:
     repository = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(
-        description="Plot saved capacity loss curves on a log x-axis."
+        description="Plot saved capacity loss curves against updates and exposure."
     )
     parser.add_argument(
         "--log-root",
@@ -127,22 +126,16 @@ def parse_args() -> argparse.Namespace:
         help="trailing moving-average window in saved log records (default: 25)",
     )
     parser.add_argument(
-        "--onset-persistence",
+        "--crossing-persistence",
         type=int,
         default=5,
-        help="subsequent below-threshold measurements required for onset (default: 5)",
-    )
-    parser.add_argument(
-        "--x-axis",
-        choices=("updates", "exposures"),
-        default="updates",
-        help="plot optimizer updates or per-recording exposure U*B/N",
+        help="subsequent below-threshold measurements required (default: 5)",
     )
     parser.add_argument(
         "--output",
         type=Path,
         default=None,
-        help="output PDF (default: capacity-updates/exposures.pdf)",
+        help="output PDF (default: ablations/capacity.pdf)",
     )
     parser.add_argument("--dpi", type=int, default=200)
     return parser.parse_args()
@@ -160,12 +153,13 @@ def main() -> None:
 
     if args.smoothing_window < 1:
         raise SystemExit("--smoothing-window must be at least one")
-    if args.onset_persistence < 0:
-        raise SystemExit("--onset-persistence must be non-negative")
+    if args.crossing_persistence < 0:
+        raise SystemExit("--crossing-persistence must be non-negative")
 
-    figure, axis = plt.subplots(figsize=(10, 6))
+    figure, axes = plt.subplots(1, 2, figsize=(13, 5.2), sharey=True)
+    updates_axis, exposures_axis = axes
     chance_loss = math.log(10)
-    onset_threshold = chance_loss - ONSET_MARGIN
+    crossing_threshold = 0.9 * chance_loss
     for index, run in enumerate(args.runs):
         path = args.log_root / run / "training_metrics.jsonl"
         if not path.is_file():
@@ -173,81 +167,96 @@ def main() -> None:
         steps, values = load_curve(path, args.metric)
         values = moving_average(values, args.smoothing_window)
         database_size = database_size_from_run(run)
-        if args.x_axis == "exposures":
-            x_values = [
-                step * RECORDINGS_PER_UPDATE / database_size for step in steps
-            ]
-        else:
-            x_values = steps
+        exposures = [
+            step * RECORDINGS_PER_UPDATE / database_size for step in steps
+        ]
         color = COLORS[index % len(COLORS)]
         database_label = f"{database_size // 1_000}K"
-        axis.plot(
-            x_values,
+        updates_axis.plot(
+            steps,
             values,
             label=database_label,
             color=color,
             linewidth=1.4,
         )
-        onset_index = transition_onset(
+        exposures_axis.plot(
+            exposures,
             values,
-            persistence=args.onset_persistence,
-            threshold=onset_threshold,
+            label=database_label,
+            color=color,
+            linewidth=1.4,
         )
-        if onset_index is not None:
-            axis.scatter(
-                [x_values[onset_index]],
-                [values[onset_index]],
-                s=24,
-                color=color,
-                edgecolor="white",
-                linewidth=0.6,
-                zorder=4,
-            )
-            exposure = (
-                steps[onset_index] * RECORDINGS_PER_UPDATE / database_size
-            )
-            onset_message = (
-                f"onset step {steps[onset_index]:,}, exposure {exposure:.3f}"
+        crossing_index = transition_onset(
+            values,
+            persistence=args.crossing_persistence,
+            threshold=crossing_threshold,
+        )
+        if crossing_index is not None:
+            crossing_message = (
+                f"first persistent crossing of 0.9 ell_0: "
+                f"step {steps[crossing_index]:,}, "
+                f"exposure {exposures[crossing_index]:.3f}, "
+                f"smoothed loss {values[crossing_index]:.6f}"
             )
         else:
-            onset_message = "onset not reached"
+            crossing_message = "0.9 ell_0 not reached"
         print(
             f"{run}: {len(steps)} points, steps {steps[0]:,}–{steps[-1]:,}; "
-            f"{onset_message}"
+            f"{crossing_message}"
         )
 
-    axis.set_xscale("log")
-    axis.xaxis.set_major_locator(LogLocator(base=10))
-    axis.xaxis.set_minor_formatter(NullFormatter())
-    if args.x_axis == "exposures":
-        axis.set_xlabel(r"Per-recording exposure $U B / N$ (log scale)")
-    else:
-        axis.set_xlabel("Optimizer step (log scale)")
-    axis.set_ylabel("Identifier digit cross-entropy")
-    axis.axhline(
-        chance_loss,
-        color="#555555",
-        linestyle=":",
-        linewidth=1.3,
-        zorder=0,
-    )
-    axis.text(
+    updates_axis.set_xlabel("Optimizer update (log scale)")
+    exposures_axis.set_xlabel(r"Per-recording exposure $U B / N$ (log scale)")
+    updates_axis.set_ylabel("Identifier digit cross-entropy")
+    for axis in axes:
+        axis.set_xscale("log")
+        axis.xaxis.set_major_locator(LogLocator(base=10))
+        axis.xaxis.set_minor_formatter(NullFormatter())
+        axis.axhline(
+            chance_loss,
+            color="#3f3f3f",
+            linestyle=":",
+            linewidth=1.5,
+            zorder=0,
+        )
+        axis.axhline(
+            crossing_threshold,
+            color="#a5a5a5",
+            linestyle=":",
+            linewidth=1.25,
+            zorder=0,
+        )
+        axis.grid(True, which="major", alpha=0.30)
+        axis.grid(True, which="minor", axis="x", alpha=0.12)
+
+    exposures_axis.text(
         0.99,
         chance_loss,
-        r"$\ln(10)=2.303$",
-        transform=axis.get_yaxis_transform(),
+        r"$\ell_0=\ln(10)$",
+        transform=exposures_axis.get_yaxis_transform(),
         ha="right",
         va="bottom",
-        color="#444444",
+        color="#3f3f3f",
     )
-    axis.grid(True, which="major", alpha=0.30)
-    axis.grid(True, which="minor", axis="x", alpha=0.12)
-    axis.legend(frameon=False)
+    exposures_axis.text(
+        0.99,
+        crossing_threshold,
+        r"$0.9\ell_0$",
+        transform=exposures_axis.get_yaxis_transform(),
+        ha="right",
+        va="bottom",
+        color="#858585",
+    )
+    figure.legend(
+        *updates_axis.get_legend_handles_labels(),
+        loc="upper center",
+        ncol=len(args.runs),
+        frameon=False,
+    )
     figure.tight_layout()
+    figure.subplots_adjust(top=0.90, wspace=0.06)
 
-    output = args.output or (
-        Path(__file__).resolve().parent / f"capacity-{args.x_axis}.pdf"
-    )
+    output = args.output or (Path(__file__).resolve().parent / "capacity.pdf")
     output.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(output, dpi=args.dpi, bbox_inches="tight")
     plt.close(figure)

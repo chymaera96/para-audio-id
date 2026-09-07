@@ -129,16 +129,7 @@ def main() -> None:
     if args.crossing_persistence < 0:
         raise SystemExit("--crossing-persistence must be non-negative")
 
-    plt.rcParams.update(
-        {
-            "font.size": 8,
-            "axes.labelsize": 8,
-            "xtick.labelsize": 7,
-            "ytick.labelsize": 7,
-            "legend.fontsize": 7,
-        }
-    )
-    figure, axes = plt.subplots(1, 2, figsize=(7.0, 3.0), sharey=True)
+    figure, axes = plt.subplots(1, 2, figsize=(11.0, 5.2), sharey=True)
     updates_axis, exposures_axis = axes
     chance_loss = math.log(10)
     crossing_threshold = 0.9 * chance_loss
@@ -234,12 +225,11 @@ def main() -> None:
         ncol=len(args.runs),
         frameon=False,
         title="DB size",
-        title_fontsize=7,
         columnspacing=1.2,
         handlelength=2.0,
     )
     figure.tight_layout()
-    figure.subplots_adjust(top=0.82, wspace=0.06)
+    figure.subplots_adjust(top=0.90, wspace=0.025)
 
     output = args.output or (Path(__file__).resolve().parent / "capacity.pdf")
     output.parent.mkdir(parents=True, exist_ok=True)

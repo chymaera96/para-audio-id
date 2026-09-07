@@ -129,7 +129,7 @@ def main() -> None:
     if args.crossing_persistence < 0:
         raise SystemExit("--crossing-persistence must be non-negative")
 
-    figure, axes = plt.subplots(1, 2, figsize=(11.0, 5.2), sharey=True)
+    figure, axes = plt.subplots(1, 2, figsize=(7.0, 3.0), sharey=True)
     updates_axis, exposures_axis = axes
     chance_loss = math.log(10)
     crossing_threshold = 0.9 * chance_loss
@@ -209,6 +209,7 @@ def main() -> None:
         ha="right",
         va="bottom",
         color="#3f3f3f",
+        fontsize=6,
     )
     exposures_axis.text(
         0.99,
@@ -218,6 +219,7 @@ def main() -> None:
         ha="right",
         va="bottom",
         color="#858585",
+        fontsize=6,
     )
     figure.legend(
         *updates_axis.get_legend_handles_labels(),

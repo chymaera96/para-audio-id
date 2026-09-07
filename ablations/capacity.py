@@ -4,11 +4,9 @@
 from __future__ import annotations
 
 import argparse
-from collections import deque
 import json
 import math
 from pathlib import Path
-from typing import Iterable
 
 
 DEFAULT_RUNS = (
@@ -58,23 +56,6 @@ def load_curve(path: Path, metric: str) -> tuple[list[int], list[float]]:
     return [step for step, _ in points], [value for _, value in points]
 
 
-def moving_average(values: Iterable[float], window: int) -> list[float]:
-    if window < 1:
-        raise ValueError("smoothing window must be at least one")
-    if window == 1:
-        return list(values)
-    queue: deque[float] = deque()
-    total = 0.0
-    smoothed: list[float] = []
-    for value in values:
-        queue.append(value)
-        total += value
-        if len(queue) > window:
-            total -= queue.popleft()
-        smoothed.append(total / len(queue))
-    return smoothed
-
-
 def database_size_from_run(run: str) -> int:
     label = run.split("-", maxsplit=1)[0].lower()
     if not label.endswith("k") or not label[:-1].isdigit():
@@ -120,12 +101,6 @@ def parse_args() -> argparse.Namespace:
         help="W&B-style metric name or JSONL metric key",
     )
     parser.add_argument(
-        "--smoothing-window",
-        type=int,
-        default=25,
-        help="trailing moving-average window in saved log records (default: 25)",
-    )
-    parser.add_argument(
         "--crossing-persistence",
         type=int,
         default=5,
@@ -151,12 +126,19 @@ def main() -> None:
             "matplotlib is required: python -m pip install matplotlib"
         ) from exc
 
-    if args.smoothing_window < 1:
-        raise SystemExit("--smoothing-window must be at least one")
     if args.crossing_persistence < 0:
         raise SystemExit("--crossing-persistence must be non-negative")
 
-    figure, axes = plt.subplots(1, 2, figsize=(13, 5.2), sharey=True)
+    plt.rcParams.update(
+        {
+            "font.size": 8,
+            "axes.labelsize": 8,
+            "xtick.labelsize": 7,
+            "ytick.labelsize": 7,
+            "legend.fontsize": 7,
+        }
+    )
+    figure, axes = plt.subplots(1, 2, figsize=(7.0, 3.0), sharey=True)
     updates_axis, exposures_axis = axes
     chance_loss = math.log(10)
     crossing_threshold = 0.9 * chance_loss
@@ -165,7 +147,6 @@ def main() -> None:
         if not path.is_file():
             raise FileNotFoundError(f"Missing saved training log: {path}")
         steps, values = load_curve(path, args.metric)
-        values = moving_average(values, args.smoothing_window)
         database_size = database_size_from_run(run)
         exposures = [
             step * RECORDINGS_PER_UPDATE / database_size for step in steps
@@ -196,7 +177,7 @@ def main() -> None:
                 f"first persistent crossing of 0.9 ell_0: "
                 f"step {steps[crossing_index]:,}, "
                 f"exposure {exposures[crossing_index]:.3f}, "
-                f"smoothed loss {values[crossing_index]:.6f}"
+                f"loss {values[crossing_index]:.6f}"
             )
         else:
             crossing_message = "0.9 ell_0 not reached"
@@ -252,9 +233,13 @@ def main() -> None:
         loc="upper center",
         ncol=len(args.runs),
         frameon=False,
+        title="DB size",
+        title_fontsize=7,
+        columnspacing=1.2,
+        handlelength=2.0,
     )
     figure.tight_layout()
-    figure.subplots_adjust(top=0.90, wspace=0.06)
+    figure.subplots_adjust(top=0.82, wspace=0.06)
 
     output = args.output or (Path(__file__).resolve().parent / "capacity.pdf")
     output.parent.mkdir(parents=True, exist_ok=True)

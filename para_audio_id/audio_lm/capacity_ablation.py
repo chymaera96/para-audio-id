@@ -30,7 +30,7 @@ from .profiles import (
 from .tokenizer import MuQRVQTokenizer
 
 
-CAPACITY_ABLATION_PROTOCOL = "clean_capacity_common_2s_beam_mrr_v1"
+CAPACITY_ABLATION_PROTOCOL = "clean_capacity_intersection_2s_beam_mrr_v2"
 CAPACITY_ABLATION_SEED = 1337
 CAPACITY_ABLATION_TRACKS = 1_000
 CAPACITY_ABLATION_SECONDS = 2.0
@@ -77,9 +77,10 @@ def _manifest_track_ids(path: Path, records: list[CatalogueRecord], size: int) -
     return validate_cohort_manifest(path, records, size)
 
 
-def validate_nested_capacity_cohorts(
+def validate_capacity_cohorts(
     cfg: dict, records: list[CatalogueRecord]
-) -> tuple[dict[int, list[str]], dict[str, str]]:
+) -> tuple[dict[int, list[str]], dict[str, str], list[str]]:
+    """Validate each cohort and return identities shared by every capacity run."""
     cohorts: dict[int, list[str]] = {}
     fingerprints: dict[str, str] = {}
     for size in SUPPORTED_DATABASE_SIZES:
@@ -87,16 +88,19 @@ def validate_nested_capacity_cohorts(
         track_ids = _manifest_track_ids(path, records, size)
         cohorts[size] = track_ids
         fingerprints[str(size)] = _file_sha256(path)
-    for smaller, larger in zip(SUPPORTED_DATABASE_SIZES, SUPPORTED_DATABASE_SIZES[1:]):
-        missing = set(cohorts[smaller]) - set(cohorts[larger])
-        if missing:
-            example = sorted(missing)[0]
-            raise ValueError(
-                "Capacity cohorts are not nested: "
-                f"{smaller // 1_000}K is not a subset of {larger // 1_000}K "
-                f"(for example, {example} is missing)"
-            )
-    return cohorts, fingerprints
+    common = set(cohorts[SUPPORTED_DATABASE_SIZES[0]])
+    for size in SUPPORTED_DATABASE_SIZES[1:]:
+        common.intersection_update(cohorts[size])
+    # Preserve the deterministic order of the 10K manifest rather than relying
+    # on set iteration order.
+    common_track_ids = [track_id for track_id in cohorts[10_000] if track_id in common]
+    if len(common_track_ids) < CAPACITY_ABLATION_TRACKS:
+        raise ValueError(
+            "Capacity cohorts share only "
+            f"{len(common_track_ids):,} identities; at least "
+            f"{CAPACITY_ABLATION_TRACKS:,} are required for a common query set"
+        )
+    return cohorts, fingerprints, common_track_ids
 
 
 def _validate_capacity_checkpoint(
@@ -155,6 +159,7 @@ def _manifest_payload(
     *,
     queries: list[dict],
     exclusions: list[dict],
+    common_track_ids: list[str],
     cohort_fingerprints: dict[str, str],
     catalogue_digest: str,
     tokenizer_fingerprint: str,
@@ -165,7 +170,7 @@ def _manifest_payload(
         "sample_rate": CAPACITY_ABLATION_SAMPLE_RATE,
         "query_duration_seconds": CAPACITY_ABLATION_SECONDS,
         "selected_queries": CAPACITY_ABLATION_TRACKS,
-        "source_cohort_size": 10_000,
+        "common_training_identity_count": len(common_track_ids),
         "cohort_fingerprints": cohort_fingerprints,
         "catalogue_fingerprint": catalogue_digest,
         "tokenizer_fingerprint": tokenizer_fingerprint,
@@ -191,7 +196,7 @@ def _validate_query_manifest(
         "sample_rate": CAPACITY_ABLATION_SAMPLE_RATE,
         "query_duration_seconds": CAPACITY_ABLATION_SECONDS,
         "selected_queries": CAPACITY_ABLATION_TRACKS,
-        "source_cohort_size": 10_000,
+        "common_training_identity_count": len(common_track_ids),
         "cohort_fingerprints": cohort_fingerprints,
         "catalogue_fingerprint": catalogue_digest,
         "tokenizer_fingerprint": tokenizer_fingerprint,
@@ -214,7 +219,9 @@ def _validate_query_manifest(
     for row in queries:
         track_id = row.get("track_id")
         if track_id not in common or track_id not in records_by_id:
-            raise ValueError("Common query manifest contains an identity outside the 10K cohort")
+            raise ValueError(
+                "Common query manifest contains an identity outside the cohort intersection"
+            )
         record = records_by_id[track_id]
         if row.get("code") != record.code or row.get("source_path") != record.path:
             raise ValueError("Common query manifest no longer matches the catalogue")
@@ -295,6 +302,7 @@ def load_or_create_common_query_manifest(
     payload = _manifest_payload(
         queries=queries,
         exclusions=exclusions,
+        common_track_ids=common_track_ids,
         cohort_fingerprints=cohort_fingerprints,
         catalogue_digest=catalogue_digest,
         tokenizer_fingerprint=tokenizer_fingerprint,
@@ -394,7 +402,9 @@ def evaluate_capacity_ablation(
         raise FileNotFoundError(f"Missing capacity checkpoint: {checkpoint_path}")
 
     records = load_catalogue(cfg["data"]["catalogue"])
-    cohorts, cohort_fingerprints = validate_nested_capacity_cohorts(cfg, records)
+    cohorts, cohort_fingerprints, common_track_ids = validate_capacity_cohorts(
+        cfg, records
+    )
     checkpoint_metadata = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     profile = _validate_capacity_checkpoint(
         checkpoint_metadata,
@@ -406,7 +416,7 @@ def evaluate_capacity_ablation(
         manifest_path,
         audio_root=cfg["data"]["audio_root"],
         records=records,
-        common_track_ids=cohorts[10_000],
+        common_track_ids=common_track_ids,
         cohort_fingerprints=cohort_fingerprints,
         tokenizer_fingerprint=checkpoint_metadata["tokenizer_fingerprint"],
     )

@@ -13,7 +13,7 @@ from para_audio_id.audio_lm.capacity_ablation import (
     capacity_ablation_paths,
     capacity_run_name,
     reciprocal_rank,
-    validate_nested_capacity_cohorts,
+    validate_capacity_cohorts,
 )
 from para_audio_id.audio_lm.profiles import (
     canonical_capacity_profile,
@@ -69,7 +69,7 @@ def test_capacity_metrics_use_all_selected_queries() -> None:
     assert metrics["failed_queries"] == 1
 
 
-def test_nested_capacity_validation_rejects_non_nested(
+def test_capacity_validation_uses_shared_intersection(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     sizes = (10_000, 25_000, 50_000, 100_000)
@@ -86,13 +86,19 @@ def test_nested_capacity_validation_rejects_non_nested(
     for size in sizes:
         ids = [record.track_id for record in records[:size]]
         _write_manifest(Path(f"data/training_tracks_{size // 1000}k.json"), records, ids)
-    cohorts, _ = validate_nested_capacity_cohorts({}, records)
+    cohorts, _, common = validate_capacity_cohorts({}, records)
     assert len(cohorts[10_000]) == 10_000
+    assert common == cohorts[10_000]
 
-    bad_ids = [record.track_id for record in records[10_000:35_000]]
-    _write_manifest(Path("data/training_tracks_25k.json"), records, bad_ids)
-    with pytest.raises(ValueError, match="are not nested"):
-        validate_nested_capacity_cohorts({}, records)
+    non_nested_ids = [record.track_id for record in records[5_000:30_000]]
+    _write_manifest(Path("data/training_tracks_25k.json"), records, non_nested_ids)
+    _, _, common = validate_capacity_cohorts({}, records)
+    assert common == [record.track_id for record in records[5_000:10_000]]
+
+    disjoint_ids = [record.track_id for record in records[10_000:35_000]]
+    _write_manifest(Path("data/training_tracks_25k.json"), records, disjoint_ids)
+    with pytest.raises(ValueError, match="share only 0 identities"):
+        validate_capacity_cohorts({}, records)
 
 
 def test_expected_query_denominator_is_fixed() -> None:

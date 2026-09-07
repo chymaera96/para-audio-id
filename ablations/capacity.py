@@ -201,37 +201,29 @@ def main() -> None:
         axis.grid(True, which="major", alpha=0.30)
         axis.grid(True, which="minor", axis="x", alpha=0.12)
 
-    exposures_axis.text(
+    updates_axis.text(
         0.99,
         chance_loss,
         r"$\ell_0=\ln(10)$",
-        transform=exposures_axis.get_yaxis_transform(),
+        transform=updates_axis.get_yaxis_transform(),
         ha="right",
         va="bottom",
         color="#3f3f3f",
-        fontsize=6,
+        fontsize=8,
     )
-    exposures_axis.text(
-        0.99,
-        crossing_threshold,
-        r"$0.9\ell_0$",
-        transform=exposures_axis.get_yaxis_transform(),
-        ha="right",
-        va="bottom",
-        color="#858585",
-        fontsize=6,
-    )
-    figure.legend(
-        *updates_axis.get_legend_handles_labels(),
-        loc="upper center",
-        ncol=len(args.runs),
+    exposures_axis.legend(
+        loc="upper right",
+        ncol=2,
         frameon=False,
         title="DB size",
-        columnspacing=1.2,
-        handlelength=2.0,
+        fontsize=7,
+        title_fontsize=7,
+        columnspacing=0.8,
+        labelspacing=0.25,
+        handlelength=1.6,
     )
     figure.tight_layout()
-    figure.subplots_adjust(top=0.90, wspace=0.025)
+    figure.subplots_adjust(wspace=0.025)
 
     output = args.output or (Path(__file__).resolve().parent / "capacity.pdf")
     output.parent.mkdir(parents=True, exist_ok=True)

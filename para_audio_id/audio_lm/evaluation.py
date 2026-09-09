@@ -746,6 +746,7 @@ def _load_or_create_joint_manifest(
     cfg: dict,
     noise_assets: BackgroundNoiseAssets,
     rir_assets: RoomImpulseResponseAssets,
+    prescribed_queries: list[dict] | None = None,
 ) -> dict:
     if path.exists():
         manifest = json.loads(path.read_text())
@@ -774,6 +775,45 @@ def _load_or_create_joint_manifest(
     audio_root = Path(cfg["data"]["audio_root"])
     recipes = []
     excluded = []
+    if prescribed_queries is not None:
+        if len(prescribed_queries) != configuration["sample_tracks"]:
+            raise ValueError(
+                "Existing query corpus has a different number of selected tracks"
+            )
+        cohort_tracks = set(track_ids)
+        prescribed_ids = [str(row["track_id"]) for row in prescribed_queries]
+        if len(prescribed_ids) != len(set(prescribed_ids)):
+            raise ValueError("Existing query corpus contains duplicate track recipes")
+        missing = sorted(set(prescribed_ids) - cohort_tracks)
+        if missing:
+            raise ValueError(
+                "Existing query corpus is not a subset of this checkpoint's training "
+                f"cohort ({len(missing)} tracks missing; for example {missing[0]})"
+            )
+        for raw in prescribed_queries:
+            recipe = dict(raw)
+            record = by_track.get(str(recipe["track_id"]))
+            if record is None:
+                raise ValueError(
+                    f"Query-corpus track {recipe['track_id']} is absent from catalogue"
+                )
+            if (
+                recipe.get("code") != record.code
+                or recipe.get("source_path") != record.path
+            ):
+                raise ValueError(
+                    f"Query-corpus metadata changed for track {recipe['track_id']}"
+                )
+            recipes.append(recipe)
+        content = {
+            "configuration": configuration,
+            "queries": recipes,
+            "excluded_candidates": excluded,
+        }
+        manifest = {**content, "fingerprint": _fingerprint_json(content)}
+        _atomic_write_json(path, manifest)
+        return manifest
+
     for track_id in tqdm(track_ids, desc="building joint-evaluation manifest"):
         if len(recipes) == configuration["sample_tracks"]:
             break
@@ -1042,7 +1082,11 @@ def _materialize_joint_query_corpus(
         raise RuntimeError(
             f"Materialized {len(records)} queries, expected {expected_records}"
         )
-    content = {"configuration": configuration, "records": records}
+    content = {
+        "configuration": configuration,
+        "recipes": manifest["queries"],
+        "records": records,
+    }
     corpus = {**content, "fingerprint": _fingerprint_json(content)}
     temporary_records = records_path.with_suffix(".jsonl.tmp")
     with temporary_records.open("w", encoding="utf-8") as handle:
@@ -1051,6 +1095,22 @@ def _materialize_joint_query_corpus(
     temporary_records.replace(records_path)
     _atomic_write_json(corpus_manifest_path, corpus)
     return corpus
+
+
+def _existing_query_corpus_recipes(root: Path) -> list[dict] | None:
+    path = root / "manifest.json"
+    if not path.exists():
+        return None
+    corpus = json.loads(path.read_text())
+    content = {key: value for key, value in corpus.items() if key != "fingerprint"}
+    if corpus.get("fingerprint") != _fingerprint_json(content):
+        raise ValueError("Materialized query-corpus fingerprint is invalid")
+    if corpus.get("configuration", {}).get("protocol") != JOINT_QUERY_CORPUS_PROTOCOL:
+        raise ValueError("Materialized query corpus uses an incompatible protocol")
+    recipes = corpus.get("recipes")
+    if not isinstance(recipes, list):
+        raise ValueError("Materialized query corpus does not contain reusable recipes")
+    return [dict(row) for row in recipes]
 
 
 def _load_joint_rows(path: Path, *, fingerprint: str) -> dict[tuple[str, str, str], dict]:
@@ -1195,6 +1255,12 @@ def _evaluate_joint_beam(
         raise ValueError("Validation room-IR assets do not match the checkpoint")
 
     summary_path, csv_path, query_path, manifest_path = _joint_output_paths(output)
+    query_corpus_root = (
+        Path(query_corpus)
+        if query_corpus is not None
+        else Path(output).with_suffix(".query-corpus")
+    )
+    prescribed_queries = _existing_query_corpus_recipes(query_corpus_root)
     checkpoint_fingerprint = _checkpoint_file_fingerprint(checkpoint_path)
     configuration = _joint_manifest_configuration(
         checkpoint_fingerprint=checkpoint_fingerprint,
@@ -1218,12 +1284,12 @@ def _evaluate_joint_beam(
         cfg=cfg,
         noise_assets=noise_assets,
         rir_assets=rir_assets,
+        prescribed_queries=prescribed_queries,
     )
-    query_corpus_root = (
-        Path(query_corpus)
-        if query_corpus is not None
-        else Path(output).with_suffix(".query-corpus")
-    )
+    if prescribed_queries is not None and manifest["queries"] != prescribed_queries:
+        raise ValueError(
+            "Existing evaluation manifest does not use the requested query corpus"
+        )
     materialized_corpus = _materialize_joint_query_corpus(
         root=query_corpus_root,
         manifest=manifest,

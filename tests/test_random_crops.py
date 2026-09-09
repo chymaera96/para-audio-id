@@ -514,6 +514,16 @@ def test_joint_manifest_is_deterministic_and_backfills_bad_candidates(tmp_path):
         noise_assets=noise_assets,
         rir_assets=rir_assets,
     ) == corpus
+    reused = _load_or_create_joint_manifest(
+        path=tmp_path / "reused.manifest.json",
+        configuration=configuration,
+        checkpoint=checkpoint,
+        cfg=cfg,
+        noise_assets=noise_assets,
+        rir_assets=rir_assets,
+        prescribed_queries=corpus["recipes"],
+    )
+    assert reused["queries"] == first["queries"]
     changed = {**configuration, "recipe_seed": 10}
     with pytest.raises(ValueError, match="does not match"):
         _load_or_create_joint_manifest(

@@ -217,6 +217,34 @@ def test_joint_evaluation_rejects_five_second_codebook_checkpoint():
         evaluation_checkpoint_profile(checkpoint)
 
 
+@pytest.mark.parametrize(
+    ("variant", "decoder"),
+    [
+        ("tc18-two-second-eight-codebook-logit-distillation", "small"),
+        ("scale-100k-medium-4gpu-eight-codebook-throughput", "medium"),
+    ],
+)
+def test_joint_evaluation_accepts_100k_tc18_variants(variant, decoder):
+    profile = {
+        "version": 1,
+        "variant": variant,
+        "database_size": 100_000,
+        "decoder": {"name": decoder},
+    }
+    checkpoint = {
+        "resolved_training_profile": profile,
+        "tokenizer_spec": {"selected_codebooks": 8},
+        "query_spec": {
+            "segment_duration_seconds": 2.0,
+            "selected_codebooks": 8,
+            "id_digit_weight": 32.0,
+        },
+        "hyper_parameters": {"data": {"segment_duration": 2.0}},
+        "training_track_ids": [str(index) for index in range(100_000)],
+    }
+    assert evaluation_checkpoint_profile(checkpoint) == profile
+
+
 def test_tc18_noise_rir_boundaries_remain_unchanged():
     profile = schedule_profile("noise-rir", 25_000)
     expected = {

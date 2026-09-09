@@ -225,6 +225,9 @@ codebooks), tc17 (six codebooks), tc18 (eight codebooks), and new main-branch
 variable-codebook checkpoints. Their model, vocabulary, and MuQ tokenizer are
 reconstructed from checkpoint metadata, permitting a common 2/4/6/8-codebook
 evaluation under the same deterministic query and degradation protocol.
+It also accepts the 25K/100K tc18 small checkpoints and the 100K medium
+throughput checkpoint, reconstructing decoder dimensions and codebook count
+from checkpoint metadata rather than current training defaults.
 
 This derives catalogue size and decoder dimensions from the checkpoint and
 defaults to a seeded 1,000-track sample, recipe and sample seed `1337`, fixed

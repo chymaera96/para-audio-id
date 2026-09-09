@@ -48,6 +48,10 @@ EVALUATION_VARIANTS = {
         "selected_codebooks": 8,
         "id_digit_weight": 32.0,
     },
+    "scale-100k-medium-4gpu-eight-codebook-throughput": {
+        "selected_codebooks": 8,
+        "id_digit_weight": 32.0,
+    },
 }
 
 
@@ -248,8 +252,11 @@ def evaluation_checkpoint_profile(checkpoint: dict) -> dict[str, Any]:
             "Joint-beam evaluation supports only the two-second 2/4/6/8 "
             "codebook variants"
         )
-    if int(stored.get("database_size", -1)) != 25_000:
-        raise ValueError("Codebook-ablation evaluation requires the 25K cohort")
+    database_size = int(stored.get("database_size", -1))
+    if database_size not in (25_000, 100_000):
+        raise ValueError(
+            "Joint-beam evaluation requires a 25K or 100K training cohort"
+        )
 
     tokenizer = checkpoint.get("tokenizer_spec", {})
     query = checkpoint.get("query_spec", {})
@@ -278,8 +285,10 @@ def evaluation_checkpoint_profile(checkpoint: dict) -> dict[str, Any]:
         raise ValueError(
             "Checkpoint identifier weight does not match its codebook-count profile"
         )
-    if len(checkpoint.get("training_track_ids", [])) != 25_000:
-        raise ValueError("Codebook-ablation checkpoint must contain 25K training IDs")
+    if len(checkpoint.get("training_track_ids", [])) != database_size:
+        raise ValueError(
+            "Checkpoint training identity count does not match its database size"
+        )
     return stored
 
 

@@ -9,13 +9,15 @@ from para_audio_id.catalogue import CatalogueRecord
 from para_audio_id.audio_lm.noise import BackgroundNoiseAssets, mix_background_noise
 from para_audio_id.audio_lm.evaluation import (
     JOINT_QUERY_LENGTHS,
-    JOINT_SNRS_DB,
+    JOINT_SNR_RANGES_DB,
     _joint_manifest_configuration,
     _joint_metrics,
     _load_joint_rows,
     _load_or_create_joint_manifest,
+    _materialize_joint_query_corpus,
     _prepare_joint_suite_waveform,
     joint_degradation_suites,
+    joint_sampled_snr_db,
 )
 from para_audio_id.audio_lm.rir import RoomImpulseResponseAssets, convolve_full_wet
 from para_audio_id.audio_lm.random_crops import (
@@ -479,6 +481,39 @@ def test_joint_manifest_is_deterministic_and_backfills_bad_candidates(tmp_path):
     assert first["excluded_candidates"][0]["track_id"] == missing_track
     assert all(row["noise_path"] == "test.wav" for row in first["queries"])
     assert all(row["rir_path"] == "OpenAIR/test-room/test.wav" for row in first["queries"])
+    corpus = _materialize_joint_query_corpus(
+        root=tmp_path / "evaluation.query-corpus",
+        manifest=first,
+        cfg=cfg,
+        noise_assets=noise_assets,
+        rir_assets=rir_assets,
+    )
+    assert len(corpus["records"]) == 2 * 6 * 3
+    assert all(
+        (tmp_path / "evaluation.query-corpus" / row["path"]).is_file()
+        for row in corpus["records"]
+    )
+    by_recipe = {
+        (row["track_id"], row["query_seconds"], row["snr_min_db"], row["rir"]): row
+        for row in corpus["records"]
+    }
+    for row in corpus["records"]:
+        counterpart = by_recipe[
+            (
+                row["track_id"],
+                row["query_seconds"],
+                row["snr_min_db"],
+                not row["rir"],
+            )
+        ]
+        assert row["snr_db"] == counterpart["snr_db"]
+    assert _materialize_joint_query_corpus(
+        root=tmp_path / "evaluation.query-corpus",
+        manifest=first,
+        cfg=cfg,
+        noise_assets=noise_assets,
+        rir_assets=rir_assets,
+    ) == corpus
     changed = {**configuration, "recipe_seed": 10}
     with pytest.raises(ValueError, match="does not match"):
         _load_or_create_joint_manifest(
@@ -491,15 +526,26 @@ def test_joint_manifest_is_deterministic_and_backfills_bad_candidates(tmp_path):
         )
 
 
-def test_joint_protocol_has_exact_noise_rir_cross_product():
+def test_joint_protocol_has_ranged_noise_rir_cross_product():
     suites = joint_degradation_suites()
     assert JOINT_QUERY_LENGTHS == (2.0, 5.0, 10.0)
-    assert JOINT_SNRS_DB == (0.0, 5.0, 10.0, 20.0)
-    assert len(suites) == 8
-    assert {(suite["rir"], suite["snr_db"]) for suite in suites} == {
-        (rir, snr) for rir in (False, True) for snr in JOINT_SNRS_DB
+    assert JOINT_SNR_RANGES_DB == ((0.0, 5.0), (5.0, 10.0), (10.0, 20.0))
+    assert len(suites) == 6
+    assert {
+        (suite["rir"], suite["snr_min_db"], suite["snr_max_db"])
+        for suite in suites
+    } == {
+        (rir, lower, upper)
+        for rir in (False, True)
+        for lower, upper in JOINT_SNR_RANGES_DB
     }
     assert all("clean" not in suite["suite_id"] for suite in suites)
+
+    for lower, upper in JOINT_SNR_RANGES_DB:
+        first = joint_sampled_snr_db(1337, "track", lower, upper)
+        assert lower <= first < upper
+        assert first == joint_sampled_snr_db(1337, "track", lower, upper)
+        assert first != joint_sampled_snr_db(1337, "other-track", lower, upper)
 
 
 def test_joint_suite_applies_exact_snr_then_full_wet_rir():

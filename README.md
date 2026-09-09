@@ -205,9 +205,11 @@ which PyTorch cannot promise bitwise determinism instead of aborting a long run.
 
 The paper-facing evaluation samples a deterministic 1,000-track subset from the
 checkpoint's embedded training cohort. It evaluates nested 2/5/10-second queries
-under eight fixed suites: held-out background noise at 0/5/10/20 dB, with and
-without fully wet held-out room convolution. Noise is mixed before RIR, matching
-training. Queries use two-second windows with 50% overlap. Identifier
+under six fixed suites: held-out background noise sampled uniformly within
+0--5/5--10/10--20 dB, with and without fully wet held-out room convolution.
+The sampled SNR and underlying noise recipe are shared between each noise-only
+and noise+RIR pair. Noise is mixed before RIR, matching training. Queries use
+two-second windows with 50% overlap. Identifier
 log-probabilities are averaged across all windows at each shared beam prefix
 before pruning:
 
@@ -226,12 +228,16 @@ evaluation under the same deterministic query and degradation protocol.
 
 This derives catalogue size and decoder dimensions from the checkpoint and
 defaults to a seeded 1,000-track sample, recipe and sample seed `1337`, fixed
-query lengths `2/5/10`, the eight fixed noise/RIR suites, beam width 10, and
-CUDA. Each track reuses one validation-noise recipe and one validation IR across
-all durations and SNRs.
+query lengths `2/5/10`, the six fixed ranged-noise/RIR suites, beam width 10,
+and CUDA. Each track reuses one validation-noise recipe and one validation IR
+across all durations and SNR ranges.
 
 The command writes a JSON summary, paper-ready CSV, append-only query JSONL, and
-an immutable evaluation manifest. Matching reruns resume completed queries;
+an immutable evaluation manifest. It also materializes the exact PCM-16 WAV
+queries under `<output-stem>.query-corpus/` and writes a baseline-compatible
+`records.jsonl` there. Pass that record list to the NMFP/NAFP/GraFP/AudioSearch
+query-extraction command so every benchmark consumes exactly the same audio.
+Matching reruns reuse the materialized corpus and resume completed queries;
 checkpoint, tokenizer, noise/IR-manifest, seed, or protocol mismatches fail. Metrics
 include beam Top-1/5/10, MRR, evaluated/failed counts, latency, and throughput
 for each duration and suite. Runtime failures count as retrieval misses in

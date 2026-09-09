@@ -8,8 +8,10 @@ import math
 import numpy as np
 from pathlib import Path
 import random
+import re
 import time
 
+import soundfile as sf
 import torch
 from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
@@ -526,21 +528,45 @@ def _evaluate_cached_positions(
     return metrics
 
 
-JOINT_BEAM_PROTOCOL = "paper_joint_beam_noise_rir_inference_v2"
+JOINT_BEAM_PROTOCOL = "paper_joint_beam_noise_range_rir_inference_v3"
+JOINT_QUERY_CORPUS_PROTOCOL = "shared_materialized_noise_range_rir_queries_v1"
 JOINT_QUERY_LENGTHS = (2.0, 5.0, 10.0)
-JOINT_SNRS_DB = (0.0, 5.0, 10.0, 20.0)
+JOINT_SNR_RANGES_DB = ((0.0, 5.0), (5.0, 10.0), (10.0, 20.0))
+
+
+def _snr_range_id(lower: float, upper: float) -> str:
+    return f"{lower:g}_{upper:g}db"
 
 
 def joint_degradation_suites() -> tuple[dict, ...]:
     return tuple(
         {
-            "suite_id": f"{'noise_rir' if rir else 'noise'}_{snr:g}db",
+            "suite_id": (
+                f"{'noise_rir' if rir else 'noise'}_"
+                f"{_snr_range_id(lower, upper)}"
+            ),
             "rir": rir,
-            "snr_db": snr,
+            "snr_min_db": lower,
+            "snr_max_db": upper,
         }
         for rir in (False, True)
-        for snr in JOINT_SNRS_DB
+        for lower, upper in JOINT_SNR_RANGES_DB
     )
+
+
+def joint_sampled_snr_db(
+    recipe_seed: int, track_id: str, lower: float, upper: float
+) -> float:
+    if not lower < upper:
+        raise ValueError("Joint-evaluation SNR ranges must have positive width")
+    draw = stable_uint64(
+        recipe_seed,
+        track_id,
+        "paper-snr-range",
+        f"{lower:g}",
+        f"{upper:g}",
+    ) / float(2**64)
+    return lower + draw * (upper - lower)
 
 
 def joint_window_starts(
@@ -699,9 +725,11 @@ def _joint_manifest_configuration(
         "sample_seed": sample_seed,
         "recipe_seed": recipe_seed,
         "query_lengths": list(JOINT_QUERY_LENGTHS),
-        "snrs_db": list(JOINT_SNRS_DB),
+        "snr_ranges_db": [list(bounds) for bounds in JOINT_SNR_RANGES_DB],
         "suites": list(joint_degradation_suites()),
         "degradation_order": "background_noise_then_full_wet_room_ir",
+        "query_corpus_protocol": JOINT_QUERY_CORPUS_PROTOCOL,
+        "query_audio_encoding": "WAV_PCM_16",
         "beam_width": beam_width,
         "sample_rate": sample_rate,
         "window_seconds": window_seconds,
@@ -824,6 +852,207 @@ def _load_or_create_joint_manifest(
     return manifest
 
 
+def _safe_query_name(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "_", value)
+    if not cleaned:
+        raise ValueError("Query identifier cannot be converted to a filename")
+    return cleaned
+
+
+def _atomic_write_wav(path: Path, waveform: np.ndarray, sample_rate: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.stem}.tmp.wav")
+    sf.write(temporary, waveform, sample_rate, format="WAV", subtype="PCM_16")
+    temporary.replace(path)
+
+
+def _load_materialized_query(path: Path, expected_samples: int) -> np.ndarray:
+    waveform, sample_rate = sf.read(path, dtype="float32", always_2d=False)
+    if sample_rate < 1:
+        raise ValueError(f"Invalid sample rate in materialized query {path}")
+    if waveform.ndim == 2:
+        waveform = waveform.mean(axis=1)
+    waveform = np.asarray(waveform, dtype=np.float32)
+    _valid_waveform(waveform, expected_samples)
+    return waveform
+
+
+def _materialize_joint_query_corpus(
+    *,
+    root: str | Path,
+    manifest: dict,
+    cfg: dict,
+    noise_assets: BackgroundNoiseAssets,
+    rir_assets: RoomImpulseResponseAssets,
+) -> dict:
+    root = Path(root)
+    corpus_manifest_path = root / "manifest.json"
+    configuration_path = root / "configuration.json"
+    records_path = root / "records.jsonl"
+    evaluation = manifest["configuration"]
+    configuration = {
+        "protocol": JOINT_QUERY_CORPUS_PROTOCOL,
+        "recipes_fingerprint": _fingerprint_json(manifest["queries"]),
+        "background_noise_validation_fingerprint": evaluation[
+            "background_noise_validation_fingerprint"
+        ],
+        "room_ir_validation_fingerprint": evaluation[
+            "room_ir_validation_fingerprint"
+        ],
+        "sample_rate": int(evaluation["sample_rate"]),
+        "query_lengths": list(JOINT_QUERY_LENGTHS),
+        "snr_ranges_db": [list(bounds) for bounds in JOINT_SNR_RANGES_DB],
+        "suites": list(joint_degradation_suites()),
+        "recipe_seed": int(evaluation["recipe_seed"]),
+        "audio_encoding": "WAV_PCM_16",
+        "degradation_order": "background_noise_then_full_wet_room_ir",
+    }
+    if corpus_manifest_path.exists():
+        corpus = json.loads(corpus_manifest_path.read_text())
+        content = {key: value for key, value in corpus.items() if key != "fingerprint"}
+        if corpus.get("fingerprint") != _fingerprint_json(content):
+            raise ValueError("Materialized query-corpus fingerprint is invalid")
+        if corpus.get("configuration") != configuration:
+            raise ValueError("Existing materialized query corpus is incompatible")
+        missing = [
+            row["path"]
+            for row in corpus.get("records", [])
+            if not (root / row["path"]).is_file()
+        ]
+        if missing:
+            raise ValueError(
+                f"Materialized query corpus is incomplete; missing {len(missing)} files"
+            )
+        if not records_path.is_file():
+            raise ValueError("Materialized query corpus is missing records.jsonl")
+        return corpus
+
+    root.mkdir(parents=True, exist_ok=True)
+    if configuration_path.exists():
+        if json.loads(configuration_path.read_text()) != configuration:
+            raise ValueError("Partial materialized query corpus is incompatible")
+    else:
+        _atomic_write_json(configuration_path, configuration)
+
+    sample_rate = int(configuration["sample_rate"])
+    maximum_seconds = max(JOINT_QUERY_LENGTHS)
+    maximum_samples = round(maximum_seconds * sample_rate)
+    past_samples = round(float(evaluation["past_context_seconds"]) * sample_rate)
+    context_samples = past_samples + maximum_samples
+    audio_root = Path(cfg["data"]["audio_root"])
+    records: list[dict] = []
+    total = len(manifest["queries"]) * len(JOINT_SNR_RANGES_DB)
+    progress = tqdm(total=total, desc="materializing shared query corpus")
+    for recipe in manifest["queries"]:
+        context = _load_query_context(
+            audio_root / recipe["source_path"],
+            sample_rate=sample_rate,
+            start_sample=int(recipe["start_sample"]),
+            query_samples=maximum_samples,
+            past_samples=past_samples,
+        )
+        noise, noise_path, noise_offset = noise_assets.load_validation_recipe(
+            stable_uint64(
+                configuration["recipe_seed"], recipe["track_id"], "paper-noise"
+            ),
+            samples=context_samples,
+        )
+        if (
+            noise_path != recipe["noise_path"]
+            or noise_offset != recipe["noise_offset_samples"]
+        ):
+            raise ValueError("Validation noise recipe changed")
+        ir, rir_path = rir_assets.load_validation(
+            stable_uint64(
+                configuration["recipe_seed"], recipe["track_id"], "paper-room-ir"
+            )
+        )
+        if rir_path != recipe["rir_path"]:
+            raise ValueError("Validation IR recipe changed")
+
+        for lower, upper in JOINT_SNR_RANGES_DB:
+            snr_db = joint_sampled_snr_db(
+                configuration["recipe_seed"], recipe["track_id"], lower, upper
+            )
+            range_id = _snr_range_id(lower, upper)
+            waveforms = {
+                False: _prepare_joint_suite_waveform(
+                    context,
+                    noise,
+                    np.empty(0, dtype=np.float32),
+                    rir=False,
+                    snr_db=snr_db,
+                    past_samples=past_samples,
+                    output_samples=maximum_samples,
+                ),
+                True: _prepare_joint_suite_waveform(
+                    context,
+                    noise,
+                    ir,
+                    rir=True,
+                    snr_db=snr_db,
+                    past_samples=past_samples,
+                    output_samples=maximum_samples,
+                ),
+            }
+            for rir, maximum_waveform in waveforms.items():
+                suite_id = f"{'noise_rir' if rir else 'noise'}_{range_id}"
+                for query_seconds in JOINT_QUERY_LENGTHS:
+                    query_samples = round(query_seconds * sample_rate)
+                    relative_path = Path("audio") / suite_id / f"{query_seconds:g}s" / (
+                        f"{_safe_query_name(str(recipe['track_id']))}.wav"
+                    )
+                    path = root / relative_path
+                    if not path.exists():
+                        _atomic_write_wav(
+                            path, maximum_waveform[:query_samples], sample_rate
+                        )
+                    _load_materialized_query(path, query_samples)
+                    records.append(
+                        {
+                            "id": (
+                                f"{recipe['track_id']}__{suite_id}__"
+                                f"{query_seconds:g}s"
+                            ),
+                            "path": relative_path.as_posix(),
+                            "reference_id": Path(recipe["source_path"]).stem,
+                            "track_id": recipe["track_id"],
+                            "code": recipe["code"],
+                            "suite_id": suite_id,
+                            "rir": rir,
+                            "snr_min_db": lower,
+                            "snr_max_db": upper,
+                            "snr_db": snr_db,
+                            "query_seconds": query_seconds,
+                            "start_sample": recipe["start_sample"],
+                            "noise_path": recipe["noise_path"],
+                            "noise_offset_samples": recipe["noise_offset_samples"],
+                            "rir_path": recipe["rir_path"] if rir else None,
+                        }
+                    )
+            progress.update()
+    progress.close()
+
+    expected_records = (
+        len(manifest["queries"])
+        * len(joint_degradation_suites())
+        * len(JOINT_QUERY_LENGTHS)
+    )
+    if len(records) != expected_records:
+        raise RuntimeError(
+            f"Materialized {len(records)} queries, expected {expected_records}"
+        )
+    content = {"configuration": configuration, "records": records}
+    corpus = {**content, "fingerprint": _fingerprint_json(content)}
+    temporary_records = records_path.with_suffix(".jsonl.tmp")
+    with temporary_records.open("w", encoding="utf-8") as handle:
+        for row in records:
+            handle.write(json.dumps(row, sort_keys=True) + "\n")
+    temporary_records.replace(records_path)
+    _atomic_write_json(corpus_manifest_path, corpus)
+    return corpus
+
+
 def _load_joint_rows(path: Path, *, fingerprint: str) -> dict[tuple[str, str, str], dict]:
     if not path.exists():
         return {}
@@ -880,6 +1109,8 @@ def _write_joint_csv(path: Path, rows: list[dict]) -> None:
     columns = (
         "suite_id",
         "rir",
+        "snr_min_db",
+        "snr_max_db",
         "snr_db",
         "query_seconds",
         "selected_queries",
@@ -916,6 +1147,7 @@ def _evaluate_joint_beam(
     beam_width: int,
     rir_training_root: str | Path | None,
     rir_validation_root: str | Path | None,
+    query_corpus: str | Path | None,
 ) -> dict:
     profile = evaluation_checkpoint_profile(checkpoint)
     if beam_width != 10:
@@ -987,16 +1219,34 @@ def _evaluate_joint_beam(
         noise_assets=noise_assets,
         rir_assets=rir_assets,
     )
+    query_corpus_root = (
+        Path(query_corpus)
+        if query_corpus is not None
+        else Path(output).with_suffix(".query-corpus")
+    )
+    materialized_corpus = _materialize_joint_query_corpus(
+        root=query_corpus_root,
+        manifest=manifest,
+        cfg=cfg,
+        noise_assets=noise_assets,
+        rir_assets=rir_assets,
+    )
+    corpus_lookup = {
+        (
+            str(row["track_id"]),
+            f"{float(row['query_seconds']):g}",
+            str(row["suite_id"]),
+        ): row
+        for row in materialized_corpus["records"]
+    }
     completed = _load_joint_rows(query_path, fingerprint=manifest["fingerprint"])
     suites = joint_degradation_suites()
     total = len(manifest["queries"]) * len(JOINT_QUERY_LENGTHS) * len(suites)
     progress = tqdm(total=total, initial=len(completed), desc="joint-beam evaluation")
     query_path.parent.mkdir(parents=True, exist_ok=True)
-    audio_root = Path(cfg["data"]["audio_root"])
     sample_rate = tokenizer.sample_rate
     window_samples = round(window_seconds * sample_rate)
     hop_samples = window_samples // 2
-    past_samples = round(past_seconds * sample_rate)
     configured_batch = int(cfg["evaluation"]["generation_batch_size"])
     maximum_query_samples = round(maximum_seconds * sample_rate)
     maximum_starts = joint_window_starts(
@@ -1023,52 +1273,22 @@ def _evaluate_joint_beam(
                 for recipe in batch_recipes:
                     preparation_started = time.perf_counter()
                     try:
-                        context = _load_query_context(
-                            audio_root / recipe["source_path"],
-                            sample_rate=sample_rate,
-                            start_sample=int(recipe["start_sample"]),
-                            query_samples=maximum_query_samples,
-                            past_samples=past_samples,
-                        )
-                        noise, noise_path, noise_offset = (
-                            noise_assets.load_validation_recipe(
-                                stable_uint64(
-                                    recipe_seed,
-                                    recipe["track_id"],
-                                    "paper-noise",
-                                ),
-                                samples=context_samples,
+                        corpus_record = corpus_lookup[
+                            (
+                                str(recipe["track_id"]),
+                                f"{maximum_seconds:g}",
+                                suite_id,
                             )
-                        )
-                        if (
-                            noise_path != recipe["noise_path"]
-                            or noise_offset != recipe["noise_offset_samples"]
-                        ):
-                            raise ValueError("Validation noise recipe changed")
-                        ir = np.empty(0, dtype=np.float32)
-                        if bool(suite["rir"]):
-                            ir, rir_path = rir_assets.load_validation(
-                                stable_uint64(
-                                    recipe_seed,
-                                    recipe["track_id"],
-                                    "paper-room-ir",
-                                )
-                            )
-                            if rir_path != recipe["rir_path"]:
-                                raise ValueError("Validation IR recipe changed")
-                        waveform = _prepare_joint_suite_waveform(
-                            context,
-                            noise,
-                            ir,
-                            rir=bool(suite["rir"]),
-                            snr_db=float(suite["snr_db"]),
-                            past_samples=past_samples,
-                            output_samples=maximum_query_samples,
+                        ]
+                        waveform = _load_materialized_query(
+                            query_corpus_root / corpus_record["path"],
+                            maximum_query_samples,
                         )
                         prepared.append(
                             (
                                 recipe,
                                 waveform,
+                                corpus_record,
                                 time.perf_counter() - preparation_started,
                             )
                         )
@@ -1097,6 +1317,12 @@ def _evaluate_joint_beam(
                             "code": recipe["code"],
                             "query_seconds": query_seconds,
                             **suite,
+                            "snr_db": joint_sampled_snr_db(
+                                recipe_seed,
+                                str(recipe["track_id"]),
+                                float(suite["snr_min_db"]),
+                                float(suite["snr_max_db"]),
+                            ),
                             "start_sample": recipe["start_sample"],
                             "noise_path": recipe["noise_path"],
                             "noise_offset_samples": recipe["noise_offset_samples"],
@@ -1130,7 +1356,7 @@ def _evaluate_joint_beam(
                                 for start in starts
                             ]
                         )
-                        for _, waveform, _ in active
+                        for _, waveform, _, _ in active
                     ]
                     flattened = torch.from_numpy(
                         np.concatenate(windows_by_recipe, axis=0)
@@ -1153,7 +1379,7 @@ def _evaluate_joint_beam(
                     inference_latency = (
                         time.perf_counter() - inference_started
                     ) / len(active)
-                    for (recipe, _, preparation_latency), ranking in zip(
+                    for (recipe, _, corpus_record, preparation_latency), ranking in zip(
                         active, rankings, strict=True
                     ):
                         codes = [candidate.code for candidate in ranking]
@@ -1169,6 +1395,7 @@ def _evaluate_joint_beam(
                             "code": recipe["code"],
                             "query_seconds": query_seconds,
                             **suite,
+                            "snr_db": corpus_record["snr_db"],
                             "start_sample": recipe["start_sample"],
                             "noise_path": recipe["noise_path"],
                             "noise_offset_samples": recipe["noise_offset_samples"],
@@ -1222,6 +1449,9 @@ def _evaluate_joint_beam(
     payload = {
         "protocol": JOINT_BEAM_PROTOCOL,
         "manifest_fingerprint": manifest["fingerprint"],
+        "query_corpus_fingerprint": materialized_corpus["fingerprint"],
+        "query_corpus": str(query_corpus_root),
+        "baseline_query_records": str(query_corpus_root / "records.jsonl"),
         "configuration": configuration,
         "selected_tracks": len(manifest["queries"]),
         "checkpoint_profile": profile,
@@ -1249,6 +1479,7 @@ def evaluate(
     recipe_seed: int = 1337,
     rir_training_root: str | Path | None = None,
     rir_validation_root: str | Path | None = None,
+    query_corpus: str | Path | None = None,
 ) -> dict:
     model, vocabulary, cfg, checkpoint = load_audio_lm(checkpoint_path, device)
     if protocol == "joint-beam":
@@ -1276,6 +1507,7 @@ def evaluate(
             beam_width=10 if beam_width is None else beam_width,
             rir_training_root=rir_training_root,
             rir_validation_root=rir_validation_root,
+            query_corpus=query_corpus,
         )
     if protocol != "segment":
         raise ValueError(f"Unknown evaluation protocol {protocol!r}")

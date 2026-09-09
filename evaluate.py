@@ -15,7 +15,10 @@ def main() -> None:
         "--protocol",
         choices=("segment", "joint-beam"),
         default="segment",
-        help="Use legacy segment evaluation or paper-facing joint-query decoding.",
+        help=(
+            "Use legacy segment evaluation or paper-facing joint-query decoding. "
+            "Joint-beam also materializes a reusable baseline query corpus."
+        ),
     )
     parser.add_argument(
         "--cohort",
@@ -55,6 +58,14 @@ def main() -> None:
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--beam-width", type=int, default=10)
     parser.add_argument(
+        "--query-corpus",
+        type=Path,
+        help=(
+            "Reusable materialized joint-beam query directory. Defaults to "
+            "<output-stem>.query-corpus."
+        ),
+    )
+    parser.add_argument(
         "--rir-training-root",
         type=Path,
         help="Optional room-IR training root used to verify held-out separation.",
@@ -89,6 +100,7 @@ def main() -> None:
         recipe_seed=args.recipe_seed,
         rir_training_root=args.rir_training_root,
         rir_validation_root=args.rir_validation_root,
+        query_corpus=args.query_corpus,
     )
     print(json.dumps(metrics, indent=2, sort_keys=True))
 

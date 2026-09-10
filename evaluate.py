@@ -66,6 +66,17 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--exclude-training-root",
+        type=Path,
+        default=Path(
+            "/gpfs/scratch/acw723/neural-music-fp-dataset/music/train"
+        ),
+        help=(
+            "NMFP/NAFP training-audio directory whose FMA tracks must be "
+            "excluded when creating a joint-beam query corpus."
+        ),
+    )
+    parser.add_argument(
         "--rir-training-root",
         type=Path,
         help="Optional room-IR training root used to verify held-out separation.",
@@ -101,6 +112,7 @@ def main() -> None:
         rir_training_root=args.rir_training_root,
         rir_validation_root=args.rir_validation_root,
         query_corpus=args.query_corpus,
+        exclude_training_root=args.exclude_training_root,
     )
     print(json.dumps(metrics, indent=2, sort_keys=True))
 

@@ -528,10 +528,50 @@ def _evaluate_cached_positions(
     return metrics
 
 
-JOINT_BEAM_PROTOCOL = "paper_joint_beam_noise_range_rir_inference_v3"
-JOINT_QUERY_CORPUS_PROTOCOL = "shared_materialized_noise_range_rir_queries_v1"
+JOINT_BEAM_PROTOCOL = "paper_joint_beam_noise_range_rir_inference_v4"
+JOINT_QUERY_CORPUS_PROTOCOL = "shared_materialized_noise_range_rir_queries_v2"
 JOINT_QUERY_LENGTHS = (2.0, 5.0, 10.0)
 JOINT_SNR_RANGES_DB = ((0.0, 5.0), (5.0, 10.0), (10.0, 20.0))
+
+
+def _normalise_fma_source_id(value: str | Path) -> str | None:
+    """Return a six-digit FMA ID from a catalogue/training-audio filename."""
+    stem = Path(value).stem
+    if not stem.isdigit():
+        return None
+    return f"{int(stem):06d}"
+
+
+def _external_training_exclusion(root: str | Path) -> dict:
+    """Fingerprint source FMA IDs used by the NMFP/NAFP training corpus."""
+    root = Path(root)
+    if not root.is_dir():
+        raise FileNotFoundError(
+            "Joint-beam training-exclusion directory does not exist: "
+            f"{root}"
+        )
+    ids = set()
+    ignored = []
+    paths = sorted(candidate for candidate in root.rglob("*") if candidate.is_file())
+    for path in paths:
+        source_id = _normalise_fma_source_id(path)
+        if source_id is None:
+            ignored.append(path.relative_to(root).as_posix())
+        else:
+            ids.add(source_id)
+    if not ids:
+        raise ValueError(
+            "Joint-beam training-exclusion directory contains no FMA audio IDs: "
+            f"{root}"
+        )
+    return {
+        "protocol": "nmfp_nafp_source_track_exclusion_v1",
+        "root": str(root),
+        "source_track_count": len(ids),
+        "source_track_fingerprint": _fingerprint_json(sorted(ids)),
+        "ignored_file_count": len(ignored),
+        "source_track_ids": sorted(ids),
+    }
 
 
 def _snr_range_id(lower: float, upper: float) -> str:
@@ -704,6 +744,7 @@ def _joint_manifest_configuration(
     sample_rate: int,
     window_seconds: float,
     past_context_seconds: float,
+    training_exclusion: dict,
 ) -> dict:
     return {
         "protocol": JOINT_BEAM_PROTOCOL,
@@ -713,6 +754,11 @@ def _joint_manifest_configuration(
         "training_corpus_fingerprint": checkpoint.get(
             "training_corpus_fingerprint"
         ),
+        "training_source_exclusion": {
+            key: value
+            for key, value in training_exclusion.items()
+            if key != "source_track_ids"
+        },
         "room_ir_validation_fingerprint": (
             rir_manifest["validation_fingerprint"]
         ),
@@ -746,6 +792,7 @@ def _load_or_create_joint_manifest(
     cfg: dict,
     noise_assets: BackgroundNoiseAssets,
     rir_assets: RoomImpulseResponseAssets,
+    training_exclusion: dict,
     prescribed_queries: list[dict] | None = None,
 ) -> dict:
     if path.exists():
@@ -769,6 +816,7 @@ def _load_or_create_joint_manifest(
     random.Random(configuration["sample_seed"]).shuffle(track_ids)
     records = load_catalogue(cfg["data"]["catalogue"])
     by_track = {record.track_id: record for record in records}
+    excluded_source_ids = set(training_exclusion["source_track_ids"])
     sample_rate = int(configuration["sample_rate"])
     maximum_seconds = max(configuration["query_lengths"])
     maximum_samples = round(maximum_seconds * sample_rate)
@@ -790,6 +838,7 @@ def _load_or_create_joint_manifest(
                 "Existing query corpus is not a subset of this checkpoint's training "
                 f"cohort ({len(missing)} tracks missing; for example {missing[0]})"
             )
+        leaked = []
         for raw in prescribed_queries:
             recipe = dict(raw)
             record = by_track.get(str(recipe["track_id"]))
@@ -804,7 +853,15 @@ def _load_or_create_joint_manifest(
                 raise ValueError(
                     f"Query-corpus metadata changed for track {recipe['track_id']}"
                 )
+            source_id = _normalise_fma_source_id(record.path)
+            if source_id in excluded_source_ids:
+                leaked.append(source_id)
             recipes.append(recipe)
+        if leaked:
+            raise ValueError(
+                "Existing query corpus contains NMFP/NAFP training tracks "
+                f"({len(leaked)} leaked; for example {leaked[0]})"
+            )
         content = {
             "configuration": configuration,
             "queries": recipes,
@@ -821,6 +878,19 @@ def _load_or_create_joint_manifest(
         try:
             if record is None:
                 raise ValueError("Track is missing from the current catalogue")
+            source_id = _normalise_fma_source_id(record.path)
+            if source_id is None:
+                raise ValueError("Catalogue source path does not contain an FMA ID")
+            if source_id in excluded_source_ids:
+                excluded.append(
+                    {
+                        "track_id": track_id,
+                        "source_path": record.path,
+                        "source_fma_id": source_id,
+                        "error": "excluded: present in NMFP/NAFP training corpus",
+                    }
+                )
+                continue
             source_samples = round(float(record.duration) * sample_rate)
             maximum_start = source_samples - maximum_samples
             if maximum_start < 0:
@@ -933,6 +1003,7 @@ def _materialize_joint_query_corpus(
     configuration = {
         "protocol": JOINT_QUERY_CORPUS_PROTOCOL,
         "recipes_fingerprint": _fingerprint_json(manifest["queries"]),
+        "training_source_exclusion": evaluation["training_source_exclusion"],
         "background_noise_validation_fingerprint": evaluation[
             "background_noise_validation_fingerprint"
         ],
@@ -1208,6 +1279,7 @@ def _evaluate_joint_beam(
     rir_training_root: str | Path | None,
     rir_validation_root: str | Path | None,
     query_corpus: str | Path | None,
+    exclude_training_root: str | Path,
 ) -> dict:
     profile = evaluation_checkpoint_profile(checkpoint)
     if beam_width != 10:
@@ -1261,6 +1333,7 @@ def _evaluate_joint_beam(
         else Path(output).with_suffix(".query-corpus")
     )
     prescribed_queries = _existing_query_corpus_recipes(query_corpus_root)
+    training_exclusion = _external_training_exclusion(exclude_training_root)
     checkpoint_fingerprint = _checkpoint_file_fingerprint(checkpoint_path)
     configuration = _joint_manifest_configuration(
         checkpoint_fingerprint=checkpoint_fingerprint,
@@ -1276,6 +1349,7 @@ def _evaluate_joint_beam(
         sample_rate=tokenizer.sample_rate,
         window_seconds=window_seconds,
         past_context_seconds=past_seconds,
+        training_exclusion=training_exclusion,
     )
     manifest = _load_or_create_joint_manifest(
         path=manifest_path,
@@ -1284,6 +1358,7 @@ def _evaluate_joint_beam(
         cfg=cfg,
         noise_assets=noise_assets,
         rir_assets=rir_assets,
+        training_exclusion=training_exclusion,
         prescribed_queries=prescribed_queries,
     )
     if prescribed_queries is not None and manifest["queries"] != prescribed_queries:
@@ -1546,6 +1621,9 @@ def evaluate(
     rir_training_root: str | Path | None = None,
     rir_validation_root: str | Path | None = None,
     query_corpus: str | Path | None = None,
+    exclude_training_root: str | Path = (
+        "/gpfs/scratch/acw723/neural-music-fp-dataset/music/train"
+    ),
 ) -> dict:
     model, vocabulary, cfg, checkpoint = load_audio_lm(checkpoint_path, device)
     if protocol == "joint-beam":
@@ -1574,6 +1652,7 @@ def evaluate(
             rir_training_root=rir_training_root,
             rir_validation_root=rir_validation_root,
             query_corpus=query_corpus,
+            exclude_training_root=exclude_training_root,
         )
     if protocol != "segment":
         raise ValueError(f"Unknown evaluation protocol {protocol!r}")

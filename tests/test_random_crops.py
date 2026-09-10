@@ -11,6 +11,7 @@ from para_audio_id.audio_lm.evaluation import (
     JOINT_QUERY_LENGTHS,
     JOINT_SNR_RANGES_DB,
     _joint_manifest_configuration,
+    _external_training_exclusion,
     _joint_metrics,
     _load_joint_rows,
     _load_or_create_joint_manifest,
@@ -440,6 +441,12 @@ def test_joint_manifest_is_deterministic_and_backfills_bad_candidates(tmp_path):
         "training_corpus_fingerprint": "corpus",
         "global_step": 5,
     }
+    external_training = tmp_path / "nmfp_training"
+    external_training.mkdir()
+    # This fixture's path ``1.wav`` represents a source FMA ID found in the
+    # external NMFP/NAFP training corpus, so it must be backfilled.
+    (external_training / "1.mp3").touch()
+    training_exclusion = _external_training_exclusion(external_training)
     configuration = _joint_manifest_configuration(
         checkpoint_fingerprint="checkpoint",
         checkpoint=checkpoint,
@@ -454,6 +461,7 @@ def test_joint_manifest_is_deterministic_and_backfills_bad_candidates(tmp_path):
         sample_rate=sample_rate,
         window_seconds=2.0,
         past_context_seconds=2.0,
+        training_exclusion=training_exclusion,
     )
     cfg = {
         "data": {"catalogue": str(catalogue), "audio_root": str(audio_root)}
@@ -466,6 +474,7 @@ def test_joint_manifest_is_deterministic_and_backfills_bad_candidates(tmp_path):
         cfg=cfg,
         noise_assets=noise_assets,
         rir_assets=rir_assets,
+        training_exclusion=training_exclusion,
     )
     repeated = _load_or_create_joint_manifest(
         path=path,
@@ -474,11 +483,19 @@ def test_joint_manifest_is_deterministic_and_backfills_bad_candidates(tmp_path):
         cfg=cfg,
         noise_assets=noise_assets,
         rir_assets=rir_assets,
+        training_exclusion=training_exclusion,
     )
     assert first == repeated
     assert len(first["queries"]) == 2
     assert len({row["track_id"] for row in first["queries"]}) == 2
-    assert first["excluded_candidates"][0]["track_id"] == missing_track
+    assert any(
+        row["track_id"] == missing_track for row in first["excluded_candidates"]
+    )
+    assert all(row["source_path"] != "1.wav" for row in first["queries"])
+    assert any(
+        row["error"] == "excluded: present in NMFP/NAFP training corpus"
+        for row in first["excluded_candidates"]
+    )
     assert all(row["noise_path"] == "test.wav" for row in first["queries"])
     assert all(row["rir_path"] == "OpenAIR/test-room/test.wav" for row in first["queries"])
     corpus = _materialize_joint_query_corpus(
@@ -521,6 +538,7 @@ def test_joint_manifest_is_deterministic_and_backfills_bad_candidates(tmp_path):
         cfg=cfg,
         noise_assets=noise_assets,
         rir_assets=rir_assets,
+        training_exclusion=training_exclusion,
         prescribed_queries=corpus["recipes"],
     )
     assert reused["queries"] == first["queries"]
@@ -533,6 +551,7 @@ def test_joint_manifest_is_deterministic_and_backfills_bad_candidates(tmp_path):
             cfg=cfg,
             noise_assets=noise_assets,
             rir_assets=rir_assets,
+            training_exclusion=training_exclusion,
         )
 
 

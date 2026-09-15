@@ -106,8 +106,8 @@ def batched_beam_generate(
 ) -> list[list[GenerationResult]]:
     if prompts.ndim != 2:
         raise ValueError("Batched prompts must have shape [batch, sequence]")
-    if width < 1 or width > 10:
-        raise ValueError("Beam width must be between 1 and 10")
+    if width < 1:
+        raise ValueError("Beam width must be positive")
     batch = prompts.shape[0]
     scores = torch.zeros((batch, 1), device=prompts.device)
     generated = torch.empty((batch, 1, 0), dtype=torch.long, device=prompts.device)
@@ -120,7 +120,9 @@ def batched_beam_generate(
             :, vocabulary.digit_offset : vocabulary.digit_offset + 10
         ].log_softmax(dim=-1).reshape(batch, beam_count, 10)
         candidates = digit_log_probs + scores[:, :, None]
-        next_scores, flat_indices = candidates.reshape(batch, -1).topk(width, dim=-1)
+        flat_candidates = candidates.reshape(batch, -1)
+        next_beam_count = min(width, flat_candidates.shape[-1])
+        next_scores, flat_indices = flat_candidates.topk(next_beam_count, dim=-1)
         parent = flat_indices // 10
         raw_digits = flat_indices % 10
         gather_generated = parent[:, :, None].expand(-1, -1, generated.shape[-1])
@@ -138,10 +140,10 @@ def batched_beam_generate(
         )
         logits = output.logits[:, -1, :]
         past_key_values = output.past_key_values
-        beam_count = width
+        beam_count = next_beam_count
     eos_scores = logits.log_softmax(dim=-1)[
         :, vocabulary.eos_token_id
-    ].reshape(batch, width)
+    ].reshape(batch, beam_count)
     scores += eos_scores
     order = scores.argsort(dim=-1, descending=True)
     generated = generated.gather(
@@ -182,8 +184,8 @@ def batched_joint_beam_generate(
         )
     if prompts.shape[0] < 1 or prompts.shape[1] < 1:
         raise ValueError("Joint-beam decoding requires queries and windows")
-    if width < 1 or width > 10:
-        raise ValueError("Beam width must be between 1 and 10")
+    if width < 1:
+        raise ValueError("Beam width must be positive")
 
     query_count, window_count, _ = prompts.shape
     scores = torch.zeros((query_count, 1), device=prompts.device)
@@ -203,9 +205,9 @@ def batched_joint_beam_generate(
             query_count, beam_count, window_count, 10
         ).mean(dim=2)
         candidates = digit_log_probs + scores[:, :, None]
-        next_scores, flat_indices = candidates.reshape(query_count, -1).topk(
-            width, dim=-1
-        )
+        flat_candidates = candidates.reshape(query_count, -1)
+        next_beam_count = min(width, flat_candidates.shape[-1])
+        next_scores, flat_indices = flat_candidates.topk(next_beam_count, dim=-1)
         parent = flat_indices // 10
         raw_digits = flat_indices % 10
         generated = generated.gather(
@@ -231,11 +233,11 @@ def batched_joint_beam_generate(
         )
         logits = output.logits[:, -1, :]
         past_key_values = output.past_key_values
-        beam_count = width
+        beam_count = next_beam_count
 
     eos_scores = logits.log_softmax(dim=-1)[:, vocabulary.eos_token_id]
     eos_scores = eos_scores.reshape(
-        query_count, width, window_count
+        query_count, beam_count, window_count
     ).mean(dim=2)
     scores += eos_scores
     order = scores.argsort(dim=-1, descending=True)

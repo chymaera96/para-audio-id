@@ -141,6 +141,24 @@ def test_one_window_joint_beam_matches_regular_beam():
         )
 
 
+def test_beam_width_can_exceed_digit_vocabulary_size():
+    vocabulary = AudioLMVocabulary()
+    torch.manual_seed(19)
+    model = AudioCausalLM(tiny_config(), vocabulary).eval()
+    prompts = torch.tensor(
+        [[vocabulary.bos_token_id, 1, 1025, vocabulary.id_token_id]]
+    )
+    regular = batched_beam_generate(model, prompts, vocabulary, width=20)
+    joint = batched_joint_beam_generate(
+        model, prompts[:, None, :], vocabulary, width=20
+    )
+    assert len(regular[0]) == 20
+    assert len(joint[0]) == 20
+    assert [result.code for result in joint[0]] == [
+        result.code for result in regular[0]
+    ]
+
+
 def test_joint_beam_scores_are_mean_window_log_probabilities():
     vocabulary = AudioLMVocabulary()
     torch.manual_seed(18)

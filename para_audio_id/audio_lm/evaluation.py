@@ -1282,11 +1282,6 @@ def _evaluate_joint_beam(
     exclude_training_root: str | Path,
 ) -> dict:
     profile = evaluation_checkpoint_profile(checkpoint)
-    if beam_width < 10:
-        raise ValueError(
-            "Paper-facing joint-beam evaluation requires beam_width >= 10 "
-            "because it reports Top-10 accuracy"
-        )
     if cohort != "training":
         raise ValueError("Paper-facing joint-beam evaluation uses the training cohort")
     if sample_tracks < 1:

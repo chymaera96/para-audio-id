@@ -103,6 +103,7 @@ def batched_beam_generate(
     vocabulary: AudioLMVocabulary,
     *,
     width: int = 10,
+    score_eos: bool = True,
 ) -> list[list[GenerationResult]]:
     if prompts.ndim != 2:
         raise ValueError("Batched prompts must have shape [batch, sequence]")
@@ -141,25 +142,37 @@ def batched_beam_generate(
         logits = output.logits[:, -1, :]
         past_key_values = output.past_key_values
         beam_count = next_beam_count
-    eos_scores = logits.log_softmax(dim=-1)[
-        :, vocabulary.eos_token_id
-    ].reshape(batch, beam_count)
-    scores += eos_scores
-    order = scores.argsort(dim=-1, descending=True)
-    generated = generated.gather(
-        1, order[:, :, None].expand(-1, -1, generated.shape[-1])
-    ).cpu()
-    scores = scores.gather(1, order).cpu()
+    eos_valid = (logits.argmax(dim=-1) == vocabulary.eos_token_id).reshape(
+        batch, beam_count
+    )
+    if score_eos:
+        eos_scores = logits.log_softmax(dim=-1)[
+            :, vocabulary.eos_token_id
+        ].reshape(batch, beam_count)
+        scores += eos_scores
+        order = scores.argsort(dim=-1, descending=True)
+        generated = generated.gather(
+            1, order[:, :, None].expand(-1, -1, generated.shape[-1])
+        )
+        scores = scores.gather(1, order)
+        eos_valid = eos_valid.gather(1, order)
+    generated = generated.cpu()
+    scores = scores.cpu()
+    eos_valid = eos_valid.cpu()
     return [
         [
             GenerationResult(
                 vocabulary.decode_code(digits),
                 float(score),
-                ended_with_eos=True,
+                ended_with_eos=(True if score_eos else bool(valid_eos)),
             )
-            for digits, score in zip(batch_digits, batch_scores, strict=True)
+            for digits, score, valid_eos in zip(
+                batch_digits, batch_scores, batch_eos_valid, strict=True
+            )
         ]
-        for batch_digits, batch_scores in zip(generated, scores, strict=True)
+        for batch_digits, batch_scores, batch_eos_valid in zip(
+            generated, scores, eos_valid, strict=True
+        )
     ]
 
 
@@ -170,13 +183,17 @@ def batched_joint_beam_generate(
     vocabulary: AudioLMVocabulary,
     *,
     width: int = 10,
+    score_eos: bool = True,
 ) -> list[list[GenerationResult]]:
     """Decode one shared identifier from multiple windows of each query.
 
     ``prompts`` has shape ``[queries, windows, sequence]``. At every identifier
     position, digit log-probabilities are averaged over a query's windows before
-    its shared beam is expanded and pruned. This is deliberately different from
-    decoding each window independently and voting over completed identifiers.
+    its shared beam is expanded and pruned. When ``score_eos`` is false, the
+    completed identifier ranking uses only those five digit scores; the
+    aggregated next-token prediction is retained as an EOS-validity diagnostic.
+    This is deliberately different from decoding each window independently and
+    voting over completed identifiers.
     """
     if prompts.ndim != 3:
         raise ValueError(
@@ -235,26 +252,39 @@ def batched_joint_beam_generate(
         past_key_values = output.past_key_values
         beam_count = next_beam_count
 
-    eos_scores = logits.log_softmax(dim=-1)[:, vocabulary.eos_token_id]
-    eos_scores = eos_scores.reshape(
-        query_count, beam_count, window_count
+    final_logits = logits.reshape(
+        query_count, beam_count, window_count, logits.shape[-1]
     ).mean(dim=2)
-    scores += eos_scores
-    order = scores.argsort(dim=-1, descending=True)
-    generated = generated.gather(
-        1, order[:, :, None].expand(-1, -1, generated.shape[-1])
-    ).cpu()
-    scores = scores.gather(1, order).cpu()
+    eos_valid = final_logits.argmax(dim=-1) == vocabulary.eos_token_id
+    if score_eos:
+        eos_scores = logits.log_softmax(dim=-1)[:, vocabulary.eos_token_id]
+        eos_scores = eos_scores.reshape(
+            query_count, beam_count, window_count
+        ).mean(dim=2)
+        scores += eos_scores
+        order = scores.argsort(dim=-1, descending=True)
+        generated = generated.gather(
+            1, order[:, :, None].expand(-1, -1, generated.shape[-1])
+        )
+        scores = scores.gather(1, order)
+        eos_valid = eos_valid.gather(1, order)
+    generated = generated.cpu()
+    scores = scores.cpu()
+    eos_valid = eos_valid.cpu()
     return [
         [
             GenerationResult(
                 vocabulary.decode_code(digits),
                 float(score),
-                ended_with_eos=True,
+                ended_with_eos=(True if score_eos else bool(valid_eos)),
             )
-            for digits, score in zip(batch_digits, batch_scores, strict=True)
+            for digits, score, valid_eos in zip(
+                batch_digits, batch_scores, batch_eos_valid, strict=True
+            )
         ]
-        for batch_digits, batch_scores in zip(generated, scores, strict=True)
+        for batch_digits, batch_scores, batch_eos_valid in zip(
+            generated, scores, eos_valid, strict=True
+        )
     ]
 
 

@@ -128,9 +128,11 @@ def test_one_window_joint_beam_matches_regular_beam():
             [vocabulary.bos_token_id, 7, 1031, vocabulary.id_token_id],
         ]
     )
-    regular = batched_beam_generate(model, prompts, vocabulary, width=10)
+    regular = batched_beam_generate(
+        model, prompts, vocabulary, width=10, score_eos=False
+    )
     joint = batched_joint_beam_generate(
-        model, prompts[:, None, :], vocabulary, width=10
+        model, prompts[:, None, :], vocabulary, width=10, score_eos=False
     )
     assert [[result.code for result in row] for row in joint] == [
         [result.code for result in row] for row in regular
@@ -159,7 +161,7 @@ def test_beam_width_can_exceed_digit_vocabulary_size():
     ]
 
 
-def test_joint_beam_scores_are_mean_window_log_probabilities():
+def test_joint_beam_scores_are_mean_window_digit_log_probabilities():
     vocabulary = AudioLMVocabulary()
     torch.manual_seed(18)
     model = AudioCausalLM(tiny_config(), vocabulary).eval()
@@ -169,7 +171,9 @@ def test_joint_beam_scores_are_mean_window_log_probabilities():
             [vocabulary.bos_token_id, 9, 1033, vocabulary.id_token_id],
         ]
     )[None, :, :]
-    ranking = batched_joint_beam_generate(model, prompts, vocabulary, width=5)[0]
+    ranking = batched_joint_beam_generate(
+        model, prompts, vocabulary, width=5, score_eos=False
+    )[0]
     for candidate in ranking:
         per_window = []
         for prompt in prompts[0]:
@@ -184,27 +188,23 @@ def test_joint_beam_scores_are_mean_window_log_probabilities():
                     [[vocabulary.digit_offset + int(digit)]], dtype=torch.long
                 )
                 sequence = torch.cat((sequence, token), dim=1)
-            score += model(sequence)[:, -1, :].log_softmax(dim=-1)[
-                0, vocabulary.eos_token_id
-            ]
             per_window.append(score)
         expected = torch.stack(per_window).mean()
-        assert candidate.log_probability == pytest.approx(float(expected), abs=1e-5)
+        assert candidate.log_probability == pytest.approx(
+            float(expected.detach()), abs=1e-5
+        )
 
 
 def test_joint_query_window_grid_uses_overlap_and_tail_alignment():
-    assert joint_window_starts(48_000, 48_000, 24_000) == [0]
-    assert joint_window_starts(72_000, 48_000, 24_000) == [0, 24_000]
-    assert joint_window_starts(120_000, 48_000, 24_000) == [
-        0,
-        24_000,
-        48_000,
-        72_000,
-    ]
-    assert joint_window_starts(240_000, 48_000, 24_000) == list(
-        range(0, 192_001, 24_000)
+    assert joint_window_starts(48_000, 48_000, 12_000) == [0]
+    assert joint_window_starts(72_000, 48_000, 12_000) == [0, 12_000, 24_000]
+    assert joint_window_starts(120_000, 48_000, 12_000) == list(
+        range(0, 72_001, 12_000)
     )
-    assert joint_window_starts(50_000, 48_000, 24_000) == [0, 2_000]
+    assert joint_window_starts(240_000, 48_000, 12_000) == list(
+        range(0, 192_001, 12_000)
+    )
+    assert joint_window_starts(50_000, 48_000, 12_000) == [0, 2_000]
 
 
 def test_cached_greedy_matches_full_prefix_decoding():

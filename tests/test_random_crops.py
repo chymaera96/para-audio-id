@@ -8,6 +8,7 @@ import torch
 from para_audio_id.catalogue import CatalogueRecord
 from para_audio_id.audio_lm.noise import BackgroundNoiseAssets, mix_background_noise
 from para_audio_id.audio_lm.evaluation import (
+    JOINT_HOP_SECONDS,
     JOINT_QUERY_LENGTHS,
     JOINT_SNR_RANGES_DB,
     _joint_manifest_configuration,
@@ -558,6 +559,7 @@ def test_joint_manifest_is_deterministic_and_backfills_bad_candidates(tmp_path):
 def test_joint_protocol_has_ranged_noise_rir_cross_product():
     suites = joint_degradation_suites()
     assert JOINT_QUERY_LENGTHS == (2.0, 5.0, 10.0)
+    assert JOINT_HOP_SECONDS == 0.5
     assert JOINT_SNR_RANGES_DB == ((0.0, 5.0), (5.0, 10.0), (10.0, 20.0))
     assert len(suites) == 6
     assert {
@@ -617,6 +619,7 @@ def test_joint_metrics_and_jsonl_resume_validation(tmp_path):
             "query_seconds": 2.0,
             "suite_id": "noise_0db",
             "correct_rank": 1,
+            "top1_eos_valid": True,
             "latency_seconds": 1.0,
         },
         {
@@ -626,6 +629,7 @@ def test_joint_metrics_and_jsonl_resume_validation(tmp_path):
             "query_seconds": 2.0,
             "suite_id": "noise_0db",
             "correct_rank": 7,
+            "top1_eos_valid": False,
             "latency_seconds": 1.0,
         },
         {
@@ -648,6 +652,7 @@ def test_joint_metrics_and_jsonl_resume_validation(tmp_path):
     assert metrics["beam_top5"] == 1 / 3
     assert metrics["beam_top10"] == 2 / 3
     assert metrics["beam_mrr"] == pytest.approx((1 + 1 / 7) / 3)
+    assert metrics["top1_eos_valid_rate"] == 1 / 3
     with pytest.raises(ValueError, match="fingerprint mismatch"):
         _load_joint_rows(path, fingerprint="other")
 

@@ -528,9 +528,10 @@ def _evaluate_cached_positions(
     return metrics
 
 
-JOINT_BEAM_PROTOCOL = "paper_joint_beam_noise_range_rir_inference_v4"
+JOINT_BEAM_PROTOCOL = "paper_joint_beam_digit_score_half_second_hop_inference_v6"
 JOINT_QUERY_CORPUS_PROTOCOL = "shared_materialized_noise_range_rir_queries_v2"
 JOINT_QUERY_LENGTHS = (2.0, 5.0, 10.0)
+JOINT_HOP_SECONDS = 0.5
 JOINT_SNR_RANGES_DB = ((0.0, 5.0), (5.0, 10.0), (10.0, 20.0))
 
 
@@ -777,9 +778,11 @@ def _joint_manifest_configuration(
         "query_corpus_protocol": JOINT_QUERY_CORPUS_PROTOCOL,
         "query_audio_encoding": "WAV_PCM_16",
         "beam_width": beam_width,
+        "identifier_ranking_score": "mean_window_five_digit_log_probability",
+        "eos_handling": "diagnostic_only_aggregated_next_token_argmax",
         "sample_rate": sample_rate,
         "window_seconds": window_seconds,
-        "hop_seconds": window_seconds / 2,
+        "hop_seconds": JOINT_HOP_SECONDS,
         "past_context_seconds": past_context_seconds,
     }
 
@@ -1231,6 +1234,9 @@ def _joint_metrics(rows: list[dict], *, selected_tracks: int) -> dict:
     result["beam_mrr"] = sum(
         0.0 if rank is None else 1.0 / rank for rank in ranks
     ) / selected_tracks
+    result["top1_eos_valid_rate"] = sum(
+        bool(row["top1_eos_valid"]) for row in successful
+    ) / selected_tracks
     return result
 
 
@@ -1251,6 +1257,7 @@ def _write_joint_csv(path: Path, rows: list[dict]) -> None:
         "beam_top5",
         "beam_top10",
         "beam_mrr",
+        "top1_eos_valid_rate",
         "elapsed_seconds",
         "queries_per_second",
     )
@@ -1385,7 +1392,7 @@ def _evaluate_joint_beam(
     query_path.parent.mkdir(parents=True, exist_ok=True)
     sample_rate = tokenizer.sample_rate
     window_samples = round(window_seconds * sample_rate)
-    hop_samples = window_samples // 2
+    hop_samples = round(JOINT_HOP_SECONDS * sample_rate)
     configured_batch = int(cfg["evaluation"]["generation_batch_size"])
     maximum_query_samples = round(maximum_seconds * sample_rate)
     maximum_starts = joint_window_starts(
@@ -1511,7 +1518,11 @@ def _evaluate_joint_beam(
                     )
                     with autocast:
                         rankings = batched_joint_beam_generate(
-                            model, prompts, vocabulary, width=beam_width
+                            model,
+                            prompts,
+                            vocabulary,
+                            width=beam_width,
+                            score_eos=False,
                         )
                     if str(device).startswith("cuda"):
                         torch.cuda.synchronize()
@@ -1542,6 +1553,7 @@ def _evaluate_joint_beam(
                             "window_starts": starts,
                             "window_count": len(starts),
                             "correct_rank": correct_rank,
+                            "top1_eos_valid": ranking[0].ended_with_eos,
                             "latency_seconds": preparation_latency
                             / len(JOINT_QUERY_LENGTHS)
                             + inference_latency,

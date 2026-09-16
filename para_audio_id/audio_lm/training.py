@@ -104,6 +104,10 @@ TRAIN_LOG_LEVELS = {"on_step": True, "on_epoch": True}
 
 
 def learning_rate_multiplier(step: int, train_cfg: dict) -> float:
+    from .continuation import POLICY, continuation_multiplier
+
+    if train_cfg.get("learning_rate_schedule", {}).get("policy") == POLICY:
+        return continuation_multiplier(step, train_cfg)
     max_steps = int(train_cfg["max_steps"])
     warmup_steps = int(train_cfg["warmup_steps"])
     if not 0 < warmup_steps < max_steps:

@@ -1154,6 +1154,7 @@ class AudioLMModule(pl.LightningModule):
             batch["boundary_target_mask"],
             batch["is_noisy"],
             id_digit_weight=float(self.cfg["train"]["id_digit_weight"]),
+            clean_audio_loss_weight=float(self.cfg["train"].get("clean_audio_loss_weight", 1.0)),
         )
         distillation_loss = identifier_logit_distillation_loss(
             logits,

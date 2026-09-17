@@ -8,7 +8,8 @@ from para_audio_id.audio_lm.profiles import canonical_training_profile, resolve_
 from para_audio_id.config import load_config
 
 
-def test_full_state_fork_and_resumed_lr(tmp_path):
+@pytest.mark.parametrize("id_only", [False, True])
+def test_full_state_fork_and_resumed_lr(tmp_path, id_only):
     cfg = resolve_training_config(load_config("configs/fma_large.yaml"))
     profile = canonical_training_profile(
         database_size=100000, decoder="medium", schedule="noise-rir",
@@ -34,7 +35,7 @@ def test_full_state_fork_and_resumed_lr(tmp_path):
         "loops": {"position": 123}, "torch_rng_state": torch.get_rng_state(),
     }
     fork = fork_payload(payload, run_id="continuation", source="source/last.ckpt",
-                        source_sha256="test")
+                        source_sha256="test", id_only=id_only, keep_saved_lr=id_only)
     train = fork["hyper_parameters"]["train"]
     assert train["max_steps"] == step + 25000
     assert payload["resolved_training_profile"]["schedule"]["max_steps"] == step
@@ -46,6 +47,8 @@ def test_full_state_fork_and_resumed_lr(tmp_path):
     torch.save(fork, path)
     resolved = resolve_training_config(fork["hyper_parameters"], checkpoint=path)
     assert resolved["train"]["max_steps"] == step + 25000
+    assert resolved["train"]["clean_audio_loss_weight"] == (0.0 if id_only else 1.0)
+    assert payload["hyper_parameters"]["train"].get("clean_audio_loss_weight", 1.0) == 1.0
     assert resolved["train"]["schedule"] == cfg["train"]["schedule"]
     restored = torch.optim.AdamW([torch.nn.Parameter(torch.tensor(1.0))], lr=3e-4)
     resumed_scheduler = torch.optim.lr_scheduler.LambdaLR(
@@ -55,6 +58,8 @@ def test_full_state_fork_and_resumed_lr(tmp_path):
     resumed_scheduler.load_state_dict(fork["lr_schedulers"][0])
     assert restored.param_groups[0]["lr"] == pytest.approx(1.5e-5)
     for offset, expected in [(0, 1.5e-5), (1000, 3.25e-5), (2000, 5e-5), (25000, 5e-5)]:
+        if id_only:
+            expected = 1.5e-5
         assert continuation_multiplier(step + offset, train) * 3e-4 == pytest.approx(expected)
     restored.step()
     resumed_scheduler.step()

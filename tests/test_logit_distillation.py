@@ -159,6 +159,27 @@ def test_eight_codebook_base_loss_masks_degraded_audio_and_has_expected_coeffici
     assert logits.grad[1, batch["boundary_target_mask"][1].nonzero().flatten()].any()
 
 
+def test_id_only_preserves_id_and_boundary_gradients():
+    batch, vocabulary = _batch(["01234", "01234"])
+    logits = torch.randn(2, batch["input_ids"].shape[1], vocabulary.size, requires_grad=True)
+    args = (batch["input_ids"], batch["audio_target_mask"], batch["id_target_mask"],
+            batch["boundary_target_mask"], torch.tensor([False, True]))
+    old, _ = degraded_causal_base_losses(logits, *args, id_digit_weight=32.0)
+    old_grad, = torch.autograd.grad(old, logits)
+    new, metrics = degraded_causal_base_losses(
+        logits, *args, id_digit_weight=32.0, clean_audio_loss_weight=0.0,
+    )
+    new_grad, = torch.autograd.grad(new, logits)
+    for row in range(2):
+        assert not new_grad[row, batch["audio_target_mask"][row].nonzero().flatten()].any()
+        for key in ("id_target_mask", "boundary_target_mask"):
+            indices = batch[key][row].nonzero().flatten()
+            torch.testing.assert_close(new_grad[row, indices], old_grad[row, indices])
+            assert new_grad[row, indices].any()
+    assert metrics["audio_family_coefficient"] == 0
+    assert torch.isfinite(metrics["clean_audio_loss"])
+
+
 def test_tc18_base_computes_vocabulary_cross_entropy_once(monkeypatch):
     batch, vocabulary = _batch(["01234", "01234"])
     logits = torch.randn(2, batch["input_ids"].shape[1], vocabulary.size)

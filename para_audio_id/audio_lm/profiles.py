@@ -378,6 +378,7 @@ def resolve_training_config(
     model.pop("name", None)
     train = cfg.setdefault("train", {})
     train["id_digit_weight"] = query_profile["id_digit_weight"]
+    train["clean_audio_loss_weight"] = float(profile.get("clean_audio_loss_weight", 1.0))
     train["max_steps"] = profile["schedule"]["max_steps"]
     train["schedule"] = {
         key: value for key, value in profile["schedule"].items() if key != "max_steps"

@@ -20,7 +20,8 @@ def continuation_multiplier(step, train_cfg):
 
 
 def fork_payload(payload, *, run_id, source, source_sha256,
-                 additional_steps=25000, target_lr=5e-5, ramp_steps=2000):
+                 additional_steps=25000, target_lr=5e-5, ramp_steps=2000,
+                 id_only=False, keep_saved_lr=False):
     from .profiles import SCALE_VARIANT
 
     if additional_steps <= 0 or not 0 < ramp_steps <= additional_steps:
@@ -47,6 +48,8 @@ def fork_payload(payload, *, run_id, source, source_sha256,
         raise ValueError("Expected one AdamW optimizer and one scheduler")
     groups = optimizers[0]["param_groups"]
     start_lr = float(groups[0]["lr"])
+    if keep_saved_lr:
+        target_lr = start_lr
     if any(float(group["lr"]) != start_lr for group in groups):
         raise ValueError("Optimizer groups have unequal LRs")
     if int(schedulers[0]["last_epoch"]) != step:
@@ -62,6 +65,9 @@ def fork_payload(payload, *, run_id, source, source_sha256,
         "run_id": run_id,
     }
     profile["continuation"] = provenance
+    if id_only:
+        profile["clean_audio_loss_weight"] = 0.0
+        cfg["train"]["clean_audio_loss_weight"] = 0.0
     profile["schedule"]["max_steps"] = step + additional_steps
     profile["learning_rate_schedule"] = schedule
     cfg["resolved_training_profile"] = deepcopy(profile)

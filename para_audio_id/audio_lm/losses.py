@@ -173,8 +173,11 @@ def degraded_causal_base_losses(
     is_degraded: torch.Tensor,
     *,
     id_digit_weight: float,
+    clean_audio_loss_weight: float = 1.0,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """tc18 base loss with degraded audio targets excluded."""
+    if clean_audio_loss_weight not in (0.0, 1.0):
+        raise ValueError("clean_audio_loss_weight must be 0 or 1")
     if is_degraded.shape != (logits.shape[0],):
         raise ValueError("is_degraded must contain one value per document")
     if id_digit_weight <= 0:
@@ -224,8 +227,14 @@ def degraded_causal_base_losses(
     family_weight = (
         audio_count + float(id_digit_weight) * digit_count + boundary_count
     )
-    base_loss = (
+    # Keep the original denominator so ID/boundary gradient scales do not
+    # change when audio prediction is disabled for identification fine-tuning.
+    audio_contribution = (
         audio_count * clean_audio_loss
+        if clean_audio_loss_weight else clean_audio_loss.detach().new_zeros(())
+    )
+    base_loss = (
+        audio_contribution
         + float(id_digit_weight) * digit_count * digit_loss
         + boundary_count * boundary_loss
     ) / family_weight
@@ -274,7 +283,7 @@ def degraded_causal_base_losses(
         ),
         "digit_loss": digit_loss,
         "boundary_loss": boundary_loss,
-        "audio_family_coefficient": audio_count / family_weight,
+        "audio_family_coefficient": clean_audio_loss_weight * audio_count / family_weight,
         "digit_family_coefficient": float(id_digit_weight)
         * digit_count
         / family_weight,

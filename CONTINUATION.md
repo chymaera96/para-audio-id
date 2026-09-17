@@ -1,4 +1,47 @@
-# Short medium 100K continuation on scale
+# Medium 100K continuations on scale
+
+## Identification-only continuation (new run)
+
+Use the original pre-continuation checkpoint, not the regressed `-cont` run.
+Prepare once on CPU (no GPU allocation required; allow enough RAM to load and
+copy the full optimizer checkpoint):
+
+```bash
+python prepare_continuation.py \
+  /gpfs/scratch/acw723/para-audio-id/audio-lm-checkpoints/tc18-medium-100k/last.ckpt \
+  --run-id tc18-medium-100k-idonly \
+  --additional-steps 200000 --id-only --keep-saved-lr
+```
+
+Audio prediction remains a reported metric but is removed from the training
+objective. ID and boundary/EOS supervision on clean and degraded views retain
+their previous coefficients: `(160 * ID + 2 * boundary) / 562` for the eight-codebook
+profile. Audio input tokens are unchanged. The saved LR is held constant without
+reheating. Optimizer moments, augmentation, batching and distillation settings
+are preserved (the source experiment uses zero distillation weight).
+
+Launch in the para-audio-id environment on four GPUs:
+
+```bash
+CONT_ROOT=/gpfs/scratch/acw723/para-audio-id/audio-lm-checkpoints/tc18-medium-100k-idonly
+python train.py "$CONT_ROOT/continuation.yaml" \
+  --run-id tc18-medium-100k-idonly \
+  --resume --ckpt-path "$CONT_ROOT/continuation-start.ckpt" \
+  --devices 4 --wandb-online
+```
+
+After a new periodic checkpoint has been saved, subsequent restarts use:
+
+```bash
+python train.py "$CONT_ROOT/continuation.yaml" \
+  --run-id tc18-medium-100k-idonly --resume --devices 4 --wandb-online
+```
+
+Do not prepare again or restart from `continuation-start.ckpt` after progress
+has been saved. If interrupted before the first periodic checkpoint, use the
+initial launch command. The original checkpoint is never modified.
+
+## Earlier ramp-and-hold continuation (historical)
 
 Prepare once, before launching the four-GPU job:
 

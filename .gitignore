@@ -10,3 +10,9 @@ __pycache__/
 
 *.png
 *.pdf
+
+# Local OS/editor files and generated training artifacts
+.DS_Store
+logs/
+configs/*_sanity.yaml
+scripts/para-audio-id.code-workspace

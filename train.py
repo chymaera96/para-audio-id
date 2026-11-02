@@ -30,6 +30,8 @@ def main() -> None:
     )
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--ckpt-path", type=Path)
+    parser.add_argument("--sanity-steps", type=int, default=0,
+                        help="isolated short training check without W&B or generation probes")
     args = parser.parse_args()
     base_cfg = load_config(args.config)
     run_cfg = with_overrides(
@@ -56,7 +58,7 @@ def main() -> None:
         distillation_weight=args.distillation_weight,
         checkpoint=checkpoint,
     )
-    train(cfg, checkpoint=checkpoint)
+    train(cfg, checkpoint=checkpoint, sanity_steps=args.sanity_steps)
 
 
 if __name__ == "__main__":

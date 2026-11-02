@@ -6,6 +6,14 @@ should be taken from the corresponding W&B run or evaluation JSON.
 
 ## Run lineage
 
+The `fsq` branch adds the CNN + FSQ tokenizer pilot described in
+[FSQ_EXPERIMENT.md](FSQ_EXPERIMENT.md). Tokenizer run `fsq-pilot-v1` uses 10K
+music tracks and 500 disjoint monitoring tracks, one 1,024-symbol FSQ group,
+25 Hz tokens, and 50K updates. Its checkpoints live under
+`/gpfs/scratch/acw723/para-audio-id/fsq-tokenizer-checkpoints/fsq-pilot-v1/`.
+After freezing that tokenizer, `fsq-psi-25k-small-v1` uses the 25K PSI recipe
+with 50 audio tokens per two-second crop. The two stages train separately.
+
 | Run ID | Catalogue | Training views | ID digit weight | Steps | Main change |
 | --- | ---: | --- | ---: | ---: | --- |
 | `tc2` | Full FMA-large catalogue | Canonical only | 5 | 100K | Replaced the continuous model with Mel-RVQ tokens and a causal transformer |

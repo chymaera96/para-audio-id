@@ -1,5 +1,10 @@
 # Parametric audio language model
 
+The `fsq` branch adds a trainable CNN + finite scalar quantization tokenizer
+pilot and a frozen-tokenizer PSI path. See [FSQ_EXPERIMENT.md](FSQ_EXPERIMENT.md)
+for the configuration, measured smoke checks, and launch commands.
+Remote allocation access notes are kept in `~/APOCRITA.md` on the local machine.
+
 This repository tests whether a decoder-only causal language model can compile a
 fixed 100,000-track catalogue into its parameters. Each training document is:
 

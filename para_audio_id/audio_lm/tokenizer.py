@@ -246,3 +246,15 @@ class MuQRVQTokenizer:
             "public_layout": "block_major_verified",
             "training_layout": "time_major_codebook_interleaved",
         }
+
+
+def build_tokenizer(config: dict, *, device=None):
+    """Construct a frozen tokenizer from an explicit configuration."""
+    resolved_device = device if device is not None else config.get("device", "cuda")
+    if config.get("kind") == "fsq":
+        from .fsq import FrozenFSQTokenizer
+        return FrozenFSQTokenizer(config["checkpoint"], device=resolved_device)
+    return MuQRVQTokenizer(
+        config["model_name"], revision=config.get("revision", "main"),
+        selected_codebooks=int(config["selected_codebooks"]),
+        sample_rate=int(config["sample_rate"]), device=resolved_device, lightweight=True)

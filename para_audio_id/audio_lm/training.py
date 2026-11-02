@@ -66,7 +66,7 @@ from .random_crops import (
     make_tc6_evaluation_manifest,
 )
 from .rir import RoomImpulseResponseAssets, convolve_full_wet
-from .tokenizer import MuQRVQTokenizer, TokenizerSpec
+from .tokenizer import TokenizerSpec, build_tokenizer
 from .token_store import TokenStoreIndex
 from .tokenization import load_training_track_ids
 from .vocabulary import AudioLMVocabulary
@@ -1447,14 +1447,7 @@ class AudioLMModule(pl.LightningModule):
         self.session_tokens_start = self.tokens_consumed
         tokenizer_cfg = self.cfg["tokenizer"]
         if self.online_tokenizer is None:
-            self.online_tokenizer = MuQRVQTokenizer(
-                tokenizer_cfg["model_name"],
-                revision=tokenizer_cfg.get("revision", "main"),
-                selected_codebooks=int(tokenizer_cfg["selected_codebooks"]),
-                sample_rate=int(tokenizer_cfg["sample_rate"]),
-                device=self.device,
-                lightweight=True,
-            )
+            self.online_tokenizer = build_tokenizer(tokenizer_cfg, device=self.device)
         if self.online_tokenizer.spec.fingerprint != self.tokenizer_spec.fingerprint:
             raise ValueError("Online tokenizer fingerprint changed")
         if (
@@ -1509,7 +1502,7 @@ class AudioLMModule(pl.LightningModule):
             float((self.tokens_consumed - self.session_tokens_start) / elapsed),
             sync_dist=False,
         )
-        if torch.cuda.is_available():
+        if self.device.type == "cuda":
             self.log(
                 "system/peak_gpu_memory_bytes",
                 float(torch.cuda.max_memory_allocated(self.device)),
@@ -2430,7 +2423,15 @@ def build_logger(cfg: dict, directory: Path):
     )
 
 
-def train(cfg: dict, *, checkpoint: str | Path | None = None) -> None:
+def train(cfg: dict, *, checkpoint: str | Path | None = None, sanity_steps: int = 0) -> None:
+    if sanity_steps:
+        if sanity_steps < 1 or checkpoint is not None:
+            raise ValueError("Sanity training requires a fresh run and a positive step count")
+        from copy import deepcopy
+        cfg = deepcopy(cfg)
+        cfg["train"]["run_id"] = str(cfg["train"].get("run_id") or "training") + "-sanity"
+        cfg["train"]["wandb"]["enabled"] = False
+        cfg["evaluation"]["online_monitor_enabled"] = False
     if "resolved_training_profile" not in cfg:
         cfg = resolve_training_config(cfg, checkpoint=checkpoint)
     if "resolved_query_profile" not in cfg:
@@ -2469,14 +2470,7 @@ def train(cfg: dict, *, checkpoint: str | Path | None = None) -> None:
         int(cfg["data"]["database_size"]),
     )
     tokenizer_cfg = cfg["tokenizer"]
-    online_tokenizer = MuQRVQTokenizer(
-        tokenizer_cfg["model_name"],
-        revision=tokenizer_cfg.get("revision", "main"),
-        selected_codebooks=int(tokenizer_cfg["selected_codebooks"]),
-        sample_rate=int(tokenizer_cfg["sample_rate"]),
-        device=tokenizer_cfg.get("device", "cuda"),
-        lightweight=True,
-    )
+    online_tokenizer = build_tokenizer(tokenizer_cfg)
     query_spec = validate_tc18_query_configuration(
         cfg, online_tokenizer.spec, online_tokenizer.vocabulary
     )
@@ -2567,7 +2561,7 @@ def train(cfg: dict, *, checkpoint: str | Path | None = None) -> None:
         devices=cfg["trainer"]["devices"],
         strategy=cfg["trainer"]["strategy"],
         max_epochs=display_max_epochs,
-        max_steps=int(cfg["train"]["max_steps"]),
+        max_steps=sanity_steps or int(cfg["train"]["max_steps"]),
         precision=cfg["trainer"]["precision"],
         accumulate_grad_batches=accumulation,
         gradient_clip_val=float(cfg["train"]["gradient_clip_norm"]),
@@ -2579,5 +2573,9 @@ def train(cfg: dict, *, checkpoint: str | Path | None = None) -> None:
         check_val_every_n_epoch=None,
         deterministic=bool(cfg["train"]["deterministic"]),
         use_distributed_sampler=False,
+        limit_val_batches=0 if sanity_steps else 1.0,
+        num_sanity_val_steps=0 if sanity_steps else 2,
     )
     trainer.fit(module, datamodule=datamodule, ckpt_path=checkpoint)
+    if sanity_steps:
+        trainer.save_checkpoint(checkpoint_dir(cfg) / "last.ckpt")

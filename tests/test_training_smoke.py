@@ -105,7 +105,7 @@ def test_one_step_training_smoke(tmp_path, monkeypatch):
             return frame.repeat(waveforms.shape[0], 50)
 
     monkeypatch.setattr(
-        "para_audio_id.audio_lm.training.MuQRVQTokenizer",
+        "para_audio_id.audio_lm.training.build_tokenizer",
         FakeOnlineTokenizer,
     )
     distillation_profile = {

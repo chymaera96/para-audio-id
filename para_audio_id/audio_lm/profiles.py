@@ -24,6 +24,7 @@ LOSS_PROTOCOL = NEW_TRAINING_PROTOCOL
 TC12_CURRICULUM = "tc12_noise_rir_curriculum_v1"
 TC18_LR_POLICY = "tc18_warmup_hold_linear_cosine_v1"
 EVALUATION_VARIANTS = {
+    "cnn-fsq-single-group-25k-v1": {"selected_codebooks": 1, "id_digit_weight": 4.0},
     "main-two-second-two-codebook-logit-distillation": {
         "selected_codebooks": 2,
         "id_digit_weight": 8.0,
@@ -222,6 +223,8 @@ def canonical_training_profile(
 
 def historical_checkpoint_profile(checkpoint: dict) -> dict[str, Any]:
     stored = checkpoint.get("resolved_training_profile")
+    if isinstance(stored, dict) and stored.get("variant") == "cnn-fsq-single-group-25k-v1":
+        return stored
     supported_variants = {
         _codebook_training_identity(codebooks)["variant"]
         for codebooks in SUPPORTED_SELECTED_CODEBOOKS
@@ -322,7 +325,7 @@ def _checkpoint_query_profile(checkpoint: dict[str, Any]) -> dict[str, Any] | No
 
 
 def resolve_query_profile(selected_codebooks: int) -> dict[str, Any]:
-    if selected_codebooks not in SUPPORTED_SELECTED_CODEBOOKS:
+    if selected_codebooks not in (1, *SUPPORTED_SELECTED_CODEBOOKS):
         raise ValueError(
             "selected codebooks must be one of "
             f"{SUPPORTED_SELECTED_CODEBOOKS}, got {selected_codebooks}"
@@ -342,6 +345,12 @@ def resolve_training_config(
     distillation_weight: float | None = None,
     checkpoint: str | Path | None = None,
 ) -> dict[str, Any]:
+    if config.get("tokenizer", {}).get("kind") == "fsq":
+        from .fsq_psi import resolve_fsq_psi_config
+        return resolve_fsq_psi_config(
+            config, decoder=decoder, schedule=schedule,
+            selected_codebooks=selected_codebooks, distillation_weight=distillation_weight,
+            checkpoint=checkpoint)
     if distillation_weight is not None and (
         not math.isfinite(distillation_weight) or distillation_weight < 0
     ):

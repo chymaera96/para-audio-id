@@ -77,6 +77,12 @@ def select_checkpoint_cohort(
 
 def _checkpoint_tokenizer(checkpoint: dict, device: str) -> MuQRVQTokenizer:
     spec = checkpoint["tokenizer_spec"]
+    if spec.get("architecture") == "cnn_fsq_tokenizer_v1":
+        from .fsq import FrozenFSQTokenizer
+        tokenizer = FrozenFSQTokenizer(spec["model_name"], device=device)
+        if tokenizer.spec.fingerprint != checkpoint["tokenizer_fingerprint"]:
+            raise ValueError("FSQ tokenizer checkpoint differs from PSI training")
+        return tokenizer
     tokenizer = MuQRVQTokenizer(
         spec["model_name"],
         revision=spec["revision"],

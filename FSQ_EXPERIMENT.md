@@ -106,14 +106,15 @@ in a separate run:
 
 ```bash
 python -u train_fsq.py configs/fsq_tokenizer.yaml \
-  --continue-from /gpfs/scratch/acw723/para-audio-id/fsq-tokenizer-checkpoints/fsq-tc1/step-16000.ckpt \
+  --continue-from /gpfs/scratch/acw723/para-audio-id/fsq-tokenizer-checkpoints/fsq-tc1/step-15000.ckpt \
   --run-id fsq-tc1-cons01 \
   --consistency-weight 0.1 \
   --wandb-online
 ```
 
-This restores model weights, AdamW moments, and update 16,000. The existing
-50K learning-rate schedule continues, leaving 34K updates; there is no warmup
+This restores model weights, AdamW moments, and update 15,000 (the last saved
+snapshot before the original process was suspended at update 15,975). The existing
+50K learning-rate schedule continues, leaving 35K updates; there is no warmup
 restart or LR increase. Only the consistency weight and run name change. A new
 W&B run is created, and the source checkpoint remains unchanged. To resume this
 continuation later, use its saved configuration:

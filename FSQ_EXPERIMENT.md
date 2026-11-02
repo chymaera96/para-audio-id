@@ -101,6 +101,29 @@ python train_fsq.py configs/fsq_tokenizer.yaml \
   --run-id fsq-pilot-v1 --resume --wandb-online
 ```
 
+Continue the reconstruction-only `fsq-tc1` snapshot with consistency weight 0.1
+in a separate run:
+
+```bash
+python -u train_fsq.py configs/fsq_tokenizer.yaml \
+  --continue-from /gpfs/scratch/acw723/para-audio-id/fsq-tokenizer-checkpoints/fsq-tc1/step-16000.ckpt \
+  --run-id fsq-tc1-cons01 \
+  --consistency-weight 0.1 \
+  --wandb-online
+```
+
+This restores model weights, AdamW moments, and update 16,000. The existing
+50K learning-rate schedule continues, leaving 34K updates; there is no warmup
+restart or LR increase. Only the consistency weight and run name change. A new
+W&B run is created, and the source checkpoint remains unchanged. To resume this
+continuation later, use its saved configuration:
+
+```bash
+python -u train_fsq.py \
+  /gpfs/scratch/acw723/para-audio-id/fsq-tokenizer-checkpoints/fsq-tc1-cons01/config.yaml \
+  --resume --wandb-online
+```
+
 The W&B ID is persisted in `wandb-id.txt` and checkpoints. The CLI uses the
 same ID with `resume="must"`. Logs, split/asset metadata, and optimizer state
 are stored with each run under:

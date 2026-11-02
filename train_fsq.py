@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 import json
 import math
 import os
@@ -35,6 +36,23 @@ def build_loader(dataset, train_cfg, device):
         kwargs.update(persistent_workers=True, prefetch_factor=2,
                       multiprocessing_context="spawn")
     return DataLoader(dataset, **kwargs)
+
+
+def restore_checkpoint(payload, cfg, split, model, optimizer, *, continuation=False):
+    expected = deepcopy(payload["config"])
+    if continuation:
+        if cfg["train"]["run_id"] == expected["train"]["run_id"]:
+            raise ValueError("A continuation needs a new --run-id")
+        # The continuation changes only the objective weight and run name.
+        expected["train"]["run_id"] = cfg["train"]["run_id"]
+        expected["train"]["consistency_weight"] = cfg["train"]["consistency_weight"]
+    if expected != cfg:
+        raise ValueError("Configuration differs from checkpoint beyond permitted continuation changes")
+    if payload["split"] != split:
+        raise ValueError("Source split differs from checkpoint")
+    model.load_state_dict(payload["model"])
+    optimizer.load_state_dict(payload["optimizer"])
+    return payload["step"], None if continuation else payload.get("wandb_id")
 
 
 def monitor(model, loader, device, output, step):
@@ -94,6 +112,10 @@ def main():
     parser.add_argument("config", type=Path)
     parser.add_argument("--run-id")
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--continue-from", type=Path,
+                        help="continue a checkpoint in a new run, preserving optimizer and LR schedule")
+    parser.add_argument("--consistency-weight", type=float,
+                        help="override consistency weight, e.g. 0.1 for a continuation")
     parser.add_argument("--wandb-online", action="store_true")
     parser.add_argument("--prepare-only", action="store_true")
     parser.add_argument("--sanity-steps", type=int, default=0,
@@ -104,9 +126,19 @@ def main():
     args = parser.parse_args()
     if args.stop_after < 0 or args.sanity_steps < 0:
         parser.error("Step limits must be non-negative")
+    if args.resume and args.continue_from:
+        parser.error("Use either --resume or --continue-from")
+    if args.continue_from and not args.run_id:
+        parser.error("--continue-from requires a new --run-id")
+    if args.consistency_weight is not None and (
+        not math.isfinite(args.consistency_weight) or args.consistency_weight < 0
+    ):
+        parser.error("--consistency-weight must be finite and non-negative")
     cfg = load_config(args.config)
     if args.run_id:
         cfg["train"]["run_id"] = args.run_id
+    if args.consistency_weight is not None:
+        cfg["train"]["consistency_weight"] = args.consistency_weight
     t = cfg["train"]
     torch.set_num_threads(t["cpu_threads"])
     random.seed(cfg["seed"])
@@ -131,20 +163,17 @@ def main():
     optimizer = torch.optim.AdamW(model.parameters(), lr=t["learning_rate"], weight_decay=t["weight_decay"])
     step = 0
     wandb_id = None
-    if args.resume:
-        payload = torch.load(last, map_location="cpu", weights_only=False)
-        if payload["config"] != cfg:
-            raise ValueError("Resume configuration differs from checkpoint")
-        if payload["split"] != split:
-            raise ValueError("Resume source split differs")
-        model.load_state_dict(payload["model"])
-        optimizer.load_state_dict(payload["optimizer"])
-        step = payload["step"]
-        wandb_id = payload.get("wandb_id")
+    if args.resume or args.continue_from:
+        source = args.continue_from or last
+        payload = torch.load(source, map_location="cpu", weights_only=False)
+        step, wandb_id = restore_checkpoint(payload, cfg, split, model, optimizer,
+                                            continuation=bool(args.continue_from))
+        print(f"Loaded {source} at update {step}; consistency weight "
+              f"{t['consistency_weight']:g}; optimizer and LR schedule preserved", flush=True)
     save_config(cfg, output / "config.yaml")
     noise, rir = assets(cfg)
     asset_manifests = {"noise": noise.manifest(), "rir": rir.manifest()}
-    if args.resume and payload["asset_manifests"] != asset_manifests:
+    if (args.resume or args.continue_from) and payload["asset_manifests"] != asset_manifests:
         raise ValueError("Augmentation assets changed since checkpoint")
     (output / "assets.json").write_text(json.dumps(asset_manifests, indent=2))
     monitor_records = split["monitor"][:16] if args.sanity_steps else split["monitor"]

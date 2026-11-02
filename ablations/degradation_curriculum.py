@@ -29,9 +29,9 @@ def plot_curriculum(database_size: int, output: Path) -> None:
     figure, (top, bottom) = plt.subplots(
         2,
         1,
-        figsize=(3.323, 2.897),
+        figsize=(3.7, 2.84),
         sharex=True,
-        gridspec_kw={"height_ratios": [2.2, 1.0], "hspace": 0.08},
+        gridspec_kw={"height_ratios": [1.7, 1.0], "hspace": 0.10},
     )
 
     top.stackplot(
@@ -48,12 +48,14 @@ def plot_curriculum(database_size: int, output: Path) -> None:
     top.set_ylabel("Pair probability")
     top.legend(
         loc="lower center",
-        bbox_to_anchor=(0.5, 1.01),
-        ncol=2,
+        bbox_to_anchor=(0.5, 1.0),
+        borderaxespad=0.15,
+        ncol=4,
         frameon=False,
-        fontsize=7,
-        columnspacing=1.0,
-        handlelength=1.4,
+        fontsize=7.5,
+        columnspacing=0.65,
+        handlelength=1.1,
+        handletextpad=0.4,
     )
 
     rir_steps = np.array([10.0, 30.0, 60.0, 115.0])
@@ -88,6 +90,7 @@ def plot_curriculum(database_size: int, output: Path) -> None:
     # Preserve the original Matplotlib figure canvas exactly. Tight bounding-box
     # export changes the apparent font and spacing at a fixed LaTeX width.
     figure.savefig(output)
+    figure.savefig(output.with_suffix(".png"), dpi=300)
     plt.close(figure)
 
 

@@ -110,7 +110,7 @@ def parse_args() -> argparse.Namespace:
         "--output",
         type=Path,
         default=None,
-        help="output PDF (default: ablations/capacity.pdf)",
+        help="output PDF (default: ablations/capacity-readable.pdf); also writes a PNG",
     )
     parser.add_argument("--dpi", type=int, default=200)
     return parser.parse_args()
@@ -120,7 +120,8 @@ def main() -> None:
     args = parse_args()
     try:
         import matplotlib.pyplot as plt
-        from matplotlib.ticker import LogLocator, NullFormatter
+        from matplotlib.lines import Line2D
+        from matplotlib.ticker import FixedLocator, NullLocator
     except ImportError as exc:
         raise SystemExit(
             "matplotlib is required: python -m pip install matplotlib"
@@ -129,7 +130,12 @@ def main() -> None:
     if args.crossing_persistence < 0:
         raise SystemExit("--crossing-persistence must be non-negative")
 
-    figure, axes = plt.subplots(1, 2, figsize=(7.0, 3.0), sharey=True)
+    plt.rcParams.update({
+        "font.size": 8, "axes.labelsize": 9, "xtick.labelsize": 8,
+        "ytick.labelsize": 8, "legend.fontsize": 9,
+        "pdf.fonttype": 42, "ps.fonttype": 42,
+    })
+    figure, axes = plt.subplots(1, 2, figsize=(4.8, 2.1), sharey=True)
     updates_axis, exposures_axis = axes
     chance_loss = math.log(10)
     crossing_threshold = 0.9 * chance_loss
@@ -149,14 +155,14 @@ def main() -> None:
             values,
             label=database_label,
             color=color,
-            linewidth=1.4,
+            linewidth=0.8,
         )
         exposures_axis.plot(
             exposures,
             values,
             label=database_label,
             color=color,
-            linewidth=1.4,
+            linewidth=0.8,
         )
         crossing_index = transition_onset(
             values,
@@ -177,57 +183,65 @@ def main() -> None:
             f"{crossing_message}"
         )
 
-    updates_axis.set_xlabel("Optimizer update (log scale)")
-    exposures_axis.set_xlabel(r"Per-recording exposure $U B / N$ (log scale)")
-    updates_axis.set_ylabel("Identifier digit cross-entropy")
+    updates_axis.set_xlabel("Updates")
+    exposures_axis.set_xlabel(r"Exposure $UB/N$")
+    updates_axis.set_yticks([0, 2, 4])
     for axis in axes:
         axis.set_xscale("log")
-        axis.xaxis.set_major_locator(LogLocator(base=10))
-        axis.xaxis.set_minor_formatter(NullFormatter())
+        axis.xaxis.set_minor_locator(NullLocator())
+        axis.tick_params(length=2.5, pad=2)
+        for spine in axis.spines.values():
+            spine.set_linewidth(0.6)
         axis.axhline(
             chance_loss,
             color="#3f3f3f",
             linestyle=":",
-            linewidth=1.5,
+            linewidth=0.9,
             zorder=0,
         )
         axis.axhline(
             crossing_threshold,
             color="#a5a5a5",
             linestyle=":",
-            linewidth=1.25,
+            linewidth=0.7,
             zorder=0,
         )
-        axis.grid(True, which="major", alpha=0.30)
-        axis.grid(True, which="minor", axis="x", alpha=0.12)
+        axis.grid(True, which="major", alpha=0.18, linewidth=0.5)
+
+    updates_axis.xaxis.set_major_locator(FixedLocator([1e2, 1e4, 1e6]))
+    exposures_axis.xaxis.set_major_locator(FixedLocator([1e-1, 1, 1e1, 1e2]))
 
     updates_axis.text(
         0.99,
-        chance_loss,
+        chance_loss + 0.12,
         r"$\ell_0=\ln(10)$",
         transform=updates_axis.get_yaxis_transform(),
         ha="right",
         va="bottom",
         color="#3f3f3f",
-        fontsize=8,
+        fontsize=8.5,
+        bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.85, "pad": 0.5},
     )
-    exposures_axis.legend(
-        loc="upper right",
-        ncol=2,
+    handles, labels = updates_axis.get_legend_handles_labels()
+    figure.legend(
+        [Line2D([], [], linestyle="none"), *handles],
+        ["DB Size:", *labels],
+        loc="upper center",
+        bbox_to_anchor=(0.53, 1.0),
+        ncol=5,
         frameon=False,
-        title="DB size",
-        fontsize=7,
-        title_fontsize=7,
-        columnspacing=0.8,
+        fontsize=8.5,
+        columnspacing=0.55,
         labelspacing=0.25,
-        handlelength=1.6,
+        handlelength=0.9,
+        handletextpad=0.35,
     )
-    figure.tight_layout()
-    figure.subplots_adjust(wspace=0.025)
+    figure.subplots_adjust(left=0.07, right=0.99, bottom=0.24, top=0.88, wspace=0.055)
 
-    output = args.output or (Path(__file__).resolve().parent / "capacity.pdf")
+    output = args.output or (Path(__file__).resolve().parent / "capacity-readable.pdf")
     output.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(output, dpi=args.dpi, bbox_inches="tight")
+    figure.savefig(output.with_suffix(".png"), dpi=300, bbox_inches="tight")
     plt.close(figure)
     print(f"Saved {output}")
 

@@ -109,6 +109,12 @@ are stored with each run under:
 /gpfs/scratch/acw723/para-audio-id/fsq-tokenizer-checkpoints/<run-id>/
 ```
 
+DataLoader workers use the `spawn` start method, avoiding inherited W&B
+telemetry/import hooks and CUDA state. If the first batch fails before a
+checkpoint is written, rerun the original command without `--resume`; the
+persisted W&B ID reconnects to the same run. Use `--resume` once a checkpoint
+exists to restore the model and optimizer as well.
+
 `--sanity-steps 100` creates a separate `-sanity` run, limits monitoring to
 16 tracks, and never connects to W&B. `--stop-after N` stops and saves after
 N additional updates without changing the full 50K LR schedule, including

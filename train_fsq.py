@@ -26,6 +26,17 @@ def atomic_save(payload, path):
     os.replace(temporary, path)
 
 
+def build_loader(dataset, train_cfg, device):
+    kwargs = dict(batch_size=train_cfg["batch_size"], num_workers=train_cfg["workers"],
+                  pin_memory=device.type == "cuda")
+    if train_cfg["workers"]:
+        # Workers start lazily during iteration, after wandb.init(). Fork would
+        # inherit W&B's live telemetry/import hooks (and the CUDA context).
+        kwargs.update(persistent_workers=True, prefetch_factor=2,
+                      multiprocessing_context="spawn")
+    return DataLoader(dataset, **kwargs)
+
+
 def monitor(model, loader, device, output, step):
     model.eval()
     stats = {name: dict(count=0, reconstruction=0., token_agreement=0.,
@@ -139,13 +150,10 @@ def main():
     monitor_records = split["monitor"][:16] if args.sanity_steps else split["monitor"]
     monitoring = PairedCrops(cfg, monitor_records, noise, rir, monitor=True,
                              monitor_keys=split["monitor_crop_keys"][:len(monitor_records)])
-    kwargs = dict(batch_size=t["batch_size"], num_workers=t["workers"], pin_memory=device.type == "cuda")
-    if t["workers"]:
-        kwargs.update(persistent_workers=True, prefetch_factor=2)
     training = PairedCrops(cfg, split["training"], noise, rir,
                            start_index=step * t["batch_size"])
-    loader = DataLoader(training, **kwargs)
-    monitor_loader = DataLoader(monitoring, **kwargs)
+    loader = build_loader(training, t, device)
+    monitor_loader = build_loader(monitoring, t, device)
     # Cache fixed draws in host memory: ~768 MB for 500 tracks x 4 conditions.
     print("Preparing fixed monitoring crops...", flush=True)
     monitor_batches = list(monitor_loader)

@@ -2426,6 +2426,19 @@ def build_logger(cfg: dict, directory: Path):
 
 
 def train(cfg: dict, *, checkpoint: str | Path | None = None, sanity_steps: int = 0) -> None:
+    if (
+        cfg["trainer"].get("precision") == "bf16-mixed"
+        and torch.cuda.is_available()
+        and not torch.cuda.is_bf16_supported()
+    ):
+        from copy import deepcopy
+
+        cfg = deepcopy(cfg)
+        cfg["trainer"]["precision"] = "16-mixed"
+        warnings.warn(
+            "This GPU does not support BF16; using FP16 mixed precision instead.",
+            stacklevel=2,
+        )
     if sanity_steps:
         if sanity_steps < 1 or checkpoint is not None:
             raise ValueError("Sanity training requires a fresh run and a positive step count")

@@ -2429,7 +2429,7 @@ def train(cfg: dict, *, checkpoint: str | Path | None = None, sanity_steps: int 
     if (
         cfg["trainer"].get("precision") == "bf16-mixed"
         and torch.cuda.is_available()
-        and not torch.cuda.is_bf16_supported()
+        and not torch.cuda.is_bf16_supported(including_emulation=False)
     ):
         from copy import deepcopy
 

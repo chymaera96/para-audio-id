@@ -149,6 +149,30 @@ For remote access and automatic `ood_jupy*` allocation discovery, see
 
 ## Frozen tokenizer and PSI stage
 
+### tc19: 25K medium decoder with fsq-tc2 at 28K
+
+`configs/fsq_psi_tc19.yaml` uses the frozen `fsq-tc2/step-28000.ckpt`
+tokenizer and the existing 25K identity manifest. The decoder has 24 layers,
+width 1024, and 16 heads. It uses one GPU, 40 recordings/two documents per
+microbatch, and accumulation two (80 recordings per optimizer update).
+The original 25K schedule runs for 225K updates. PSI identifier-logit
+distillation is disabled, matching the previous medium-model command.
+W&B project is `para-audio-id`, with run name and ID `tc19`. Checkpoints and
+monitoring run every 2,500 updates. FSQ weights remain frozen.
+
+After pulling the branch on Apocrita:
+
+```bash
+python prepare_fsq_psi.py \
+  /gpfs/scratch/acw723/para-audio-id/fsq-tokenizer-checkpoints/fsq-tc2/step-28000.ckpt \
+  --export-only
+python -u train.py configs/fsq_psi_tc19.yaml --run-id tc19 --wandb-online
+```
+
+Resume with the same command plus `--resume`. W&B keeps the same run ID.
+
+### Generic small-decoder pilot
+
 After tokenizer training, export a frozen snapshot and generate PSI config:
 
 ```bash

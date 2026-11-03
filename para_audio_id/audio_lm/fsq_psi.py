@@ -7,7 +7,7 @@ import torch
 def resolve_fsq_psi_config(config, *, decoder, schedule, selected_codebooks,
                            distillation_weight, checkpoint):
     from .fsq import FrozenFSQTokenizer
-    from .profiles import resolve_training_config
+    from .profiles import decoder_profile, resolve_training_config
 
     saved = None
     if checkpoint is not None:
@@ -20,6 +20,9 @@ def resolve_fsq_psi_config(config, *, decoder, schedule, selected_codebooks,
     if selected_codebooks not in (None, 1):
         raise ValueError("This pilot uses one FSQ group; omit --codebooks")
     base = deepcopy(config)
+    selected_decoder = decoder or base.get("model", {}).get("decoder", "small")
+    if selected_decoder not in ("small", "medium"):
+        raise ValueError("FSQ PSI supports small or medium decoders")
     tokenizer_cfg = deepcopy(base["tokenizer"])
     frozen = FrozenFSQTokenizer(tokenizer_cfg["checkpoint"], device="cpu")
     if frozen.selected_codebooks != 1 or frozen.vocabulary.codebook_size != 1024:
@@ -30,7 +33,7 @@ def resolve_fsq_psi_config(config, *, decoder, schedule, selected_codebooks,
     # This recursive call uses MuQ configuration only to resolve that recipe;
     # no MuQ model is instantiated or downloaded.
     base["tokenizer"] = {"selected_codebooks": 2, "sample_rate": 24000}
-    resolved = resolve_training_config(base, decoder=decoder, schedule=schedule,
+    resolved = resolve_training_config(base, decoder="small", schedule=schedule,
                                       selected_codebooks=2,
                                       distillation_weight=distillation_weight)
     tokenizer_cfg.update(sample_rate=24000, selected_codebooks=1,
@@ -40,6 +43,9 @@ def resolve_fsq_psi_config(config, *, decoder, schedule, selected_codebooks,
     resolved["train"]["id_digit_weight"] = 4.0
     resolved["resolved_query_profile"] = {"selected_codebooks": 1, "id_digit_weight": 4.0}
     profile = resolved["resolved_training_profile"]
+    profile["decoder"] = decoder_profile(selected_decoder)
+    resolved["model"].update({k: v for k, v in profile["decoder"].items() if k != "name"})
+    resolved["model"]["decoder"] = selected_decoder
     profile["variant"] = "cnn-fsq-single-group-25k-v1"
     profile["training_tracks_manifest"] = config["data"].get(
         "training_tracks_manifest", profile["training_tracks_manifest"])

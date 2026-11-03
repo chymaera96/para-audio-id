@@ -13,6 +13,7 @@ import torch
 SUPPORTED_DATABASE_SIZES = (25_000,)
 DECODER_PROFILES = {
     "small": {"num_layers": 12, "hidden_size": 768, "num_attention_heads": 12},
+    "medium": {"num_layers": 24, "hidden_size": 1024, "num_attention_heads": 16},
 }
 SCHEDULE_NAMES = ("noise-rir",)
 SUPPORTED_SELECTED_CODEBOOKS = (2, 4, 6, 8)

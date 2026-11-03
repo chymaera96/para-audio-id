@@ -14,6 +14,12 @@ music tracks and 500 disjoint monitoring tracks, one 1,024-symbol FSQ group,
 After freezing that tokenizer, `fsq-psi-25k-small-v1` uses the 25K PSI recipe
 with 50 audio tokens per two-second crop. The two stages train separately.
 
+`tc19` uses the `fsq-tc2` tokenizer snapshot at update 28,000, frozen, with
+the medium decoder on the existing 25K catalogue. It uses 50 audio tokens per
+two-second crop, ID digit weight 4, 225K updates, and zero identifier-logit
+distillation. It logs to W&B project `para-audio-id`; configuration is
+`configs/fsq_psi_tc19.yaml`.
+
 | Run ID | Catalogue | Training views | ID digit weight | Steps | Main change |
 | --- | ---: | --- | ---: | ---: | --- |
 | `tc2` | Full FMA-large catalogue | Canonical only | 5 | 100K | Replaced the continuous model with Mel-RVQ tokens and a causal transformer |

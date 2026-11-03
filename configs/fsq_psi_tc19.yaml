@@ -1,0 +1,79 @@
+architecture: audio_lm_v1
+
+tokenizer:
+  kind: fsq
+  checkpoint: /gpfs/scratch/acw723/para-audio-id/fsq-tokenizer-checkpoints/fsq-tc2/tokenizer-step-28000.ckpt
+  device: cuda
+  sample_rate: 24000
+  selected_codebooks: 1
+
+model:
+  architecture: gpt2
+  decoder: medium
+  max_position_embeddings: 512
+  resid_pdrop: 0.0
+  embd_pdrop: 0.0
+  attn_pdrop: 0.0
+  tie_word_embeddings: true
+
+data:
+  audio_root: /gpfs/scratch/acw723/fma_data/fma_large
+  catalogue: /data/home/acw723/para-audio-id/data/fma_large_100k.jsonl
+  training_tracks_manifest: /data/home/acw723/para-audio-id/data/training_tracks_25k.json
+  database_size: 25000
+  segment_duration: 2.0
+  crop_retries: 4
+  replacement_retries: 32
+  background_noise:
+    training_root: /gpfs/scratch/acw723/audio-degradation-data/degradation_24k/bg_noise/train
+    validation_root: /gpfs/scratch/acw723/audio-degradation-data/degradation_24k/bg_noise/test
+  room_ir:
+    training_root: /gpfs/scratch/acw723/audio-degradation-data/degradation_24k/room_ir/train
+    validation_root: /gpfs/scratch/acw723/audio-degradation-data/degradation_24k/room_ir/test
+    past_context_duration: 2.0
+
+train:
+  seed: 1337
+  deterministic: true
+  deterministic_warn_only: true
+  log_dir: logs/fma-large-audio-lm
+  checkpoint_dir: /gpfs/scratch/acw723/para-audio-id/audio-lm-checkpoints
+  run_id: tc19
+  tracks_per_microbatch: 40
+  segments_per_track: 2
+  learning_rate: 0.0003
+  betas: [0.9, 0.95]
+  weight_decay: 0.0
+  warmup_steps: 500
+  evaluation_interval: 2500
+  checkpoint_interval: 2500
+  id_digit_weight: 4.0
+  distillation:
+    maximum_weight: 0.0
+  wandb:
+    enabled: false
+    project: para-audio-id
+    entity:
+    name: tc19
+    mode: offline
+  gradient_clip_norm: 1.0
+
+evaluation:
+  online_monitor_enabled: true
+  monitor_tracks: 100
+  generation_batch_size: 16
+  beam_width: 10
+  noise_snr_db: [0, 5, 10, 20, 30]
+
+dataloader:
+  num_workers: 8
+  persistent_workers: true
+  prefetch_factor: 2
+
+trainer:
+  accelerator: gpu
+  devices: 1
+  strategy: auto
+  precision: bf16-mixed
+  accumulate_grad_batches: 2
+  log_every_n_steps: 25

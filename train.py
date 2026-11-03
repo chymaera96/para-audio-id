@@ -14,7 +14,7 @@ def main() -> None:
     parser.add_argument("--run-id")
     parser.add_argument("--devices", type=int, default=None)
     parser.add_argument("--database-size", type=int, choices=(25_000,))
-    parser.add_argument("--decoder", choices=("small",))
+    parser.add_argument("--decoder", choices=("small", "medium"))
     parser.add_argument("--schedule", choices=("noise-rir",))
     parser.add_argument(
         "--codebooks",

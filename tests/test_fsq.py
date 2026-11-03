@@ -1,5 +1,6 @@
 import itertools
 import json
+from copy import deepcopy
 
 import numpy as np
 import soundfile as sf
@@ -90,6 +91,21 @@ def test_fsq_psi_configuration_and_evaluation_reload(tmp_path):
     loaded = _checkpoint_tokenizer(checkpoint, "cpu")
     waveform = torch.randn(1, 48000)
     assert torch.equal(frozen.tokenize(waveform), loaded.tokenize(waveform))
+
+    medium_cfg = deepcopy(base)
+    medium_cfg["model"]["decoder"] = "medium"
+    medium = resolve_training_config(medium_cfg, distillation_weight=0.0)
+    assert medium["resolved_training_profile"]["decoder"]["name"] == "medium"
+    assert medium["model"]["num_layers"] == 24
+    assert medium["model"]["hidden_size"] == 1024
+    assert medium["model"]["num_attention_heads"] == 16
+    assert medium["train"]["max_steps"] == 225000
+    checkpoint["resolved_training_profile"] = medium["resolved_training_profile"]
+    checkpoint["hyper_parameters"] = medium
+    torch.save(checkpoint, resume_path)
+    resumed_medium = resolve_training_config(medium_cfg, checkpoint=resume_path)
+    assert resumed_medium["model"]["hidden_size"] == 1024
+    assert resumed_medium["train"]["distillation"]["maximum_weight"] == 0.0
 
 
 def test_split_and_fixed_monitor_replacement_and_alignment(tmp_path):

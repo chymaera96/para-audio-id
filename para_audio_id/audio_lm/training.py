@@ -570,6 +570,7 @@ class LegacyAudioLMDataModule(pl.LightningDataModule):
         workers = int(self.cfg["dataloader"]["num_workers"])
         return {
             "num_workers": workers,
+            "multiprocessing_context": "spawn" if workers > 0 else None,
             "pin_memory": True,
             "persistent_workers": workers > 0
             and bool(self.cfg["dataloader"]["persistent_workers"]),
@@ -769,6 +770,7 @@ class AudioLMDataModule(pl.LightningDataModule):
         workers = int(self.cfg["dataloader"]["num_workers"])
         return {
             "num_workers": workers,
+            "multiprocessing_context": "spawn" if workers > 0 else None,
             "pin_memory": True,
             "persistent_workers": workers > 0
             and bool(self.cfg["dataloader"]["persistent_workers"]),

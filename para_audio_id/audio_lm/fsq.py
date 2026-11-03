@@ -66,7 +66,10 @@ class CNNFSQ(nn.Module):
 
         self.cfg = dict(cfg)
         self.sample_rate = int(cfg["sample_rate"])
-        self.frame_rate = self.sample_rate / cfg["hop_length"] / 4
+        strides = cfg.get("temporal_strides", [2, 2])
+        if len(strides) != 2 or any(s not in (1, 2) for s in strides):
+            raise ValueError("temporal_strides must contain two strides, each 1 or 2")
+        self.frame_rate = self.sample_rate / cfg["hop_length"] / math.prod(strides)
         self.quantizer = FSQ(cfg["levels"], cfg["groups"])
         c0, c1, c2 = cfg["channels"]
         width = len(cfg["levels"]) * cfg["groups"]
@@ -77,15 +80,17 @@ class CNNFSQ(nn.Module):
             center=True, pad_mode="constant", norm="slaney", mel_scale="slaney")
         self.encoder = nn.Sequential(
             nn.Conv1d(cfg["n_mels"], c0, 5, padding=2), nn.SiLU(),
-            nn.Conv1d(c0, c1, 5, stride=2, padding=2), nn.SiLU(),
-            nn.Conv1d(c1, c2, 5, stride=2, padding=2),
+            nn.Conv1d(c0, c1, 5, stride=strides[0], padding=2), nn.SiLU(),
+            nn.Conv1d(c1, c2, 5, stride=strides[1], padding=2),
             *[Residual(c2, d) for d in cfg["dilations"]],
             nn.GroupNorm(8, c2), nn.SiLU(), nn.Conv1d(c2, width, 1))
         self.decoder = nn.Sequential(
             nn.Conv1d(width, c2, 3, padding=1),
             Residual(c2, 1), Residual(c2, 2),
-            nn.ConvTranspose1d(c2, c1, 4, stride=2, padding=1), nn.SiLU(),
-            nn.ConvTranspose1d(c1, c0, 4, stride=2, padding=1), nn.SiLU(),
+            nn.ConvTranspose1d(c2, c1, 4 if strides[1] == 2 else 3,
+                               stride=strides[1], padding=1), nn.SiLU(),
+            nn.ConvTranspose1d(c1, c0, 4 if strides[0] == 2 else 3,
+                               stride=strides[0], padding=1), nn.SiLU(),
             nn.Conv1d(c0, cfg["n_mels"], 5, padding=2))
 
     def features(self, waveform):

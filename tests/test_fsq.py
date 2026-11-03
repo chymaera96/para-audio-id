@@ -3,11 +3,39 @@ import json
 from copy import deepcopy
 
 import numpy as np
+import pytest
 import soundfile as sf
 import torch
 import yaml
 
 from para_audio_id.audio_lm.fsq import CNNFSQ, FSQ, FrozenFSQTokenizer, reconstruction_loss
+
+
+@pytest.mark.parametrize("run,groups,frames", [(3, 2, 50), (4, 4, 50),
+                                              (5, 1, 100), (6, 2, 100)])
+def test_fsq_capacity_variants(tmp_path, run, groups, frames):
+    cfg = yaml.safe_load(open(f"configs/fsq_tc{run}.yaml"))
+    assert cfg["train"]["consistency_weight"] == 0.1
+    assert cfg["train"]["max_steps"] == 50000
+    cfg["model"]["channels"] = [16, 24, 32]
+    model = CNNFSQ(cfg["model"])
+    wave = torch.randn(2, 48000) * 0.1
+    mel = model.features(wave)
+    reconstructed, coordinates, ids = model(mel)
+    assert mel.shape == reconstructed.shape == (2, 80, 200)
+    assert ids.shape == (2, groups, frames)
+    assert model.frame_rate == frames / 2
+    reconstructed.abs().mean().backward()
+    assert model.encoder[0].weight.grad.abs().sum() > 0
+    path = tmp_path / "tokenizer.ckpt"
+    torch.save({"format": "cnn_fsq_tokenizer_v1", "config": cfg,
+                "model": model.state_dict()}, path)
+    frozen = FrozenFSQTokenizer(path, device="cpu")
+    tokens = frozen.tokenize(wave)
+    assert tokens.shape == (2, groups * frames)
+    assert torch.equal(tokens, frozen.tokenize(wave))
+    for group in range(groups):
+        assert torch.equal(tokens[:, group::groups], ids[:, group] + group * 1024)
 
 
 def test_fsq_grid_and_straight_through_gradient():

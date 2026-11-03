@@ -149,6 +149,29 @@ For remote access and automatic `ood_jupy*` allocation discovery, see
 
 ## Frozen tokenizer and PSI stage
 
+### Capacity/rate tokenizer ablations: fsq-tc3 through fsq-tc6
+
+These fresh runs retain tc2's split, 100 Hz mel frontend, augmentation,
+reconstruction loss, consistency weight 0.1, and 50K learning-rate schedule.
+Each is stopped and saved at 32K updates with `--stop-after 32000`.
+
+| Run | Config | Parallel FSQ groups | Latent frames/s | Tokens per 2 s |
+| --- | --- | ---: | ---: | ---: |
+| fsq-tc3 | configs/fsq_tc3.yaml | 2 | 25 | 100 |
+| fsq-tc4 | configs/fsq_tc4.yaml | 4 | 25 | 200 |
+| fsq-tc5 | configs/fsq_tc5.yaml | 1 | 50 | 100 |
+| fsq-tc6 | configs/fsq_tc6.yaml | 2 | 50 | 200 |
+
+Each group uses `[4,4,4,4,4]` levels. The 50 Hz models reduce the second
+encoder stride from two to one and mirror this in the reconstruction decoder;
+mel features are unchanged. Default strides remain `[2,2]`, preserving old
+checkpoint shapes. The launch order is tc3, tc5, tc4, tc6, sequentially in
+allocation 35273583, with online W&B in `para-audio-id-fsq`.
+This stage trains tokenizers only. The current downstream PSI configuration
+adapter still restricts frozen FSQ to one group at 25 Hz and needs a separate
+update before using these variants. Causal audio next-token prediction remains
+part of the intended downstream PSI objective.
+
 ### tc19: 25K medium decoder with fsq-tc2 at 28K
 
 `configs/fsq_psi_tc19.yaml` uses the frozen `fsq-tc2/step-28000.ckpt`

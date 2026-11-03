@@ -20,6 +20,11 @@ two-second crop, ID digit weight 4, 225K updates, and zero identifier-logit
 distillation. It logs to W&B project `para-audio-id`; configuration is
 `configs/fsq_psi_tc19.yaml`.
 
+`tc20` is the PSI-S counterpart of `tc19`: the same frozen `fsq-tc2` 28K
+tokenizer, 25K cohort, loss weights, batch exposure, and 225K schedule, using
+the small decoder (12 layers, width 768, 12 heads). It logs to W&B project
+`para-audio-id`; configuration is `configs/fsq_psi_tc20.yaml`.
+
 | Run ID | Catalogue | Training views | ID digit weight | Steps | Main change |
 | --- | ---: | --- | ---: | ---: | --- |
 | `tc2` | Full FMA-large catalogue | Canonical only | 5 | 100K | Replaced the continuous model with Mel-RVQ tokens and a causal transformer |

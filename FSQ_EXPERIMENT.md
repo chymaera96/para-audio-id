@@ -171,6 +171,20 @@ python -u train.py configs/fsq_psi_tc19.yaml --run-id tc19 --wandb-online
 
 Resume with the same command plus `--resume`. W&B keeps the same run ID.
 
+### tc20: PSI-S on the same 25K catalogue
+
+`configs/fsq_psi_tc20.yaml` changes tc19's decoder to small (12 layers, width
+768, 12 heads) and its run name/ID to `tc20`. The tokenizer checkpoint, cohort,
+batch, loss weights, acoustic curriculum, and 225K schedule are identical.
+It trains a fresh PSI decoder and logs to W&B project `para-audio-id`.
+
+```bash
+python -u train.py configs/fsq_psi_tc20.yaml --run-id tc20 --wandb-online
+```
+
+Resume with the same command plus `--resume`. Checkpoints are saved under
+`/gpfs/scratch/acw723/para-audio-id/audio-lm-checkpoints/tc20/`.
+
 ### Generic small-decoder pilot
 
 After tokenizer training, export a frozen snapshot and generate PSI config:

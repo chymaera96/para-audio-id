@@ -172,6 +172,36 @@ adapter still restricts frozen FSQ to one group at 25 Hz and needs a separate
 update before using these variants. Causal audio next-token prediction remains
 part of the intended downstream PSI objective.
 
+### Lower-rate and smaller-encoder ablations: fsq-tc7 through fsq-tc10
+
+Fresh runs use the same split, augmentation, consistency weight 0.1, batch 64,
+50K LR schedule and explicit 32K stopping point as tc3--tc6.
+
+| Run | Latent frames/s | Groups | Tokens/2 s | Encoder channels |
+| --- | ---: | ---: | ---: | --- |
+| fsq-tc7 | 12.5 | 4 | 100 | 128/192/256 |
+| fsq-tc8 | 12.5 | 8 | 200 | 128/192/256 |
+| fsq-tc9 | 25 | 4 | 200 | 64/96/128 |
+| fsq-tc10 | 12.5 | 8 | 200 | 64/96/128 |
+
+The 100 Hz mel frontend is unchanged. `input_pool_stride: 2` applies a fixed
+two-frame average before decimation and the first learned convolution; the
+two existing stride-two convolutions then produce 12.5 Hz latents. This is a
+simple local low-pass operation, not an ideal anti-aliasing filter.
+
+All four runs explicitly retain decoder channels 128/192/256 and decoder
+strides 2/2. Low-rate quantized coordinates are linearly interpolated from
+12.5 to 25 Hz before that decoder. This interpolation adds no discrete tokens
+and no trainable parameters; the exported tokenizer still emits the true low
+rate. Smaller encoders do not shrink the reconstruction decoder. Default
+pooling and decoder settings preserve earlier checkpoint parameter keys and
+forward behaviour.
+
+Configs are `configs/fsq_tc7.yaml` through `configs/fsq_tc10.yaml`. Runs are
+sequential in on-demand allocation 35395413, in numeric order, with online
+W&B in `para-audio-id-fsq`. Source changes go through Git; the cluster-only
+runner is `fsq_tc7_tc10_32k.sh` on Apocrita. No PSI training is launched.
+
 ### tc19: 25K medium decoder with fsq-tc2 at 28K
 
 `configs/fsq_psi_tc19.yaml` uses the frozen `fsq-tc2/step-28000.ckpt`

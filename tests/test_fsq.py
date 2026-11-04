@@ -11,6 +11,54 @@ import yaml
 from para_audio_id.audio_lm.fsq import CNNFSQ, FSQ, FrozenFSQTokenizer, reconstruction_loss
 
 
+@pytest.mark.parametrize("run,groups,frames,channels", [
+    (7, 4, 25, [128, 192, 256]), (8, 8, 25, [128, 192, 256]),
+    (9, 4, 50, [64, 96, 128]), (10, 8, 25, [64, 96, 128])])
+def test_fsq_low_rate_variants(tmp_path, run, groups, frames, channels):
+    cfg = yaml.safe_load(open(f"configs/fsq_tc{run}.yaml"))
+    assert cfg['model']['channels'] == channels
+    assert cfg['model']['decoder_channels'] == [128, 192, 256]
+    assert cfg['model']['decoder_temporal_strides'] == [2, 2]
+    assert cfg['train']['consistency_weight'] == 0.1
+    assert cfg['train']['max_steps'] == 50000
+    assert cfg['train']['run_id'] == f'fsq-tc{run}'
+    cfg['model']['channels'] = [16, 24, 32]
+    cfg['model']['decoder_channels'] = [24, 32, 48]
+    model = CNNFSQ(cfg['model'])
+    assert model.decoder[0].out_channels == 48
+    wave = torch.randn(2, 48000) * .1
+    mel = model.features(wave)
+    reconstruction, coordinates, ids = model(mel)
+    assert model.frame_rate == frames / 2
+    assert ids.shape == (2, groups, frames)
+    assert coordinates.shape == (2, frames, groups * 5)
+    assert reconstruction.shape == mel.shape == (2, 80, 200)
+    reconstruction.square().mean().backward()
+    assert model.encoder[0].weight.grad.abs().sum() > 0
+    assert model.decoder[0].weight.grad.abs().sum() > 0
+    # Odd-length features exercise ceil-pooling and mirrored reconstruction.
+    assert model(mel[..., :-1])[0].shape == (2, 80, 199)
+    path = tmp_path / 'tokenizer.ckpt'
+    torch.save({'format': 'cnn_fsq_tokenizer_v1', 'config': cfg,
+                'model': model.state_dict()}, path)
+    frozen = FrozenFSQTokenizer(path, device='cpu')
+    tokens = frozen.tokenize(wave)
+    assert tokens.shape == (2, frames * groups)
+    assert torch.equal(tokens, frozen.tokenize(wave))
+    assert torch.equal(tokens, (ids.transpose(1, 2) + torch.arange(groups) * 1024).reshape(2, -1))
+
+
+def test_legacy_fsq_decoder_and_state_dict_unchanged():
+    cfg = yaml.safe_load(open('configs/fsq_tc4.yaml'))['model']
+    original = CNNFSQ(cfg)
+    explicit = CNNFSQ({**cfg, 'input_pool_stride': 1,
+                       'decoder_channels': cfg['channels'],
+                       'decoder_temporal_strides': [2, 2]})
+    explicit.load_state_dict(original.state_dict(), strict=True)
+    x = torch.randn(2, 80, 200)
+    assert torch.equal(original(x)[0], explicit(x)[0])
+
+
 @pytest.mark.parametrize("run,groups,frames", [(3, 2, 50), (4, 4, 50),
                                               (5, 1, 100), (6, 2, 100)])
 def test_fsq_capacity_variants(tmp_path, run, groups, frames):

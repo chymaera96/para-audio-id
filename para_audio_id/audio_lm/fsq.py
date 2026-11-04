@@ -59,6 +59,14 @@ class Residual(nn.Module):
         return x + self.net(x)
 
 
+class PooledInputConv1d(nn.Conv1d):
+    """Fixed local averaging before decimation; keep Conv1d parameter keys."""
+
+    def forward(self, x):
+        x = F.avg_pool1d(x, kernel_size=2, stride=2, ceil_mode=True)
+        return super().forward(x)
+
+
 class CNNFSQ(nn.Module):
     def __init__(self, cfg: dict):
         super().__init__()
@@ -69,29 +77,38 @@ class CNNFSQ(nn.Module):
         strides = cfg.get("temporal_strides", [2, 2])
         if len(strides) != 2 or any(s not in (1, 2) for s in strides):
             raise ValueError("temporal_strides must contain two strides, each 1 or 2")
-        self.frame_rate = self.sample_rate / cfg["hop_length"] / math.prod(strides)
+        input_stride = cfg.get("input_pool_stride", 1)
+        if input_stride not in (1, 2):
+            raise ValueError("input_pool_stride must be 1 or 2")
+        decoder_strides = cfg.get("decoder_temporal_strides", strides)
+        if len(decoder_strides) != 2 or any(s not in (1, 2) for s in decoder_strides):
+            raise ValueError("decoder_temporal_strides must contain two strides, each 1 or 2")
+        self.decoder_factor = math.prod(decoder_strides)
+        self.frame_rate = self.sample_rate / cfg["hop_length"] / (input_stride * math.prod(strides))
         self.quantizer = FSQ(cfg["levels"], cfg["groups"])
         c0, c1, c2 = cfg["channels"]
+        d0, d1, d2 = cfg.get("decoder_channels", cfg["channels"])
         width = len(cfg["levels"]) * cfg["groups"]
         self.mel = torchaudio.transforms.MelSpectrogram(
             sample_rate=self.sample_rate, n_fft=cfg["n_fft"],
             hop_length=cfg["hop_length"], n_mels=cfg["n_mels"],
             f_min=cfg["f_min"], f_max=cfg["f_max"], power=2,
             center=True, pad_mode="constant", norm="slaney", mel_scale="slaney")
+        input_conv = PooledInputConv1d if input_stride == 2 else nn.Conv1d
         self.encoder = nn.Sequential(
-            nn.Conv1d(cfg["n_mels"], c0, 5, padding=2), nn.SiLU(),
+            input_conv(cfg["n_mels"], c0, 5, padding=2), nn.SiLU(),
             nn.Conv1d(c0, c1, 5, stride=strides[0], padding=2), nn.SiLU(),
             nn.Conv1d(c1, c2, 5, stride=strides[1], padding=2),
             *[Residual(c2, d) for d in cfg["dilations"]],
             nn.GroupNorm(8, c2), nn.SiLU(), nn.Conv1d(c2, width, 1))
         self.decoder = nn.Sequential(
-            nn.Conv1d(width, c2, 3, padding=1),
-            Residual(c2, 1), Residual(c2, 2),
-            nn.ConvTranspose1d(c2, c1, 4 if strides[1] == 2 else 3,
-                               stride=strides[1], padding=1), nn.SiLU(),
-            nn.ConvTranspose1d(c1, c0, 4 if strides[0] == 2 else 3,
-                               stride=strides[0], padding=1), nn.SiLU(),
-            nn.Conv1d(c0, cfg["n_mels"], 5, padding=2))
+            nn.Conv1d(width, d2, 3, padding=1),
+            Residual(d2, 1), Residual(d2, 2),
+            nn.ConvTranspose1d(d2, d1, 4 if decoder_strides[1] == 2 else 3,
+                               stride=decoder_strides[1], padding=1), nn.SiLU(),
+            nn.ConvTranspose1d(d1, d0, 4 if decoder_strides[0] == 2 else 3,
+                               stride=decoder_strides[0], padding=1), nn.SiLU(),
+            nn.Conv1d(d0, cfg["n_mels"], 5, padding=2))
 
     def features(self, waveform):
         # Exactly ceil(samples/hop) frames: 200 for a two-second waveform.
@@ -108,7 +125,14 @@ class CNNFSQ(nn.Module):
 
     def forward(self, mel):
         coordinates, ids = self.encode_features(mel)
-        reconstruction = self.decoder(coordinates.transpose(1, 2))[..., :mel.shape[-1]]
+        decoder_input = coordinates.transpose(1, 2)
+        decoder_frames = math.ceil(mel.shape[-1] / self.decoder_factor)
+        if decoder_input.shape[-1] != decoder_frames:
+            # The low-rate ablations retain the 25 Hz reconstruction decoder.
+            # Interpolation adds no transmitted tokens or trainable parameters.
+            decoder_input = F.interpolate(decoder_input, size=decoder_frames,
+                                          mode="linear", align_corners=False)
+        reconstruction = self.decoder(decoder_input)[..., :mel.shape[-1]]
         return reconstruction, coordinates, ids
 
 

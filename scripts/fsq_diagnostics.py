@@ -38,7 +38,7 @@ def kernels(deterministic):
     warn = torch.is_deterministic_algorithms_warn_only_enabled()
     try:
         torch.use_deterministic_algorithms(deterministic, warn_only=True)
-        with torch.backends.cudnn.flags(benchmark=False, deterministic=deterministic):
+        with torch.backends.cudnn.flags(enabled=True, benchmark=False, deterministic=deterministic):
             yield
     finally:
         torch.use_deterministic_algorithms(previous, warn_only=warn)

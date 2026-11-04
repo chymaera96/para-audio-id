@@ -46,9 +46,12 @@ def test_extraction_matches_frozen_tokens_and_restores_kernel_flags(tmp_path):
     tokenizer = FrozenFSQTokenizer(path, device='cpu')
     waves = np.random.default_rng(1).normal(0, .1, size=(4, 48000)).astype(np.float32)
     previous = torch.are_deterministic_algorithms_enabled()
+    previous_cudnn = torch.backends.cudnn.enabled
     with kernels(False):
+        assert torch.backends.cudnn.enabled
         features = extract(tokenizer, waves, 2)
     assert torch.are_deterministic_algorithms_enabled() == previous
+    assert torch.backends.cudnn.enabled == previous_cudnn
     assert features['pre'].shape == features['post'].shape == (4, 100, 10)
     expected = tokenizer.tokenize(torch.from_numpy(waves)).numpy().reshape(4, 100, 2)
     expected -= np.arange(2)[None, None, :] * 1024

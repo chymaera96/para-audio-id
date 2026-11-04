@@ -298,7 +298,23 @@ def save_report(out, results, manifest):
             vals = [entries[c]['full']['top1'] * 100 for c in
                     ['clean', 'noise_0db', 'rir', 'noise_rir_0db', 'offset_+40ms', 'other_excerpt_same_recording']]
             lines.append('| ' + name + ' | ' + stage + ' | ' + ' | '.join(f'{v:.1f}' for v in vals) + ' |')
-    lines += ['', '## Interpretation limits', '',
+    lines += ['', '## Latency and kernel equivalence', '',
+              'Milliseconds per complete batch on device-resident waveforms; includes mel, encoder, FSQ and serialization. '
+              'Audio-file decoding is excluded. Ordinary kernels remain FP32, with the recorded TF32 policy.', '',
+              '| Checkpoint | Ordinary B=1 ms | Ordinary B=16 ms | Deterministic B=16 ms | Audited symbol mismatches |',
+              '|---|---:|---:|---:|---:|']
+    for name, result in results['models'].items():
+        def timing(batch, deterministic):
+            return next(x['median_batch_ms'] for x in result['latency']
+                        if x['batch'] == batch and x['deterministic'] == deterministic
+                        and x['includes'].startswith('mel'))
+        mismatch = sum(x['mismatch_count'] for x in result['kernel_equivalence'].values())
+        total = sum(x['symbol_count'] for x in result['kernel_equivalence'].values())
+        lines.append(f'| {name} | {timing(1, False):.2f} | {timing(16, False):.2f} | '
+                     f'{timing(16, True):.2f} | {mismatch}/{total} ({100*mismatch/total:.4f}%) |')
+    lines += ['', '**Nonzero mismatches mean the modes are not bit-identical; '
+              'do not silently change an existing frozen-tokenizer PSI run.**', '',
+              '## Interpretation limits', '',
               '- Same-excerpt retrieval diagnoses discrimination under perturbation; it does not establish catalogue memorisation.',
               '- Compare both readouts. Temporal pooling and coordinate geometry may favour some tokenizers over others.',
               '- Thresholds use the first half of query identities for calibration and the second half for testing. '

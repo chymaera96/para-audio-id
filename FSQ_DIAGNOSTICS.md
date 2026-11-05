@@ -61,3 +61,15 @@ conditions, and latency rather than declaring a winner from one score.
 Pre-quantization diagnostics use the bounded continuous coordinates, not the
 raw unbounded encoder logits. Correlated frame/group samples make marginal
 entropy an unreliable measure of recording-specific information capacity.
+
+After a diagnostic run finishes, generate comparative tables with:
+
+```bash
+python scripts/summarize_fsq_diagnostics.py /absolute/path/diagnostic-directory
+```
+
+This writes `COMPARISON.md`, `all-metrics.csv`, and `paired-comparisons.json`.
+Paired 95% bootstrap intervals resample query identities and hold the gallery
+fixed; they do not quantify variation across tokenizer training seeds. All
+retrieval conditions, both pooling readouts, pre/post rounding, false-match
+operating points, code redundancy and latency remain available for inspection.

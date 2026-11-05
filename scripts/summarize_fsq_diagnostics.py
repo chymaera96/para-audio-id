@@ -72,6 +72,7 @@ def summarize(directory):
                      f"{100*m['test_fpr']:.3f} | {scores} |")
     comparisons = [('tc2-32k', 'tc2-28k'), ('tc4-32k', 'tc3-32k'),
                    ('tc6-32k', 'tc4-32k'), ('tc7-32k', 'tc3-32k'),
+                   ('tc7-32k', 'tc4-32k'), ('tc8-32k', 'tc7-32k'),
                    ('tc8-32k', 'tc4-32k'), ('tc9-32k', 'tc4-32k'),
                    ('tc10-32k', 'tc8-32k'), ('tc10-32k', 'tc9-32k'),
                    ('tc10-32k', 'tc4-32k')]

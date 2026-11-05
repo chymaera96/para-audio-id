@@ -37,7 +37,8 @@ def main():
         return
     cfg = load_config(a.base_config)
     cfg["tokenizer"] = dict(kind="fsq", checkpoint=str(frozen_path.resolve()),
-                             device="cuda", sample_rate=24000, selected_codebooks=1)
+                             device="cuda", sample_rate=24000,
+                             selected_codebooks=frozen.selected_codebooks)
     cfg["data"]["catalogue"] = source["config"]["data"]["catalogue"]
     cfg["data"]["training_tracks_manifest"] = "/data/home/acw723/para-audio-id/data/training_tracks_25k.json"
     cfg["train"]["run_id"] = "fsq-psi-25k-small-v1"

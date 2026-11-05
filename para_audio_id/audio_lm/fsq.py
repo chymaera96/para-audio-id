@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+from contextlib import contextmanager
 from pathlib import Path
 
 import torch
@@ -136,9 +137,34 @@ class CNNFSQ(nn.Module):
         return reconstruction, coordinates, ids
 
 
+@contextmanager
+def fsq_execution_policy(policy):
+    """A scoped inference policy; never change the surrounding PSI policy."""
+    if policy == "inherit":
+        yield
+        return
+    if policy != "fast_fp32_v1":
+        raise ValueError(f"Unknown FSQ execution policy: {policy}")
+    previous = torch.are_deterministic_algorithms_enabled()
+    warn = torch.is_deterministic_algorithms_warn_only_enabled()
+    matmul_tf32 = torch.backends.cuda.matmul.allow_tf32
+    try:
+        torch.use_deterministic_algorithms(False)
+        torch.backends.cuda.matmul.allow_tf32 = False
+        with torch.backends.cudnn.flags(enabled=True, benchmark=False,
+                                        deterministic=False, allow_tf32=True):
+            yield
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = matmul_tf32
+        torch.use_deterministic_algorithms(previous, warn_only=warn)
+
+
 class FrozenFSQTokenizer:
     """Same tokenize/spec/vocabulary interface as the frozen MuQ tokenizer."""
-    def __init__(self, checkpoint: str | Path, device="cuda"):
+    def __init__(self, checkpoint: str | Path, device="cuda", execution_policy="inherit"):
+        if execution_policy not in ("inherit", "fast_fp32_v1"):
+            raise ValueError(f"Unknown FSQ execution policy: {execution_policy}")
+        self.execution_policy = execution_policy
         path = Path(checkpoint).resolve()
         payload = torch.load(path, map_location="cpu", weights_only=False)
         if payload.get("format") != "cnn_fsq_tokenizer_v1":
@@ -160,16 +186,17 @@ class FrozenFSQTokenizer:
             num_available_codebooks=self.selected_codebooks,
             selected_codebooks=self.selected_codebooks,
             codebook_size=self.vocabulary.codebook_size,
-            serialization="time_major_codebook_interleaved", preprocessing_version=1)
+            serialization="time_major_codebook_interleaved", preprocessing_version=1,
+            execution_policy=None if execution_policy == "inherit" else execution_policy)
 
     @torch.inference_mode()
     def tokenize(self, waveform, **kwargs):
         # Lightning can wrap PSI training in BF16 autocast. Keep the frozen
         # quantization decisions identical to standalone FP32 evaluation.
-        with torch.autocast(device_type=self.device.type, enabled=False):
+        with fsq_execution_policy(self.execution_policy), torch.autocast(device_type=self.device.type, enabled=False):
             mel = self.model.features(waveform.to(self.device))
             _, ids = self.model.encode_features(mel)
-        return flatten_time_major(ids, self.vocabulary)
+            return flatten_time_major(ids, self.vocabulary)
 
 
 def reconstruction_loss(clean_mel, reconstructed_clean, reconstructed_degraded):

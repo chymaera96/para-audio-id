@@ -26,9 +26,14 @@ class TokenizerSpec:
     codebook_size: int
     serialization: str
     preprocessing_version: int
+    execution_policy: str | None = None
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        value = asdict(self)
+        # Preserve legacy tokenizer fingerprints exactly.
+        if self.execution_policy is None:
+            value.pop("execution_policy")
+        return value
 
     @property
     def fingerprint(self) -> str:
@@ -253,7 +258,8 @@ def build_tokenizer(config: dict, *, device=None):
     resolved_device = device if device is not None else config.get("device", "cuda")
     if config.get("kind") == "fsq":
         from .fsq import FrozenFSQTokenizer
-        return FrozenFSQTokenizer(config["checkpoint"], device=resolved_device)
+        return FrozenFSQTokenizer(config["checkpoint"], device=resolved_device,
+                                  execution_policy=config.get("execution_policy", "inherit"))
     return MuQRVQTokenizer(
         config["model_name"], revision=config.get("revision", "main"),
         selected_codebooks=int(config["selected_codebooks"]),

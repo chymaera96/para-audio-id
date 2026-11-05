@@ -25,6 +25,14 @@ tokenizer, 25K cohort, loss weights, batch exposure, and 225K schedule, using
 the small decoder (12 layers, width 768, 12 heads). It logs to W&B project
 `para-audio-id`; configuration is `configs/fsq_psi_tc20.yaml`.
 
+`tc21` uses PSI-S on the same 25K cohort with the frozen `fsq-tc8` 32K
+snapshot (eight groups, 12.5 Hz, 200 audio tokens/crop). ID weight is 16;
+clean causal audio prediction is retained. Its explicitly fingerprinted
+`fast_fp32_v1` tokenizer policy uses ordinary convolution kernels only inside
+frozen tokenization, leaving the surrounding PSI deterministic policy intact.
+The 225K training recipe otherwise follows tc20. Config:
+`configs/fsq_psi_tc21.yaml`; W&B project `para-audio-id`, run ID `tc21`.
+
 | Run ID | Catalogue | Training views | ID digit weight | Steps | Main change |
 | --- | ---: | --- | ---: | ---: | --- |
 | `tc2` | Full FMA-large catalogue | Canonical only | 5 | 100K | Replaced the continuous model with Mel-RVQ tokens and a causal transformer |

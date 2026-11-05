@@ -224,7 +224,7 @@ def canonical_training_profile(
 
 def historical_checkpoint_profile(checkpoint: dict) -> dict[str, Any]:
     stored = checkpoint.get("resolved_training_profile")
-    if isinstance(stored, dict) and stored.get("variant") == "cnn-fsq-single-group-25k-v1":
+    if isinstance(stored, dict) and stored.get("variant") in ("cnn-fsq-single-group-25k-v1", "cnn-fsq-25k-v2"):
         return stored
     supported_variants = {
         _codebook_training_identity(codebooks)["variant"]
@@ -251,6 +251,13 @@ def evaluation_checkpoint_profile(checkpoint: dict) -> dict[str, Any]:
         raise ValueError("Evaluation checkpoint is missing its resolved profile")
     variant = stored.get("variant")
     expected = EVALUATION_VARIANTS.get(variant)
+    if variant == "cnn-fsq-25k-v2":
+        spec = checkpoint.get("tokenizer_spec", {})
+        rate = float(spec.get("frame_rate", 0))
+        groups = int(spec.get("selected_codebooks", 0))
+        if spec.get("architecture") != "cnn_fsq_tokenizer_v1" or not math.isfinite(rate) or rate <= 0 or groups <= 0:
+            raise ValueError("FSQ checkpoint is missing a valid tokenizer specification")
+        expected = {"selected_codebooks": groups, "id_digit_weight": 4.0 * groups * rate / 25}
     if expected is None:
         raise ValueError(
             "Joint-beam evaluation supports only the two-second 2/4/6/8 "

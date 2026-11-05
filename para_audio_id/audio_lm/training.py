@@ -182,14 +182,20 @@ def validate_tc18_query_configuration(
             f"tc18 requires a {TC18_SAMPLE_RATE} Hz tokenizer, got "
             f"{tokenizer_spec.sample_rate}"
         )
-    if not math.isclose(tokenizer_spec.frame_rate, TC18_FRAME_RATE):
+    is_fsq = tokenizer_spec.architecture == "cnn_fsq_tokenizer_v1"
+    if not is_fsq and not math.isclose(tokenizer_spec.frame_rate, TC18_FRAME_RATE):
         raise ValueError(
             f"tc18 requires {TC18_FRAME_RATE:g} MuQ frames/s, got "
             f"{tokenizer_spec.frame_rate:g}"
         )
     selected_codebooks = int(tokenizer_spec.selected_codebooks)
-    query_profile = resolve_query_profile(selected_codebooks)
-    expected_id_digit_weight = float(query_profile["id_digit_weight"])
+    if is_fsq:
+        expected_id_digit_weight = 4.0 * selected_codebooks * tokenizer_spec.frame_rate / TC18_FRAME_RATE
+        if not math.isfinite(expected_id_digit_weight) or expected_id_digit_weight <= 0:
+            raise ValueError("FSQ rate and group count must be positive and finite")
+    else:
+        query_profile = resolve_query_profile(selected_codebooks)
+        expected_id_digit_weight = float(query_profile["id_digit_weight"])
     if not math.isclose(id_digit_weight, expected_id_digit_weight):
         raise ValueError(
             f"{selected_codebooks} codebooks require "
@@ -206,7 +212,7 @@ def validate_tc18_query_configuration(
         * tokenizer_spec.selected_codebooks
     )
     expected_audio_targets = round(
-        TC18_SEGMENT_DURATION * TC18_FRAME_RATE * selected_codebooks
+        TC18_SEGMENT_DURATION * (tokenizer_spec.frame_rate if is_fsq else TC18_FRAME_RATE) * selected_codebooks
     )
     if audio_targets != expected_audio_targets:
         raise ValueError(

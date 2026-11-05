@@ -238,6 +238,38 @@ python -u train.py configs/fsq_psi_tc20.yaml --run-id tc20 --wandb-online
 Resume with the same command plus `--resume`. Checkpoints are saved under
 `/gpfs/scratch/acw723/para-audio-id/audio-lm-checkpoints/tc20/`.
 
+### tc21: PSI-S with fsq-tc8 and an explicit fast tokenizer policy
+
+`configs/fsq_psi_tc21.yaml` uses the immutable fsq-tc8 update-32K export,
+eight parallel groups at 12.5 Hz: 200 audio tokens and 208 document tokens
+per two-second crop. ID digit weight 16 preserves the established aggregate
+2.5:1 audio/ID supervision ratio. Clean causal audio next-token prediction,
+paired identifier/boundary losses, 25K identities, small decoder, 80 recordings
+per update, augmentation curriculum, 225K schedule and zero logit-distillation
+weight are retained. W&B project/run ID are `para-audio-id`/`tc21`.
+
+The tokenizer alone uses `fast_fp32_v1`: no BF16 autocast, ordinary cuDNN
+convolutions with TF32 permitted, benchmarking off, FP32 matmul without TF32,
+and FP32 FSQ grid arithmetic. Global deterministic and backend flags are
+restored before PSI computation. The execution policy is included in its
+tokenizer fingerprint and restored for evaluation/resume. Old checkpoints
+without this field retain their original fingerprints and inherited policy;
+tc20 is not silently changed.
+
+Freeze the source snapshot, then start the new run:
+
+```bash
+python prepare_fsq_psi.py \
+  /gpfs/scratch/acw723/para-audio-id/fsq-tokenizer-checkpoints/fsq-tc8/step-32000.ckpt \
+  --export-only
+python -u train.py configs/fsq_psi_tc21.yaml --run-id tc21 --wandb-online
+```
+
+The cluster-only `tc21_sae_48h.sh` follows the existing `capacity_job_sae.sh`
+resource fields: SAE / pilot_sae_gpu, ampere constraint, eight CPUs/GPU,
+11G per CPU, one GPU, 48 hours. It uses a login shell so module/conda setup
+does not rely on the submission shell's inherited environment.
+
 ### Generic small-decoder pilot
 
 After tokenizer training, export a frozen snapshot and generate PSI config:

@@ -10,12 +10,21 @@ prepared once and shared by every model. Invalid distractors are audited and
 replaced; an invalid fixed query is an error, not silently replaced.
 
 Queries include exact clean excerpts, 0/5 dB noise, held-out RIR, noise+RIR at
-0 dB, offsets +/-10/20/40/80 ms, RIR with +/-40 ms offsets, one second of extra
+0 dB, offsets +/-10/20/40/80 ms, RIR with +/-40 ms offsets, 1.04 seconds of extra
 left context, and a separate non-overlapping excerpt. Existing noise/RIR
 loaders and full-wet convolution (including leading IR delays) are reused.
 Other excerpts are secondary: a fingerprinter need not map different song
 sections close together. Exact clean retrieval is intentionally a self-match
 control, not generalisation evidence.
+
+The v2 aligned-context protocol uses a 1.04-second prefix, which is exactly
+13/26/52 latent frames at 12.5/25/50 Hz. A 1-second prefix would confound
+context changes with a half-frame offset at 12.5 Hz. Temporal readout bins
+use equal-time boundaries rounded to the nearest latent frame. Correlations
+at common physical lags (80/160/320 ms) complement adjacent-frame statistics.
+When comparing the low-rate variants, rerun old models under this protocol
+rather than mixing scores from the original pilot. `--queries 250` expands
+the same fixed query identity prefix without changing the 1,000-record gallery.
 
 The report includes:
 

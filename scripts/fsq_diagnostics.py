@@ -109,7 +109,10 @@ def prepare_inputs(cfg, split, queries, gallery_size, workers):
                   'noise_5db': paired5.pair(record, key, 1, 0)['degraded'].numpy(),
                   'rir': paired0.pair(record, key, 2, 0)['degraded'].numpy(),
                   'noise_rir_0db': paired0.pair(record, key, 3, 0)['degraded'].numpy(),
-                  'context_left_1s': context[-(samples + sr):]}
+                  # 1.04 s is an integer number of frames at 12.5/25/50 Hz.
+                  # A 1 s prefix would introduce a half-frame phase shift at
+                  # 12.5 Hz and confound context sensitivity with timing.
+                  'context_left_1040ms': context[-(samples + round(1.04 * sr)):]}
         path = Path(cfg['data']['audio_root']) / record['path']
         actual = {}
         for ms in offsets:
@@ -176,7 +179,11 @@ def readout(x, mean, std, bins):
     # Fixed temporal bins, no shift search or dynamic programming. Global mean
     # (bins=1) is also reported so rankings do not depend on one pooling choice.
     standardized = (x - mean) / std
-    vector = np.concatenate([a.mean(axis=1) for a in np.array_split(standardized, bins, axis=1)], axis=1)
+    if bins > x.shape[1]:
+        raise ValueError('Readout needs at least one frame per temporal bin')
+    edges = np.rint(np.linspace(0, x.shape[1], bins + 1)).astype(int)
+    vector = np.concatenate([standardized[:, lo:hi].mean(axis=1)
+                             for lo, hi in zip(edges, edges[1:])], axis=1)
     return vector / np.maximum(np.linalg.norm(vector, axis=1, keepdims=True), 1e-8)
 
 
@@ -211,7 +218,7 @@ def mutual_information(a, b):
                                                 (counts.sum(0)[j] / len(a))))))
 
 
-def redundancy(features, groups):
+def redundancy(features, groups, frame_rate=25):
     ids = features['ids'].reshape(-1, groups)
     entropy, used = [], []
     for g in range(groups):
@@ -231,10 +238,21 @@ def redundancy(features, groups):
             shuffled = mutual_information(ids[:, i], rng.permutation(ids[:, j]))
             mi.append({'groups': [j, i], 'mi_bits': observed, 'permutation_mi_bits': shuffled,
                        'excess_mi_bits': observed - shuffled})
+    physical_lags = {}
+    for ms in [40, 80, 160, 320]:
+        lag = frame_rate * ms / 1000
+        if not float(lag).is_integer() or lag < 1 or lag >= post.shape[1]:
+            continue
+        lag = int(lag)
+        left, right = post[:, :-lag].reshape(-1, post.shape[-1]), post[:, lag:].reshape(-1, post.shape[-1])
+        left, right = left - left.mean(0), right - right.mean(0)
+        corr = (left * right).mean(0) / np.maximum(left.std(0) * right.std(0), 1e-8)
+        physical_lags[str(ms)] = float(corr.mean())
     return {'entropy_bits_per_group': entropy, 'effective_symbols_per_group': [2 ** h for h in entropy],
             'used_symbols_per_group': used, 'adjacent_symbol_repeat_fraction': float(
                 (features['ids'][:, 1:] == features['ids'][:, :-1]).mean()),
             'adjacent_coordinate_correlation_mean': float(correlation.mean()),
+            'coordinate_correlation_by_lag_ms': physical_lags,
             'group_mutual_information': mi,
             'note': 'MI is a finite-sample plug-in estimate; shuffled control exposes occupancy bias.'}
 
@@ -319,7 +337,8 @@ def save_report(out, results, manifest):
               '- Compare both readouts. Temporal pooling and coordinate geometry may favour some tokenizers over others.',
               '- Thresholds use the first half of query identities for calibration and the second half for testing. '
               'The gallery identities are shared; this is a modest pilot, not an operational false-match guarantee.',
-              '- Context queries add one second of preceding audio, then keep only the last two seconds of latent frames.',
+              '- Context queries add 1.04 seconds of preceding audio (grid-aligned at 12.5/25/50 Hz), '
+              'then keep only the last two seconds of latent frames. Temporal bins use nearest-frame equal-time boundaries.',
               '- Latency is measured on the current allocated GPU with synchronization; deterministic timings use one measured repetition.',
               '- Full dataset manifest, per-query scores, code redundancy, rounding damage, latency and equivalence are in companion files.']
     (out / 'REPORT.md').write_text('\n'.join(lines) + '\n')
@@ -353,7 +372,8 @@ def main():
                     fpr_calibration_query_indices=list(range(args.queries // 2)),
                     fpr_test_query_indices=list(range(args.queries // 2, args.queries)))
     (args.output / 'dataset-manifest.json').write_text(json.dumps(manifest, indent=2))
-    results = {'command': sys.argv, 'git_commit': subprocess.check_output(
+    results = {'protocol': 'fsq_fixed_readout_v2_aligned_context',
+        'command': sys.argv, 'git_commit': subprocess.check_output(
         ['git', 'rev-parse', 'HEAD'], text=True).strip(), 'torch': torch.__version__,
         'gpu': torch.cuda.get_device_name() if args.device.startswith('cuda') else 'cpu',
         'cudnn_allow_tf32': torch.backends.cudnn.allow_tf32, 'models': {}}
@@ -374,7 +394,7 @@ def main():
         with kernels(False):
             gallery = extract(tokenizer, references, args.batch_size)
             queries = {c: extract(tokenizer, w, args.batch_size) for c, w in tqdm(inputs.items(), desc=name)}
-        result['redundancy'] = redundancy(gallery, tokenizer.selected_codebooks)
+        result['redundancy'] = redundancy(gallery, tokenizer.selected_codebooks, tokenizer.model.frame_rate)
         details = []
         for stage in ['pre', 'post']:
             mean = gallery[stage].mean(axis=(0, 1))
@@ -411,7 +431,7 @@ def main():
         # All fixed degraded crops and representative offsets/context. No claim
         # about equivalence beyond this explicitly enumerated audit set.
         for c in ['clean', 'noise_0db', 'noise_5db', 'rir', 'noise_rir_0db',
-                  'offset_+40ms', 'context_left_1s']:
+                  'offset_+40ms', 'context_left_1040ms']:
             n = min(args.equivalence_queries, args.queries)
             with kernels(True):
                 deterministic = extract(tokenizer, inputs[c][:n], args.batch_size)

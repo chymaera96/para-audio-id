@@ -36,6 +36,16 @@ def test_fixed_readout_is_scale_normalized_and_order_sensitive():
     assert not np.allclose(readout(x, mean, std, 8), readout(x[:, ::-1], mean, std, 8))
 
 
+def test_context_prefix_and_redundancy_use_common_physical_time():
+    for rate in [12.5, 25, 50]:
+        assert float(rate * 1.04).is_integer()
+    rng = np.random.default_rng(12)
+    features = {'post': rng.normal(size=(5, 25, 5)),
+                'ids': rng.integers(0, 1024, size=(5, 25, 1))}
+    stats = redundancy(features, 1, 12.5)
+    assert set(stats['coordinate_correlation_by_lag_ms']) == {'80', '160', '320'}
+
+
 def test_extraction_matches_frozen_tokens_and_restores_kernel_flags(tmp_path):
     cfg = yaml.safe_load(open('configs/fsq_tc6.yaml'))
     cfg['model']['channels'] = [16, 24, 32]
@@ -98,7 +108,7 @@ def test_audio_preparation_has_disjoint_gallery_and_paired_conditions(tmp_path, 
     ref, query, manifest = prepare_inputs(cfg, split, 4, 6, 1)
     assert ref.shape == (6, 48000)
     assert np.array_equal(query['clean'], ref[:4])
-    assert query['context_left_1s'].shape == (4, 72000)
+    assert query['context_left_1040ms'].shape == (4, 72960)
     assert query['rir_offset_+40ms'].shape == (4, 48000)
     assert not np.array_equal(query['noise_0db'], query['clean'])
     assert not {r['track_id'] for r in manifest['gallery']} & {r['track_id'] for r in split['training']}

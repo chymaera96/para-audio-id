@@ -33,6 +33,13 @@ frozen tokenization, leaving the surrounding PSI deterministic policy intact.
 The 225K training recipe otherwise follows tc20. Config:
 `configs/fsq_psi_tc21.yaml`; W&B project `para-audio-id`, run ID `tc21`.
 
+`tc22` retains tc21's architecture, frozen tokenizer, cohort, objectives,
+batching and LR schedule. It replaces only the augmentation curriculum:
+all three degradations ramp together over 0--5K updates, with the full
+training RIR pool available throughout. The final secondary-view mixture
+remains 10% clean / 35% noise / 30% RIR / 25% combined. Config:
+`configs/fsq_psi_tc22.yaml`; W&B project `para-audio-id`, run ID `tc22`.
+
 | Run ID | Catalogue | Training views | ID digit weight | Steps | Main change |
 | --- | ---: | --- | ---: | ---: | --- |
 | `tc2` | Full FMA-large catalogue | Canonical only | 5 | 100K | Replaced the continuous model with Mel-RVQ tokens and a causal transformer |

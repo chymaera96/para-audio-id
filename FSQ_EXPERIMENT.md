@@ -270,6 +270,26 @@ resource fields: SAE / pilot_sae_gpu, ampere constraint, eight CPUs/GPU,
 11G per CPU, one GPU, 48 hours. It uses a login shell so module/conda setup
 does not rely on the submission shell's inherited environment.
 
+### tc22: accelerated augmentation with fsq-tc8
+
+`configs/fsq_psi_tc22.yaml` retains tc21's frozen fsq-tc8 32K export,
+fast FP32 tokenizer policy, PSI-S decoder, 25K cohort, 225K updates, LR,
+batch exposure, ID weight 16, and clean causal audio next-token objective.
+Only augmentation changes: `fsq_simultaneous_noise_rir_v1` ramps the secondary
+mixture linearly over 0--5K updates from all clean to
+10% clean / 35% noise / 30% RIR / 25% noise+RIR. All training RIRs are eligible
+from the outset. The SNR distribution, clean anchors, past context, noise-before-
+convolution order and held-out assets are unchanged. The resolved curriculum
+is saved in checkpoints and checked on resume; tc21 is not modified.
+
+```bash
+python -u train.py configs/fsq_psi_tc22.yaml --run-id tc22 --wandb-online
+```
+
+The cluster-only `tc22_andrena_48h.sh` uses the existing Andrena template:
+`pilot_andrena`, one GPU, 12 CPUs/GPU, 7500M per CPU, 48 hours, no GPU-type
+constraint. W&B project/run ID: `para-audio-id` / `tc22`.
+
 ### Generic small-decoder pilot
 
 After tokenizer training, export a frozen snapshot and generate PSI config:

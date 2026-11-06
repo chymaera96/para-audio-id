@@ -196,6 +196,18 @@ def resolved_augmentation_schedule(
     """Resolve the selected robustness curriculum at an optimizer step."""
     if step < 0:
         raise ValueError("Global step cannot be negative")
+    if schedule.get("curriculum") == "fsq_simultaneous_noise_rir_v1":
+        progress = min(step / int(schedule["ramp_steps"]), 1.0)
+        return AugmentationSchedule(
+            1.0 - 0.90 * progress,
+            0.35 * progress,
+            0.30 * progress,
+            0.25 * progress,
+            0.0,
+            tuple(float(value) for value in schedule["snr_bin_probabilities"]),
+            "simultaneous_ramp" if progress < 1.0 else "full_distribution",
+            1.0,
+        )
     name = schedule.get("name")
     if schedule.get("curriculum") == "tc12_noise_rir_curriculum_v1":
         clean_end = int(schedule["clean_until_step"])

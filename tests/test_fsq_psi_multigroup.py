@@ -65,14 +65,15 @@ def test_fast_policy_restores_surrounding_psi_flags_even_on_error():
         torch.use_deterministic_algorithms(previous, warn_only=warn)
 
 
-def test_tc21_profile_tokens_objective_resume_and_evaluation(tmp_path):
+@pytest.mark.parametrize('run', ['tc21', 'tc22'])
+def test_fsq_profile_tokens_objective_resume_and_evaluation(tmp_path, run):
     from para_audio_id.audio_lm.profiles import resolve_training_config, evaluation_checkpoint_profile
     from para_audio_id.audio_lm.training import validate_tc18_query_configuration, validate_tc18_batch_configuration
     from para_audio_id.audio_lm.evaluation import _checkpoint_tokenizer
     from para_audio_id.audio_lm.dataset import collate_causal_documents
 
     path = make_tokenizer(tmp_path)
-    base = yaml.safe_load(open('configs/fsq_psi_tc21.yaml'))
+    base = yaml.safe_load(open(f'configs/fsq_psi_{run}.yaml'))
     base['tokenizer']['checkpoint'] = str(path)
     base['tokenizer']['device'] = 'cpu'
     resolved = resolve_training_config(base)
@@ -116,3 +117,46 @@ def test_tc21_profile_tokens_objective_resume_and_evaluation(tmp_path):
     bad['tokenizer']['selected_codebooks'] = 4
     with pytest.raises(ValueError, match='group count'):
         resolve_training_config(bad)
+
+
+def test_tc22_only_changes_augmentation_and_rejects_cross_resume(tmp_path):
+    from para_audio_id.audio_lm.profiles import resolve_training_config
+    from para_audio_id.audio_lm.noise import resolved_augmentation_schedule
+
+    path = make_tokenizer(tmp_path)
+    configs = [yaml.safe_load(open(f'configs/fsq_psi_{name}.yaml'))
+               for name in ['tc21', 'tc22']]
+    for cfg in configs:
+        cfg['tokenizer']['checkpoint'] = str(path)
+        cfg['tokenizer']['device'] = 'cpu'
+    old, new = [resolve_training_config(cfg) for cfg in configs]
+    a, b = [deepcopy(c['resolved_training_profile']) for c in [old, new]]
+    a.pop('schedule')
+    b.pop('schedule')
+    assert a == b
+    assert old['train']['learning_rate_schedule'] == new['train']['learning_rate_schedule']
+    assert old['tokenizer'] == new['tokenizer']
+    schedule = new['train']['schedule']
+    for step, probabilities in [(0, [1, 0, 0, 0]),
+                                (2500, [.55, .175, .15, .125]),
+                                (5000, [.10, .35, .30, .25]),
+                                (225000, [.10, .35, .30, .25])]:
+        result = resolved_augmentation_schedule(step, schedule)
+        assert [result.clean_probability, result.noise_probability,
+                result.rir_probability, result.noise_rir_probability] == pytest.approx(probabilities)
+        assert result.rir_severity_quantile == 1.0
+        assert result.consistency_weight == 0
+        assert result.snr_bin_probabilities == (.4, .3, .2, .1)
+    assert resolved_augmentation_schedule(5000, old['train']['schedule']).clean_probability == 1
+    assert resolved_augmentation_schedule(30000, old['train']['schedule']).noise_rir_probability == 0
+    frozen = build_tokenizer(new['tokenizer'])
+    saved = tmp_path / 'tc22.ckpt'
+    torch.save({'resolved_training_profile': new['resolved_training_profile'],
+                'tokenizer_fingerprint': frozen.spec.fingerprint}, saved)
+    with pytest.raises(ValueError, match='profile differs'):
+        resolve_training_config(configs[0], checkpoint=saved)
+    for value in [0, -1, 1.5, True]:
+        bad = deepcopy(configs[1])
+        bad['train']['augmentation']['ramp_steps'] = value
+        with pytest.raises(ValueError, match='positive integer'):
+            resolve_training_config(bad)

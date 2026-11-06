@@ -51,6 +51,21 @@ def resolve_fsq_psi_config(config, *, decoder, schedule, selected_codebooks,
     resolved["train"]["id_digit_weight"] = id_weight
     resolved["resolved_query_profile"] = {"selected_codebooks": groups, "id_digit_weight": id_weight}
     profile = resolved["resolved_training_profile"]
+    augmentation = base["train"].get("augmentation")
+    if augmentation is not None:
+        if augmentation.get("curriculum") != "fsq_simultaneous_noise_rir_v1":
+            raise ValueError("Unknown FSQ PSI augmentation curriculum")
+        ramp_steps = augmentation["ramp_steps"]
+        if not isinstance(ramp_steps, int) or isinstance(ramp_steps, bool) or ramp_steps < 1:
+            raise ValueError("FSQ augmentation ramp_steps must be a positive integer")
+        accelerated = deepcopy(profile["schedule"])
+        for key in ("clean_until_step", "degradation_ramp_until_step", "combined_ramp_until_step"):
+            accelerated.pop(key)
+        accelerated.update(curriculum=augmentation["curriculum"], ramp_steps=ramp_steps)
+        profile["schedule"] = accelerated
+        resolved["train"]["schedule"] = {
+            key: value for key, value in accelerated.items() if key != "max_steps"
+        }
     profile["decoder"] = decoder_profile(selected_decoder)
     resolved["model"].update({k: v for k, v in profile["decoder"].items() if k != "name"})
     resolved["model"]["decoder"] = selected_decoder

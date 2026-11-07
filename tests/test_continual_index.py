@@ -97,3 +97,31 @@ def test_validation_is_top1_unconstrained_and_keeps_cohorts_separate(monkeypatch
     assert len(metrics) == 6 and len(details) == 6
     assert all(metrics[f'val/old/{c}'] == 1 for c in CONDITIONS)
     assert all(metrics[f'val/new/{c}'] == 0 for c in CONDITIONS)
+
+
+def test_checkpoint_metadata_and_optimizer_roundtrip(tmp_path, monkeypatch):
+    from continual_index import write_checkpoint
+    monkeypatch.setattr(torch.cuda, 'get_rng_state_all', lambda: [])
+    model = torch.nn.Linear(3, 2)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1.5e-5)
+    model(torch.ones(1, 3)).sum().backward()
+    optimizer.step()
+    source = dict(architecture='audio_lm_v1', tokenizer_spec={}, tokenizer_fingerprint='fixed',
+                  model_config={}, query_spec={}, batch_spec={},
+                  resolved_training_profile={'variant': 'cnn-fsq-25k-v2'})
+    state = dict(catalogue_ids=['old', 'new'], probe_ids=['old'], mapping_sha256='mapping',
+                 source_global_step=225000, update_step=1)
+    cfg = {'model': {}, 'train': {'learning_rate_schedule': {'policy': 'continual_constant_v1'}},
+           'resolved_training_profile': source['resolved_training_profile']}
+    scaler = SimpleNamespace(state_dict=lambda: {})
+    vocab = SimpleNamespace(to_dict=lambda: {})
+    cfg['train']['schedule'] = {}
+    target = tmp_path / 'last.ckpt'
+    write_checkpoint(target, model, vocab, cfg, source, state, optimizer, scaler)
+    saved = torch.load(target, weights_only=False)
+    assert saved['global_step'] == 225001
+    assert saved['continual_state']['update_step'] == 1
+    assert saved['hyper_parameters']['resolved_training_profile'] == saved['resolved_training_profile']
+    assert saved['resolved_training_profile']['database_size'] == 2
+    assert cfg['resolved_training_profile'] == source['resolved_training_profile']
+    assert all(v['step'] == 1 for v in saved['optimizer_state']['state'].values())

@@ -58,6 +58,8 @@ def write_checkpoint(path, model, vocabulary, cfg, source, state, optimizer, sca
         continual_state=state, optimizer_state=optimizer.state_dict(), scaler_state=scaler.state_dict(),
         rng_state={"torch": torch.get_rng_state(), "cuda": torch.cuda.get_rng_state_all(),
                    "numpy": np.random.get_state(), "python": random.getstate()})
+    payload["hyper_parameters"] = deepcopy(cfg)
+    payload["hyper_parameters"]["resolved_training_profile"] = payload["resolved_training_profile"]
     temporary = path.with_suffix(".tmp")
     torch.save(payload, temporary)
     temporary.replace(path)
@@ -98,7 +100,7 @@ def train(args):
         "\n".join(f"{r.track_id}:{r.code}" for r in all_records).encode()).hexdigest()
     lr = args.learning_rate
     if lr is None:
-        lr = (source["continual_state"]["learning_rate"] if args.resume else
+        lr = (source["continual_state"]["learning_rate"] if "continual_state" in source else
               float(source["optimizer_states"][0]["param_groups"][0]["lr"]))
     contract = dict(protocol=PROTOCOL, arm=args.arm, pilot_sha256=digest(manifest),
                     learning_rate=lr, steps=args.steps, microbatch=40, accumulation=2,
@@ -131,7 +133,8 @@ def train(args):
     cfg["data"]["training_tracks_manifest"] = str(Path(args.pilot).resolve() / "manifest.json")
     cfg["trainer"]["precision"] = "bf16-mixed" if dtype == torch.bfloat16 else "16-mixed"
     cfg["train"].update(run_id=run_id, max_steps=args.steps, learning_rate=lr,
-                         schedule=contract["augmentation"])
+                         schedule=contract["augmentation"], warmup_steps=0,
+                         learning_rate_schedule={"policy": "continual_constant_v1"})
     write_json(directory / "experiment.json", contract)
     noise, room = asset_loaders(cfg, tokenizer.sample_rate)
     if noise.manifest() != manifest["noise_manifest"] or room.manifest() != manifest["rir_manifest"]:

@@ -6,6 +6,11 @@ should be taken from the corresponding W&B run or evaluation JSON.
 
 ## Run lineage
 
+The tc21 **25K -> 26K continual-indexing A/B/C pilot** is documented in
+[CONTINUAL_INDEX.md](CONTINUAL_INDEX.md). It uses a separate runner, preserves
+the source checkpoint, and compares new-only updates, full-access audio replay,
+and bounded 1K-old-track audio replay with identical newcomers and validation.
+
 The `fsq` branch adds the CNN + FSQ tokenizer pilot described in
 [FSQ_EXPERIMENT.md](FSQ_EXPERIMENT.md). Tokenizer run `fsq-pilot-v1` uses 10K
 music tracks and 500 disjoint monitoring tracks, one 1,024-symbol FSQ group,

@@ -223,12 +223,13 @@ def prepare(source_path, output, *, new_count=1000, buffer_count=1000,
 class AdditionBatchSampler(Sampler):
     """Stateless update-indexed sampling, including exact resume and B/C pairing."""
     def __init__(self, new_count, old_count, *, arm, steps, start=0,
-                 microbatch=40, accumulation=2, seed=7331):
+                 microbatch=40, accumulation=2, seed=7331, phase_steps=1000):
         self.new_count, self.old_count = new_count, old_count
         self.arm, self.steps, self.start = arm, steps, start
         self.microbatch, self.accumulation, self.seed = microbatch, accumulation, seed
-        if arm not in "ABCDE" or len(arm) != 1 or microbatch % 2:
-            raise ValueError("Use arm A/B/C/D/E and an even microbatch")
+        self.phase_steps = phase_steps
+        if arm not in "ABCDEFGHI" or len(arm) != 1 or microbatch % 2 or phase_steps < 1:
+            raise ValueError("Use arm A-I, positive phase length and an even microbatch")
 
     def __len__(self):
         return (self.steps - self.start) * self.accumulation
@@ -237,9 +238,11 @@ class AdditionBatchSampler(Sampler):
         for step in range(self.start, self.steps):
             for micro in range(self.accumulation):
                 count = self.microbatch if self.arm == "A" else self.microbatch // 2
+                if self.arm == "H":
+                    count = self.microbatch if (step // self.phase_steps) % 2 == 0 else 0
                 rng = np.random.default_rng(stable_uint64(self.seed, step, micro, "new"))
                 selected = rng.choice(self.new_count, count, replace=False).tolist()
-                if self.arm != "A":
+                if count < self.microbatch:
                     rng = np.random.default_rng(stable_uint64(self.seed, step, micro, "old"))
                     selected += (self.new_count + rng.choice(
                         self.old_count, self.microbatch - count, replace=False)).tolist()

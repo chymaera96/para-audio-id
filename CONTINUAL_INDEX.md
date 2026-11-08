@@ -127,3 +127,67 @@ from these estimates. The tokenizer is frozen; its online FP32 policy remains
 identical to the source pilot. Held-out validation is never used to select replay
 observations or teacher targets. Use larger fresh-crop evaluation before making
 small-difference claims, then test a second disjoint newcomer cohort.
+
+## Overnight mechanisms: F/G/H/I
+
+Each arm independently starts from original tc21, shares D/E's sealed old replay
+cache, and retains the base causal audio, ID16, and boundary objectives. New crops
+remain online. No distillation is added to these arms.
+
+| Arm | Mechanism | LR | Sampling |
+| --- | --- | --- | --- |
+| F | Only MLPs in final four blocks train; all other weights frozen | source ~1.5e-5 | 40 new / 40 old per update |
+| G | Project actual Adam parameter displacement against three old-loss gradients | source ~1.5e-5 | 40 new / 40 old, plus references |
+| H | Five cycles: 1K newcomer-only updates then 1K old-only updates | source ~1.5e-5 | 80 selections/update from current phase |
+| I | Frozen original base + rank32/alpha32 LoRA on every attention/MLP Conv1D projection | 1e-4 | 40 new / 40 old per update |
+
+At 10K updates all arms have 400K main newcomer and 400K main old selections.
+G additionally reads 16 old documents per clean/noise/noise+RIR condition per
+update (480K reference document draws). These extra references and their cost
+must not be hidden in exposure comparisons. The ID16/EOS1 reference loss uses
+ground-truth targets, no audio loss and no validation queries. Reference gradients
+are evaluated without dropout. The candidate main update still uses the complete
+base objective, original clipping, and AdamW. Three normalized halfspaces constrain
+the ACTUAL post-Adam displacement; raw-gradient projection would not do this.
+An eight-active-set small QP projects in Euclidean parameter space. Adam moments
+advance unprojected. Non-finite references fail; infeasible/numerically unreliable
+projection reverts the parameter displacement to zero, logged as a fallback.
+Actual first-order residuals are checked after parameter rounding (tolerance1e-7).
+This is a sampled, first-order constraint, not a global retrieval guarantee.
+
+F's attention and embeddings remain frozen; gradients can still flow through
+frozen upper layers to the trainable MLPs. I adds no new vocabulary or task router.
+Freezing the base does not guarantee old predictions survive adapter updates.
+I exports merged ordinary inference weights AND separate adapters. Resume loads
+the original base and restores adapters, never adds them again to merged weights.
+
+Prepare one 1K-old/1K-new fresh-crop evaluation pack (6K queries):
+
+```bash
+python -u continual_index.py prepare-fresh "$PILOT" "$PILOT/fresh-1k-v1"
+python -u continual_index.py train "$PILOT" --arm G --wandb-online \
+  --extra-eval "$PILOT/fresh-1k-v1"
+```
+
+Repeat independently for F/H/I (priority G,F,H,I), each 10K updates. W&B project
+`para-audio-id`, group `tc21-add1k-mechanisms-v1`, stable IDs `tc21-add1k-f/g/h/i`.
+Run contracts pin trainable counts, cache, reference settings, phase length, rank,
+LR and fresh pack. F-I use a separate DataLoader generator so creating an iterator
+on resume does not consume model RNG. H resumes at its exact phase/update index.
+Each phase boundary is evaluated with the existing 600-query probe; checkpoints
+retain 1K/2.5K/5K/10K milestones as before. The fresh pack is evaluated at endpoint,
+saved as `fresh-final.json` and logged as `fresh/...`.
+
+Fresh crops exclude exact starts in every cached old replay observation and the
+original probe, and use held-out degradation assets. Their starts are additionally
+excluded from F-I's online crop draws, including replacement identities. The pack
+has its own source-model baseline, hashes and audit. It is not used to mine replay,
+pick gradient references, or construct training targets. Completed comparison
+models can be evaluated with:
+
+```bash
+python -u continual_index.py evaluate "$PILOT" /path/to/checkpoint.ckpt \
+  --fresh "$PILOT/fresh-1k-v1"
+```
+
+This writes a separate `.fresh.json`, without overwriting the original probe.

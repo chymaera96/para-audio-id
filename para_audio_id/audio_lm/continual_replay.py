@@ -94,11 +94,13 @@ class CachedAdditionCollator:
         self.new_ids = {r.track_id for r in new}
         self.cache = cache
         self.seed = kwargs["seed"]
+        self.samples = round(kwargs.get("sample_rate", 1) * kwargs.get("crop_duration", 4))
 
     def __call__(self, examples):
         fresh = [e for e in examples if e["record"].track_id in self.new_ids]
         old = [e for e in examples if e["record"].track_id not in self.new_ids]
-        result = self.fresh(fresh)
+        result = self.fresh(fresh) if fresh else dict(
+            waveforms=torch.empty(0, self.samples), metadata=[], categories={}, failures=[], replacements=[])
         indices = []
         for e in old:
             choices = self.cache.pairs[e["record"].track_id]

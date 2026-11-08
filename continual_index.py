@@ -26,6 +26,10 @@ from para_audio_id.audio_lm.random_crops import OnlineTrackDataset
 from para_audio_id.audio_lm.continual_replay import (
     CachedAdditionCollator, ReplayCache, prepare_replay, preservation_loss,
 )
+from para_audio_id.audio_lm.continual_methods import (
+    ReferenceGradients, configure_write_parameters, constrain_adam_displacement,
+    exported_state, flat_parameters,
+)
 
 
 def pilot_data(directory):
@@ -49,8 +53,9 @@ def write_checkpoint(path, model, vocabulary, cfg, source, state, optimizer, sca
     keys = ["architecture", "tokenizer_spec", "tokenizer_fingerprint", "model_config",
             "query_spec", "batch_spec"]
     payload = {k: deepcopy(source[k]) for k in keys}
+    exported, adapters = exported_state(model)
     payload.update(vocabulary=vocabulary.to_dict(), hyper_parameters=cfg,
-        state_dict={"model." + k: v for k, v in model.state_dict().items()},
+        state_dict={"model." + k: v for k, v in exported.items()},
         training_track_ids=state["catalogue_ids"], validation_probe=state["probe_ids"],
         code_mapping_fingerprint=state["mapping_sha256"],
         global_step=state["source_global_step"] + state["update_step"],
@@ -61,6 +66,8 @@ def write_checkpoint(path, model, vocabulary, cfg, source, state, optimizer, sca
         continual_state=state, optimizer_state=optimizer.state_dict(), scaler_state=scaler.state_dict(),
         rng_state={"torch": torch.get_rng_state(), "cuda": torch.cuda.get_rng_state_all(),
                    "numpy": np.random.get_state(), "python": random.getstate()})
+    if adapters:
+        payload["continual_adapters"] = adapters
     payload["hyper_parameters"] = deepcopy(cfg)
     payload["hyper_parameters"]["resolved_training_profile"] = payload["resolved_training_profile"]
     temporary = path.with_suffix(".tmp")
@@ -81,7 +88,13 @@ def train(args):
         raise FileNotFoundError(directory / "last.ckpt")
     directory.mkdir(parents=True, exist_ok=True)
     checkpoint = directory / "last.ckpt" if args.resume else manifest["source_checkpoint"]
-    model, vocabulary, cfg, source = load_audio_lm(checkpoint, "cpu")
+    # Adapter resumes reconstruct the ORIGINAL frozen base, not already-merged
+    # inference weights (which would count the saved delta twice).
+    adapter_resume = args.arm == "I" and args.resume
+    model, vocabulary, cfg, source = load_audio_lm(
+        manifest["source_checkpoint"] if adapter_resume else checkpoint, "cpu")
+    if adapter_resume:
+        source = torch.load(checkpoint, map_location="cpu", weights_only=False)
     cfg = deepcopy(cfg)
     seed = int(manifest["seed"])
     random.seed(seed)
@@ -90,16 +103,19 @@ def train(args):
     torch.cuda.manual_seed_all(seed)
     torch.use_deterministic_algorithms(True, warn_only=True)
     torch.backends.cudnn.benchmark = False
+    parameters = configure_write_parameters(model, args.arm, rank=args.lora_rank,
+        saved_adapters=source.get("continual_adapters") if adapter_resume else None)
     device = "cuda"
     dtype = torch.bfloat16 if torch.cuda.is_bf16_supported(including_emulation=False) else torch.float16
     model.to(device)
+    parameters = [p for p in model.parameters() if p.requires_grad]
     tokenizer = _checkpoint_tokenizer(source, device)
     old = [CatalogueRecord(**r) for r in manifest["old"]]
     new = [CatalogueRecord(**r) for r in manifest["new"]]
     buffer = set(manifest["replay_ids"])
-    replay = [] if args.arm == "A" else old if args.arm in "BDE" else [r for r in old if r.track_id in buffer]
+    replay = [] if args.arm == "A" else old if args.arm in "BDEFGHI" else [r for r in old if r.track_id in buffer]
     fixed = None
-    if args.arm in "DE":
+    if args.arm in "DEFGHI":
         fixed = ReplayCache(args.replay_cache or Path(args.pilot) / "replay-cache-v1", manifest)
         replay = [r for r in old if r.track_id in fixed.pairs]
     all_records = old + new
@@ -109,6 +125,8 @@ def train(args):
     if lr is None:
         lr = (source["continual_state"]["learning_rate"] if "continual_state" in source else
               float(source["optimizer_states"][0]["param_groups"][0]["lr"]))
+        if args.arm == "I":
+            lr = 1e-4 if not args.resume else source["continual_state"]["learning_rate"]
     contract = dict(protocol=PROTOCOL, arm=args.arm, pilot_sha256=digest(manifest),
                     learning_rate=lr, steps=args.steps, microbatch=40, accumulation=2,
                     optimizer_initialization="fresh_adamw_moments", seed=seed,
@@ -121,6 +139,33 @@ def train(args):
             preservation_weight=args.preservation_weight if args.arm == "E" else 0.0,
             preservation="teacher_correct_digits_eos_grouped_kl_v1" if args.arm == "E" else "none",
             replay_uncovered_ids=fixed.manifest["uncovered_ids"])
+    if args.arm in "FGHI":
+        contract.update(method_protocol="continual_mechanisms_v1",
+            trainable_parameters=sum(p.numel() for p in parameters),
+            total_parameters=sum(p.numel() for p in model.parameters()),
+            data_loader_rng="isolated_seeded_generator")
+        if args.arm == "F":
+            contract["write_scope"] = "last_four_mlps_only"
+        elif args.arm == "G":
+            contract.update(projection="actual_adam_delta_three_condition_halfspaces_v1",
+                reference_conditions=["clean", "noise", "noise_rir"],
+                reference_documents_per_condition=args.reference_documents,
+                reference_objective="ground_truth_id16_eos1_no_audio",
+                optimizer_moments="unprojected_adam_moments")
+        elif args.arm == "H":
+            contract.update(phase_steps=args.phase_steps, phases="new_then_old_alternating")
+        else:
+            contract.update(lora_rank=args.lora_rank, lora_alpha=args.lora_rank,
+                            lora_scope="all_attention_and_mlp_conv1d_weights")
+        if args.extra_eval:
+            from para_audio_id.audio_lm.continual_fresh import load_fresh
+            load_fresh(args.extra_eval, manifest)
+            extra_manifest = json.loads((Path(args.extra_eval) / "manifest.json").read_text())
+            if extra_manifest["pilot_sha256"] != digest(manifest):
+                raise ValueError("Fresh evaluation belongs to another pilot")
+            if extra_manifest["replay_sha256"] != fixed.sha256:
+                raise ValueError("Fresh evaluation was prepared against another replay cache")
+            contract["fresh_evaluation_sha256"] = digest(extra_manifest)
     contract_sha = digest(contract)
     state = dict(contract_sha256=contract_sha, contract=contract, update_step=0,
                  source_global_step=manifest["source_global_step"], learning_rate=lr,
@@ -128,7 +173,7 @@ def train(args):
                  probe_ids=sorted({r["track_id"] for r in cache["rows"]}),
                  new_draws=0, old_draws=0, elapsed_seconds=0.0, seen_new=[],
                  arm=args.arm, pilot_sha256=digest(manifest))
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, betas=(.9, .95), weight_decay=0.0)
+    optimizer = torch.optim.AdamW(parameters, lr=lr, betas=(.9, .95), weight_decay=0.0)
     scaler = torch.amp.GradScaler("cuda", enabled=dtype == torch.float16, init_scale=1024)
     if args.resume:
         saved = source["continual_state"]
@@ -152,10 +197,13 @@ def train(args):
     noise, room = asset_loaders(cfg, tokenizer.sample_rate)
     if noise.manifest() != manifest["noise_manifest"] or room.manifest() != manifest["rir_manifest"]:
         raise ValueError("Degradation assets changed since preparation")
-    reserved = manifest["reserved_starts"]
+    reserved = deepcopy(manifest["reserved_starts"])
+    if args.extra_eval:
+        for track, starts in extra_manifest["reserved_starts"].items():
+            reserved.setdefault(track, []).extend(starts)
     dataset = OnlineTrackDataset(new + replay)
     sampler = AdditionBatchSampler(len(new), len(replay), arm=args.arm, steps=args.steps,
-                                   start=state["update_step"], seed=seed)
+                                   start=state["update_step"], seed=seed, phase_steps=args.phase_steps)
     collator_class = CachedAdditionCollator if fixed is not None else AdditionCollator
     collator = collator_class(new, replay, **({"cache": fixed} if fixed is not None else {}),
         audio_root=cfg["data"]["audio_root"],
@@ -165,12 +213,16 @@ def train(args):
     loader = DataLoader(dataset, batch_sampler=sampler, collate_fn=collator,
         num_workers=args.workers, multiprocessing_context="spawn" if args.workers else None,
         persistent_workers=bool(args.workers), prefetch_factor=2 if args.workers else None,
-        pin_memory=True)
+        pin_memory=True,
+        generator=torch.Generator().manual_seed(seed) if args.arm in "FGHI" else None)
+    references = (ReferenceGradients(fixed, vocabulary, count=args.reference_documents, seed=seed)
+                  if args.arm == "G" else None)
     logger = None
     if args.wandb_online:
         import wandb
         logger = wandb.init(project="para-audio-id", id=run_id, name=run_id,
-            group="tc21-add1k-replay-v1" if fixed is not None else "tc21-add1k-v1",
+            group="tc21-add1k-mechanisms-v1" if args.arm in "FGHI" else
+                  "tc21-add1k-replay-v1" if fixed is not None else "tc21-add1k-v1",
             job_type="continual-index", mode="online",
             resume="must" if args.resume else "never", dir=str(directory), config=contract,
             settings=wandb.Settings(_disable_stats=True))
@@ -212,7 +264,8 @@ def train(args):
             batch = next(iterator)
             metadata = batch["metadata"]
             wave = batch["waveforms"].to(device, non_blocking=True)
-            tokens = tokenizer.tokenize(wave)
+            tokens = tokenizer.tokenize(wave) if len(wave) else torch.empty(
+                0, batch["cached_tokens"].shape[1], device=device, dtype=torch.long)
             if fixed is not None:
                 tokens = torch.cat([tokens.long(), batch["cached_tokens"].to(device)], dim=0)
             documents = collate_causal_documents([
@@ -258,9 +311,19 @@ def train(args):
                 else:
                     state["old_draws"] += 1
         scaler.unscale_(optimizer)
-        norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0, error_if_nonfinite=True)
+        norm = torch.nn.utils.clip_grad_norm_(parameters, 1.0, error_if_nonfinite=True)
+        if references is not None:
+            ref_gradients, ref_metrics = references.compute(model, parameters, step, dtype)
+            before_update = flat_parameters(parameters)
+            sums.update(ref_metrics)
         scaler.step(optimizer)
         scaler.update()
+        if references is not None:
+            sums.update(constrain_adam_displacement(parameters, before_update, ref_gradients))
+            sums["reference_document_draws"] = step * 3 * args.reference_documents
+            del ref_gradients, before_update
+        if args.arm == "H":
+            sums["phase_new"] = int(((step - 1) // args.phase_steps) % 2 == 0)
         torch.cuda.synchronize()
         seconds = time.perf_counter() - step_started
         state["update_step"] = step
@@ -282,6 +345,10 @@ def train(args):
                     logger.log({"update_step": step,
                         "train/preservation_loss": sums["preservation_loss"],
                         "train/preservation_eligible_fraction": sums["preservation_eligible_fraction"]})
+                if args.arm in "GH":
+                    logger.log({"update_step": step, **{
+                        "method/" + k: v for k, v in sums.items()
+                        if k.startswith(("projection_", "reference_", "phase_"))}})
             print(f"UPDATE {step}/{args.steps}: loss={sums['loss']:.4f}, {seconds:.3f}s, "
                   f"new draws={state['new_draws']}, old draws={state['old_draws']}", flush=True)
         milestone = step in (1000, 2500, 5000, 10000, stop)
@@ -296,6 +363,15 @@ def train(args):
                 snapshot = directory / f"step-{step}.ckpt"
                 if not snapshot.exists():
                     os.link(directory / "last.ckpt", snapshot)
+    if state["update_step"] == args.steps and args.extra_eval:
+        from para_audio_id.audio_lm.continual_fresh import load_fresh
+        fresh = load_fresh(args.extra_eval, manifest)
+        values, details = evaluate_tokens(model, vocabulary, fresh, device)
+        write_json(directory / "fresh-final.json", dict(metrics=values, rows=details,
+            evaluation_sha256=contract["fresh_evaluation_sha256"]))
+        if logger:
+            logger.log({"update_step": state["update_step"], **{
+                k.replace("val/", "fresh/"): v for k, v in values.items()}})
     if logger:
         logger.summary["completed_updates"] = state["update_step"]
         logger.summary["peak_gpu_memory_gib"] = torch.cuda.max_memory_allocated() / 2 ** 30
@@ -321,7 +397,15 @@ def main():
     replay_prep.add_argument("output")
     replay_prep.add_argument("--workers", type=int, default=8)
     replay_prep.add_argument("--pairs-per-track", type=int, default=4)
-    fit.add_argument("--arm", choices=list("ABCDE"), required=True)
+    fresh_prep = sub.add_parser("prepare-fresh")
+    fresh_prep.add_argument("pilot")
+    fresh_prep.add_argument("output")
+    fresh_prep.add_argument("--monitor-tracks", type=int, default=1000)
+    fit.add_argument("--arm", choices=list("ABCDEFGHI"), required=True)
+    fit.add_argument("--phase-steps", type=int, default=1000)
+    fit.add_argument("--lora-rank", type=int, default=32)
+    fit.add_argument("--reference-documents", type=int, default=16)
+    fit.add_argument("--extra-eval", help="Prepared held-out fresh-crop pack; evaluate at endpoint")
     fit.add_argument("--replay-cache")
     fit.add_argument("--preservation-weight", type=float, default=1.0)
     fit.add_argument("--output-root", default="/gpfs/scratch/acw723/para-audio-id/audio-lm-checkpoints")
@@ -336,6 +420,7 @@ def main():
     check = sub.add_parser("evaluate")
     check.add_argument("pilot")
     check.add_argument("checkpoint")
+    check.add_argument("--fresh", help="Evaluate a prepared fresh-crop pack instead of the small probe")
     args = p.parse_args()
     torch.set_num_threads(1)
     if args.command == "prepare":
@@ -347,21 +432,34 @@ def main():
         pilot_data(args.pilot)
         prepare_replay(args.pilot, args.output, workers=args.workers,
                        pairs_per_track=args.pairs_per_track)
+    elif args.command == "prepare-fresh":
+        from para_audio_id.audio_lm.continual_fresh import prepare_fresh
+        if args.monitor_tracks < 1:
+            p.error("Positive monitor count required")
+        pilot_data(args.pilot)
+        prepare_fresh(args.pilot, args.output, count=args.monitor_tracks)
     elif args.command == "train":
         if args.steps < 1 or args.eval_interval < 1 or (args.stop_after is not None and args.stop_after < 1):
             p.error("Positive update counts are required")
         if not np.isfinite(args.preservation_weight) or args.preservation_weight <= 0:
             p.error("Preservation weight must be finite and positive")
+        if min(args.phase_steps, args.lora_rank, args.reference_documents) < 1:
+            p.error("Positive phase length, LoRA rank and reference count required")
+        if args.extra_eval and args.arm not in "FGHI":
+            p.error("New fresh-evaluation exclusions apply to F-I; use evaluate --fresh for completed runs")
         train(args)
     else:
         manifest, cache, _ = pilot_data(args.pilot)
+        if args.fresh:
+            from para_audio_id.audio_lm.continual_fresh import load_fresh
+            cache = load_fresh(args.fresh, manifest)
         model, vocabulary, _, source = load_audio_lm(args.checkpoint, "cpu")
         if source["tokenizer_fingerprint"] != manifest["tokenizer_fingerprint"]:
             raise ValueError("Tokenizer mismatch")
         model.cuda()
         metrics, details = evaluate_tokens(model, vocabulary, cache, "cuda")
         print(json.dumps(metrics, indent=2))
-        write_json(Path(args.checkpoint).with_suffix(".validation.json"),
+        write_json(Path(args.checkpoint).with_suffix(".fresh.json" if args.fresh else ".validation.json"),
                    {"metrics": metrics, "rows": details})
 
 

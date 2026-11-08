@@ -351,7 +351,8 @@ def train(args):
                         if k.startswith(("projection_", "reference_", "phase_"))}})
             print(f"UPDATE {step}/{args.steps}: loss={sums['loss']:.4f}, {seconds:.3f}s, "
                   f"new draws={state['new_draws']}, old draws={state['old_draws']}", flush=True)
-        milestone = step in (1000, 2500, 5000, 10000, stop)
+        milestone = step in (1000, 2500, 5000, 10000, stop) or (
+            args.arm == "H" and step % args.phase_steps == 0)
         if step % args.eval_interval == 0 or milestone:
             validation(step)
             state.update(elapsed_seconds=previous_elapsed + time.perf_counter() - started,

@@ -175,7 +175,9 @@ Run contracts pin trainable counts, cache, reference settings, phase length, ran
 LR and fresh pack. F-I use a separate DataLoader generator so creating an iterator
 on resume does not consume model RNG. H resumes at its exact phase/update index.
 Each phase boundary is evaluated with the existing 600-query probe; checkpoints
-retain 1K/2.5K/5K/10K milestones as before. The fresh pack is evaluated at endpoint,
+retain 1K/2.5K/5K/10K milestones as before, plus every H phase boundary (including
+the final newcomer-write state at 9K, before the last replay/repair phase).
+The fresh pack is evaluated at endpoint,
 saved as `fresh-final.json` and logged as `fresh/...`.
 
 Fresh crops exclude exact starts in every cached old replay observation and the

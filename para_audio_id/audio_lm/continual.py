@@ -227,8 +227,8 @@ class AdditionBatchSampler(Sampler):
         self.new_count, self.old_count = new_count, old_count
         self.arm, self.steps, self.start = arm, steps, start
         self.microbatch, self.accumulation, self.seed = microbatch, accumulation, seed
-        if arm not in "ABC" or len(arm) != 1 or microbatch % 2:
-            raise ValueError("Use arm A/B/C and an even microbatch")
+        if arm not in "ABCDE" or len(arm) != 1 or microbatch % 2:
+            raise ValueError("Use arm A/B/C/D/E and an even microbatch")
 
     def __len__(self):
         return (self.steps - self.start) * self.accumulation

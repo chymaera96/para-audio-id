@@ -23,6 +23,9 @@ from para_audio_id.audio_lm.dataset import collate_causal_documents
 from para_audio_id.audio_lm.evaluation import _checkpoint_tokenizer
 from para_audio_id.audio_lm.losses import degraded_causal_base_losses
 from para_audio_id.audio_lm.random_crops import OnlineTrackDataset
+from para_audio_id.audio_lm.continual_replay import (
+    CachedAdditionCollator, ReplayCache, prepare_replay, preservation_loss,
+)
 
 
 def pilot_data(directory):
@@ -94,7 +97,11 @@ def train(args):
     old = [CatalogueRecord(**r) for r in manifest["old"]]
     new = [CatalogueRecord(**r) for r in manifest["new"]]
     buffer = set(manifest["replay_ids"])
-    replay = [] if args.arm == "A" else old if args.arm == "B" else [r for r in old if r.track_id in buffer]
+    replay = [] if args.arm == "A" else old if args.arm in "BDE" else [r for r in old if r.track_id in buffer]
+    fixed = None
+    if args.arm in "DE":
+        fixed = ReplayCache(args.replay_cache or Path(args.pilot) / "replay-cache-v1", manifest)
+        replay = [r for r in old if r.track_id in fixed.pairs]
     all_records = old + new
     mapping = __import__("hashlib").sha256(
         "\n".join(f"{r.track_id}:{r.code}" for r in all_records).encode()).hexdigest()
@@ -108,6 +115,12 @@ def train(args):
                     precision=str(dtype), source_sha256=manifest["source_sha256"],
                     old_tracks=len(old), new_tracks=len(new), replay_tracks=len(replay),
                     augmentation=full_schedule(source))
+    if fixed is not None:
+        contract.update(replay_cache_sha256=fixed.sha256,
+            replay_protocol=fixed.manifest["protocol"],
+            preservation_weight=args.preservation_weight if args.arm == "E" else 0.0,
+            preservation="teacher_correct_digits_eos_grouped_kl_v1" if args.arm == "E" else "none",
+            replay_uncovered_ids=fixed.manifest["uncovered_ids"])
     contract_sha = digest(contract)
     state = dict(contract_sha256=contract_sha, contract=contract, update_step=0,
                  source_global_step=manifest["source_global_step"], learning_rate=lr,
@@ -143,7 +156,9 @@ def train(args):
     dataset = OnlineTrackDataset(new + replay)
     sampler = AdditionBatchSampler(len(new), len(replay), arm=args.arm, steps=args.steps,
                                    start=state["update_step"], seed=seed)
-    collator = AdditionCollator(new, replay, audio_root=cfg["data"]["audio_root"],
+    collator_class = CachedAdditionCollator if fixed is not None else AdditionCollator
+    collator = collator_class(new, replay, **({"cache": fixed} if fixed is not None else {}),
+        audio_root=cfg["data"]["audio_root"],
         noise_assets=noise, rir_assets=room, schedule=contract["augmentation"],
         sample_rate=tokenizer.sample_rate, crop_duration=2.0, past_context_duration=2.0,
         seed=seed, reserved_starts=reserved)
@@ -155,7 +170,8 @@ def train(args):
     if args.wandb_online:
         import wandb
         logger = wandb.init(project="para-audio-id", id=run_id, name=run_id,
-            group="tc21-add1k-v1", job_type="continual-index", mode="online",
+            group="tc21-add1k-replay-v1" if fixed is not None else "tc21-add1k-v1",
+            job_type="continual-index", mode="online",
             resume="must" if args.resume else "never", dir=str(directory), config=contract,
             settings=wandb.Settings(_disable_stats=True))
         logger.define_metric("update_step")
@@ -197,6 +213,8 @@ def train(args):
             metadata = batch["metadata"]
             wave = batch["waveforms"].to(device, non_blocking=True)
             tokens = tokenizer.tokenize(wave)
+            if fixed is not None:
+                tokens = torch.cat([tokens.long(), batch["cached_tokens"].to(device)], dim=0)
             documents = collate_causal_documents([
                 {"audio_tokens": token, "code": row["code"], "track_id": row["track_id"],
                  "document_index": -1, "view_type": "noisy" if row["is_noisy"] else "random_clean"}
@@ -210,6 +228,20 @@ def train(args):
                     documents["boundary_target_mask"],
                     torch.tensor([r["is_noisy"] for r in metadata], device=device),
                     id_digit_weight=float(cfg["train"]["id_digit_weight"]))
+                if args.arm == "E":
+                    fresh_count = len(wave)
+                    teacher = torch.cat([torch.zeros(fresh_count, 6, 12, device=device),
+                                         batch["teacher"].to(device)], 0)
+                    eligible = torch.cat([torch.zeros(fresh_count, device=device, dtype=torch.bool),
+                                          batch["eligible"].to(device)], 0)
+                    kd = preservation_loss(logits, documents, vocabulary, teacher, eligible,
+                                           id_weight=float(cfg["train"]["id_digit_weight"]))
+                    # Use the same target-family normalization as the base loss:
+                    # preserve five ID digits plus EOS, not the ID boundary token.
+                    coefficient = metrics["digit_family_coefficient"] + .5 * metrics["boundary_family_coefficient"]
+                    loss = loss + args.preservation_weight * coefficient * kd
+                    sums["preservation_loss"] += float(kd.detach()) / 2
+                    sums["preservation_eligible_fraction"] += float(eligible.float().mean()) / 2
             if not torch.isfinite(loss):
                 raise RuntimeError(f"Non-finite loss at update {step}")
             scaler.scale(loss / 2).backward()
@@ -246,6 +278,10 @@ def train(args):
                     "cost/new_exposures": row["new_exposures"],
                     "cost/gpu_hours": row["elapsed_seconds"] / 3600,
                     "cost/seconds_per_update": seconds})
+                if args.arm == "E":
+                    logger.log({"update_step": step,
+                        "train/preservation_loss": sums["preservation_loss"],
+                        "train/preservation_eligible_fraction": sums["preservation_eligible_fraction"]})
             print(f"UPDATE {step}/{args.steps}: loss={sums['loss']:.4f}, {seconds:.3f}s, "
                   f"new draws={state['new_draws']}, old draws={state['old_draws']}", flush=True)
         milestone = step in (1000, 2500, 5000, 10000, stop)
@@ -280,7 +316,14 @@ def main():
     prep.add_argument("--monitor-tracks", type=int, default=100)
     fit = sub.add_parser("train")
     fit.add_argument("pilot")
-    fit.add_argument("--arm", choices=list("ABC"), required=True)
+    replay_prep = sub.add_parser("prepare-replay")
+    replay_prep.add_argument("pilot")
+    replay_prep.add_argument("output")
+    replay_prep.add_argument("--workers", type=int, default=8)
+    replay_prep.add_argument("--pairs-per-track", type=int, default=4)
+    fit.add_argument("--arm", choices=list("ABCDE"), required=True)
+    fit.add_argument("--replay-cache")
+    fit.add_argument("--preservation-weight", type=float, default=1.0)
     fit.add_argument("--output-root", default="/gpfs/scratch/acw723/para-audio-id/audio-lm-checkpoints")
     fit.add_argument("--run-id")
     fit.add_argument("--steps", type=int, default=10000)
@@ -298,9 +341,17 @@ def main():
     if args.command == "prepare":
         prepare(args.source, args.output, new_count=args.new_tracks,
                 buffer_count=args.buffer_tracks, monitor_count=args.monitor_tracks)
+    elif args.command == "prepare-replay":
+        if args.pairs_per_track < 1:
+            p.error("Positive pair count required")
+        pilot_data(args.pilot)
+        prepare_replay(args.pilot, args.output, workers=args.workers,
+                       pairs_per_track=args.pairs_per_track)
     elif args.command == "train":
         if args.steps < 1 or args.eval_interval < 1 or (args.stop_after is not None and args.stop_after < 1):
             p.error("Positive update counts are required")
+        if not np.isfinite(args.preservation_weight) or args.preservation_weight <= 0:
+            p.error("Preservation weight must be finite and positive")
         train(args)
     else:
         manifest, cache, _ = pilot_data(args.pilot)

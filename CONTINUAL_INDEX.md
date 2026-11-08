@@ -77,3 +77,53 @@ evaluation/resume checks are deliberately not weakened to accommodate this
 expanded-catalogue protocol. A receives twice B/C's newcomer exposures at equal
 updates; compare both GPU-hours and new-recording exposures. Preparation cost
 is shared but should be reported separately from per-arm update cost.
+
+## Fixed replay and preservation: D/E
+
+The completed A/B/C pilot motivated broad identity coverage and protection of
+degraded old decisions. D/E start again from the original tc21, not A/B/C.
+Both use 40 new + 40 old selections per update, identical draws and a shared
+immutable replay cache. New observations remain fresh; only old replay is cached.
+The existing clean causal audio loss, ID weight 16, boundary loss, constant
+source LR, fresh AdamW moments, and saturated augmentation are unchanged.
+
+```bash
+PILOT=/gpfs/scratch/acw723/para-audio-id/continual-index/tc21-add1k-v1
+python -u continual_index.py prepare-replay "$PILOT" "$PILOT/replay-cache-v1"
+python -u continual_index.py train "$PILOT" --arm D --wandb-online
+python -u continual_index.py train "$PILOT" --arm E --wandb-online
+```
+
+Preparation visits all 25K old recordings four times, with independent training
+crop/degradation keys and the original validation-start exclusions. Shards are
+atomic and resumable. Existing corrupt-audio replacements remain audited; the
+sealed manifest reports actual identity coverage, uncovered IDs, pair counts,
+category counts, preparation time, physical bytes, and source-teacher accuracy.
+More than 1% uncovered identities fails preparation. D/E sample the same covered
+old pool; they never silently substitute fresh old audio for absent cache entries.
+The cache and all teacher targets are SHA256-bound to both run contracts.
+
+D uses ground-truth supervision only. E adds source-teacher preservation on old
+documents whose original width-10, EOS-scored retrieval is correct. All replay
+documents still receive ground-truth supervision; newcomers never receive KD.
+The source model is FP32/eval during preparation and is not run during training.
+At each of five teacher-forced ID positions and EOS, cache log probabilities for
+ten digits, EOS, and the aggregate remaining-vocabulary mass. This grouped KL
+retains the full-softmax normalizer but is explicitly not a full-vocabulary KL
+or a guarantee of preserving free-running beam rankings.
+
+The default E multiplier is 1.0 (`--preservation-weight`). Per-document KL weights
+are `[16,16,16,16,16,1]`, averaged over all batch documents with zero contribution
+from new or teacher-incorrect documents, then scaled by 81/282 (the existing
+ID-plus-EOS target-family coefficient for 200 audio tokens). Base losses are not
+renormalized or reduced. E logs raw preservation loss and eligible fraction.
+Both runs use 10K updates and stable W&B IDs `tc21-add1k-d` / `tc21-add1k-e`,
+project `para-audio-id`, group `tc21-add1k-replay-v1`. Resume with `--resume`;
+changing replay content or preservation weight on resume is rejected.
+
+The raw audio-token payload is about 80 MB; compressed teacher targets add about
+29 MB, plus metadata and shard overhead. Actual storage is recorded, not inferred
+from these estimates. The tokenizer is frozen; its online FP32 policy remains
+identical to the source pilot. Held-out validation is never used to select replay
+observations or teacher targets. Use larger fresh-crop evaluation before making
+small-difference claims, then test a second disjoint newcomer cohort.
